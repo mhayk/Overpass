@@ -5,8 +5,19 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// querier is the one method Probe needs, declared here so the check can be
+// tested without a database.
+//
+// Narrow on purpose: an interface with one method has one thing to fake, and
+// the alternative — an integration test for a SELECT 1 — buys nothing the
+// readiness endpoint's own test does not already cover.
+type querier interface {
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
+}
 
 // Probe reports whether Postgres is reachable, for /readyz.
 //
@@ -16,11 +27,14 @@ import (
 // outage would turn a recoverable delay into refused customer traffic and throw
 // away the entire benefit of the outbox pattern.
 type Probe struct {
-	pool *pgxpool.Pool
+	db querier
 }
 
 // NewProbe wraps a pool.
-func NewProbe(pool *pgxpool.Pool) *Probe { return &Probe{pool: pool} }
+func NewProbe(pool *pgxpool.Pool) *Probe { return &Probe{db: pool} }
+
+// newProbeWith exists for tests, which supply their own querier.
+func newProbeWith(db querier) *Probe { return &Probe{db: db} }
 
 // Name identifies this dependency in the readiness response.
 func (p *Probe) Name() string { return "postgres" }
@@ -32,7 +46,7 @@ func (p *Probe) Name() string { return "postgres" }
 // passes against a wedged backend is worse than none.
 func (p *Probe) Check(ctx context.Context) error {
 	var one int
-	if err := p.pool.QueryRow(ctx, "SELECT 1").Scan(&one); err != nil {
+	if err := p.db.QueryRow(ctx, "SELECT 1").Scan(&one); err != nil {
 		return fmt.Errorf("postgres query failed: %w", err)
 	}
 	if one != 1 {
