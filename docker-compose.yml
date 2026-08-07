@@ -142,6 +142,33 @@ services:
     logging: *default-logging
 
   # ---------------------------------------------------------------------------
+  # Schema migrations
+  # ---------------------------------------------------------------------------
+  # Applied by a one-shot container for the same reason the NATS topology is:
+  # reviewable in a pull request, and no two services racing to create the same
+  # table. Distinct from deploy/postgres/init, which runs exactly once on an
+  # empty data directory and therefore cannot carry anything that will evolve —
+  # that file holds extensions and schema namespaces, this holds tables.
+  #
+  # Idempotent: goose applies only what is pending, so it is safe on every `up`.
+  migrate:
+    build:
+      context: ./deploy/migrate
+    container_name: overpass-migrate
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./db/migrations:/migrations:ro
+    environment:
+      GOOSE_DRIVER: postgres
+      GOOSE_MIGRATION_DIR: /migrations
+      GOOSE_DBSTRING: "host=postgres port=5432 user=${POSTGRES_USER:-overpass} password=${POSTGRES_PASSWORD:-overpass} dbname=${POSTGRES_DB:-overpass} sslmode=disable"
+    command: ["up"]
+    restart: "no"
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
   # OpenTelemetry Collector
   # ---------------------------------------------------------------------------
   # One trace must span HTTP ingress -> publish -> Python consumer -> publish ->

@@ -33,7 +33,7 @@ BUDGET_SECONDS="${BUDGET_SECONDS:-300}"
 # Long-running services that must report healthy.
 SERVICES=(postgres nats otel-collector prometheus grafana)
 # One-shot containers that must complete with exit 0.
-ONESHOT=(nats-init)
+ONESHOT=(nats-init migrate)
 
 cyan() { printf '\033[0;36m%s\033[0m\n' "$*"; }
 ok()   { printf '  \033[0;32m%-22s %s\033[0m\n' "$1" "$2"; }

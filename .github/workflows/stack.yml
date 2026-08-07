@@ -69,47 +69,31 @@ jobs:
               || { echo "::error::missing extension $required"; exit 1; }
           done
 
-      # The single most load-bearing assertion in this repository. If the
-      # exclusion constraint cannot be created, or does not reject an
-      # overlapping acquisition, then the central invariant lives in
-      # application code after all and ADR-0003 and ADR-0004 are both wrong.
-      #
-      # Note it also asserts the constraint is per-satellite: the same window
-      # on a DIFFERENT satellite must be accepted. A constraint that rejected
-      # both would look like it worked while serialising the whole
-      # constellation.
-      - name: The non-overlap invariant is enforced by the database
+      - name: Migrations were applied by the stack, not by a second command
         run: |
           set -euo pipefail
-          docker compose exec -T postgres psql -U overpass -d overpass -v ON_ERROR_STOP=1 <<'SQL'
-          CREATE TABLE planning._ci_probe (
-            id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-            satellite_id text      NOT NULL,
-            acq_window   tstzrange NOT NULL,
-            CONSTRAINT no_overlap_per_satellite
-              EXCLUDE USING gist (satellite_id WITH =, acq_window WITH &&)
-          );
-          INSERT INTO planning._ci_probe (satellite_id, acq_window)
-          VALUES ('SENTINEL-1A', tstzrange('2026-08-07 18:32:20Z','2026-08-07 18:32:33Z'));
-          SQL
+          for t in reference.satellites tasking.tasking_requests tasking.outbox \
+                   feasibility.opportunities planning.collection_plans \
+                   planning.acquisitions readmodel.processed_events; do
+            docker compose exec -T postgres psql -U overpass -d overpass -tAc \
+              "SELECT to_regclass('$t') IS NOT NULL" | grep -qx t \
+              || { echo "::error::missing table $t — did the migrate container run?"; exit 1; }
+            echo "  $t"
+          done
 
-          echo "--> an overlapping window on the SAME satellite must be rejected"
-          if docker compose exec -T postgres psql -U overpass -d overpass -v ON_ERROR_STOP=1 -c \
-            "INSERT INTO planning._ci_probe (satellite_id, acq_window)
-             VALUES ('SENTINEL-1A', tstzrange('2026-08-07 18:32:25Z','2026-08-07 18:32:40Z'));" 2>/dev/null
-          then
-            echo "::error::the exclusion constraint accepted an overlapping acquisition"
-            exit 1
-          fi
-          echo "    rejected, as required"
-
-          echo "--> the same window on a DIFFERENT satellite must be accepted"
-          docker compose exec -T postgres psql -U overpass -d overpass -v ON_ERROR_STOP=1 -c \
-            "INSERT INTO planning._ci_probe (satellite_id, acq_window)
-             VALUES ('ICEYE-X7', tstzrange('2026-08-07 18:32:25Z','2026-08-07 18:32:40Z'));"
-          echo "    accepted — the constraint is per-satellite, not global"
-
-          docker compose exec -T postgres psql -U overpass -d overpass -c "DROP TABLE planning._ci_probe;"
+      # The single most load-bearing assertion in this repository. If the
+      # exclusion constraint does not reject an overlapping acquisition, then
+      # the central invariant lives in application code after all and ADR-0003
+      # and ADR-0004 are both wrong.
+      #
+      # This used to build a throwaway table and test that, which proved
+      # Postgres can enforce an exclusion constraint — never in doubt — rather
+      # than proving anything about ours. It now runs against the real
+      # planning.acquisitions, and the script's first phase deliberately breaks
+      # the schema three ways to show the assertions have teeth before applying
+      # them to the genuine article.
+      - name: The non-overlap invariant is enforced by the database
+        run: ./scripts/db-invariants.sh
 
       - name: NATS topology was applied
         run: |
