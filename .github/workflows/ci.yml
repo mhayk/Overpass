@@ -113,7 +113,7 @@ jobs:
             echo "ready=true" >> "$GITHUB_OUTPUT"
           else
             echo "ready=false" >> "$GITHUB_OUTPUT"
-            echo "services/feasibility not yet initialised — issue #24" >> "$GITHUB_STEP_SUMMARY"
+            echo "services/feasibility not yet initialised — issue #20" >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: ruff

@@ -1,0 +1,56 @@
+[project]
+name = "feasibility-service"
+version = "0.1.0"
+description = "SGP4 propagation, access-window search, and SAR acquisition geometry"
+requires-python = ">=3.12"
+
+# httpx rather than requests: it is the only HTTP client here, and it gives an
+# async path for free when the Celestrak fetch stops being a startup-time
+# operation. What it costs is one more dependency than the standard library —
+# urllib would do the job, at the price of hand-rolling timeouts, retries and
+# connection reuse, which is exactly the code nobody reviews carefully.
+dependencies = [
+    "httpx>=0.28,<0.29",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3,<9",
+    "pytest-cov>=6.0,<7",
+    "mypy>=1.14,<2",
+    "ruff>=0.9,<0.10",
+    "respx>=0.22,<0.23",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/feasibility"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "A", "C4", "SIM", "RUF", "ANN"]
+# ANN101/ANN102 (self/cls annotations) are deprecated in ruff and add noise.
+ignore = ["ANN401"]
+
+# No per-file ignores for tests. CLAUDE.md says mypy strict, and an exception
+# carved out for the test suite would mean the least-typed code in the
+# repository is the code whose job is to catch wrong assumptions.
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unreachable = true
+# The physics is the point. An untyped def in the geometry module is a hole in
+# exactly the code most likely to be plausibly wrong.
+disallow_untyped_defs = true
+files = ["src", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers --strict-config"
