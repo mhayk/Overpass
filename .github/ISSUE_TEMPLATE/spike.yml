@@ -1,0 +1,29 @@
+name: Spike
+description: A time-boxed investigation with a written outcome
+labels: ["type/spike"]
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: What we need to know
+    validations:
+      required: true
+
+  - type: input
+    id: timebox
+    attributes:
+      label: Time box
+      description: A spike without a time box is just unplanned work.
+      placeholder: "4 hours"
+    validations:
+      required: true
+
+  - type: textarea
+    id: output
+    attributes:
+      label: Deliverable
+      description: >-
+        A spike produces a written finding, not code. Name where it lands — an
+        ADR, a section of a doc, a benchmark result.
+    validations:
+      required: true

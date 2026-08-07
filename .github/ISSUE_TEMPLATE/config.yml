@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Architecture decisions
+    url: https://github.com/mhayk/Overpass/tree/main/docs/decisions
+    about: Read the ADRs before proposing a change to an existing decision.
+  - name: Contracts
+    url: https://github.com/mhayk/Overpass/tree/main/contracts
+    about: Event schemas and OpenAPI are the source of truth. Start here.
