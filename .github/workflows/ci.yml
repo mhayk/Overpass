@@ -203,6 +203,27 @@ jobs:
           sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
           shellcheck --severity=warning scripts/*.sh deploy/nats/*.sh
 
+      # A script committed without its executable bit fails on the runner with
+      # "Permission denied" and exit 126 — which reads like a broken script
+      # rather than a broken file mode, and costs a CI round trip to work out.
+      # It is an easy mistake to make from Windows, where `chmod +x` in the
+      # working tree does not reach the index without `git update-index`.
+      - name: Every script is executable
+        run: |
+          set -euo pipefail
+          missing=0
+          for f in scripts/*.sh deploy/nats/*.sh; do
+            if [[ ! -x "$f" ]]; then
+              echo "::error file=$f::not executable — run: git update-index --chmod=+x $f"
+              missing=$((missing + 1))
+            fi
+          done
+          if [[ "$missing" -gt 0 ]]; then
+            echo "$missing script(s) missing the executable bit"
+            exit 1
+          fi
+          echo "all scripts executable"
+
       # The gate's own tests. They are a pure function of a changed-file list,
       # so they need no repository state and run in milliseconds — there is no
       # reason for them to live anywhere but next to the linter that guards the
