@@ -32,6 +32,32 @@ jobs:
     name: go — lint, vet, test
     runs-on: ubuntu-latest
     timeout-minutes: 20
+
+    # A real Postgres, because the idempotency guarantee is a property of a
+    # unique constraint under concurrency and there is no useful fake for that.
+    #
+    # It also keeps the coverage gate honest. Without a database the store's
+    # integration tests skip, roughly sixty statements count as untested, and
+    # the overall figure drops below the floor — for code that IS tested, just
+    # not here. Lowering the floor would have been the wrong fix.
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_USER: overpass
+          POSTGRES_PASSWORD: overpass
+          POSTGRES_DB: overpass
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U overpass -d overpass"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      OVERPASS_TEST_DSN: postgres://overpass:overpass@localhost:5432/overpass
+
     steps:
       - uses: actions/checkout@v4
 
@@ -39,6 +65,16 @@ jobs:
         with:
           go-version: '1.25'
           cache-dependency-path: '**/go.sum'
+
+      # Extensions, schemas and tables, in that order — the same two sources the
+      # compose stack uses, so CI and a developer laptop cannot drift.
+      - name: Prepare the database
+        run: |
+          set -euo pipefail
+          export PGPASSWORD=overpass
+          psql -h localhost -U overpass -d overpass -v ON_ERROR_STOP=1             -f deploy/postgres/init/01-extensions.sql
+          go install github.com/pressly/goose/v3/cmd/goose@v3.27.3
+          "$(go env GOPATH)/bin/goose" -dir db/migrations postgres "$OVERPASS_TEST_DSN" up
 
       - name: Discover Go modules
         id: modules

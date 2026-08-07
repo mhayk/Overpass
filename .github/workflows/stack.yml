@@ -115,6 +115,18 @@ jobs:
           cd services/feasibility
           uv run pytest tests/test_idempotency.py tests/test_worker.py tests/test_relay.py -v
 
+      # The tasking-api concurrency test is the same shape of proof: idempotency
+      # under N simultaneous clients is a property of a database constraint, and
+      # dropping that constraint makes this fail with sixteen duplicate requests.
+      - name: Idempotency under concurrency, against the real database
+        if: hashFiles('services/tasking-api/go.mod') != ''
+        env:
+          OVERPASS_TEST_DSN: postgres://overpass:overpass@localhost:5433/overpass
+        run: |
+          cd services/tasking-api
+          go test ./internal/adapter/postgres/... -v -run 'Concurrent|Conflict|Atomic|Purged'
+
+
       - name: NATS topology was applied
         run: |
           set -euo pipefail

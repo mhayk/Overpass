@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/mhayk/overpass/services/tasking-api/internal/app"
 	"github.com/mhayk/overpass/services/tasking-api/internal/domain"
+	"github.com/mhayk/overpass/services/tasking-api/internal/port"
 )
 
 // maxBodyBytes caps an inbound submission.
@@ -60,7 +62,32 @@ type geoJSONGeometry struct {
 func (s *Server) submit(w http.ResponseWriter, r *http.Request) {
 	log := LoggerFrom(r.Context(), s.log)
 
-	body, problem := decodeSubmit(r)
+	// Required, not optional. Optional means the default behaviour is unsafe
+	// under retry, and clients discover that in production — the customer pays
+	// twice and gets one image.
+	key := r.Header.Get("Idempotency-Key")
+	if !domain.IdempotencyKeyValid(key) {
+		s.writeProblem(w, r, badRequest(
+			"Idempotency-Key header is required and must be 8-128 characters of [A-Za-z0-9._~-]"))
+		return
+	}
+
+	raw, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodyBytes))
+	if err != nil {
+		s.writeProblem(w, r, badRequest("request body exceeds the 1 MiB limit"))
+		return
+	}
+
+	// Fingerprint BEFORE decoding, over the canonical form. A digest of the raw
+	// bytes would make a retry that reserialised — which many HTTP clients do —
+	// look like a different request and earn a 409.
+	fingerprint, err := domain.FingerprintBody(raw)
+	if err != nil {
+		s.writeProblem(w, r, badRequest("request body is not valid JSON: "+err.Error()))
+		return
+	}
+
+	body, problem := decodeSubmit(raw)
 	if problem != nil {
 		s.writeProblem(w, r, *problem)
 		return
@@ -72,8 +99,15 @@ func (s *Server) submit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, validation, err := s.submitter.Submit(r.Context(), req)
+	result, validation, err := s.submitter.Submit(r.Context(), req, key, fingerprint)
 	switch {
+	case errors.Is(err, port.ErrIdempotencyConflict):
+		// The key was reused with a different body. A client bug, surfaced
+		// rather than swallowed — silently replaying would discard a request
+		// the customer believes they submitted.
+		log.Warn("idempotency key reused with a different body")
+		s.writeProblem(w, r, idempotencyConflict())
+		return
 	case err != nil && errors.Is(err, app.ErrNotPersisted):
 		// The one case where the customer must NOT be told yes.
 		log.Error("submission not persisted", slog.Any("error", err))
@@ -92,8 +126,16 @@ func (s *Server) submit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Info("submission accepted", slog.String("request_id", result.RequestID))
+	log.Info("submission accepted",
+		slog.String("request_id", result.RequestID),
+		slog.Bool("replayed", result.Replayed),
+	)
 	w.Header().Set("Location", "/v1/tasking-requests/"+result.RequestID)
+	if result.Replayed {
+		// So a client can tell a retry from a first submission. Without it,
+		// nobody can debug a suspected double charge.
+		w.Header().Set("Idempotency-Replayed", "true")
+	}
 	if err := writeJSON(w, http.StatusAccepted, map[string]any{
 		"request_id":   result.RequestID,
 		"state":        result.State,
@@ -103,21 +145,16 @@ func (s *Server) submit(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// decodeSubmit reads the body, refusing anything it cannot understand.
-func decodeSubmit(r *http.Request) (submitBody, *Problem) {
+// decodeSubmit parses the body, refusing anything it cannot understand.
+func decodeSubmit(raw []byte) (submitBody, *Problem) {
 	var body submitBody
 
-	decoder := json.NewDecoder(http.MaxBytesReader(nil, r.Body, maxBodyBytes))
+	decoder := json.NewDecoder(bytes.NewReader(raw))
 	// Unknown fields are an error, not a shrug. A customer who typed
 	// "bid_credit" and got a 202 has been told their bid was accepted at zero.
 	decoder.DisallowUnknownFields()
 
 	if err := decoder.Decode(&body); err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
-			p := badRequest("request body exceeds the 1 MiB limit")
-			return body, &p
-		}
 		p := badRequest("request body is not valid JSON for this endpoint: " + err.Error())
 		return body, &p
 	}

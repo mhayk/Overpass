@@ -21,16 +21,42 @@ type fakeStore struct {
 	err    error
 	saved  int
 	lastID string
+	// claims mimics the unique constraint: key -> fingerprint and the request
+	// it created. A map is not a substitute for the real constraint under
+	// concurrency, which is why the concurrency test runs against Postgres.
+	claims map[string]claimRecord
 }
 
-func (f *fakeStore) Save(_ context.Context, req port.StoredRequest, _ port.OutboxEvent) error {
+type claimRecord struct {
+	fingerprint string
+	requestID   string
+}
+
+func (f *fakeStore) Save(
+	_ context.Context, claim port.IdempotencyClaim, req port.StoredRequest, _ port.OutboxEvent,
+) (port.Replay, error) {
 	if f.err != nil {
-		return f.err
+		return port.Replay{}, f.err
 	}
+	if f.claims == nil {
+		f.claims = map[string]claimRecord{}
+	}
+	if existing, taken := f.claims[claim.CustomerID+"/"+claim.Key]; taken {
+		if existing.fingerprint != claim.Fingerprint {
+			return port.Replay{}, port.ErrIdempotencyConflict
+		}
+		return port.Replay{
+			Replayed: true, RequestID: existing.requestID,
+			State: "RECEIVED", SubmittedAt: submitNow,
+		}, nil
+	}
+	f.claims[claim.CustomerID+"/"+claim.Key] = claimRecord{claim.Fingerprint, req.RequestID}
 	f.saved++
 	f.lastID = req.RequestID
-	return nil
+	return port.Replay{}, nil
 }
+
+func (f *fakeStore) PurgeExpiredKeys(context.Context, time.Time) (int64, error) { return 0, nil }
 
 type fixedClock struct{ t time.Time }
 
@@ -60,9 +86,17 @@ const validBody = `{
 
 func post(t *testing.T, h http.Handler, body string) *httptest.ResponseRecorder {
 	t.Helper()
+	return postWithKey(t, h, body, "idem-key-00000001")
+}
+
+func postWithKey(t *testing.T, h http.Handler, body, key string) *httptest.ResponseRecorder {
+	t.Helper()
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/v1/tasking-requests",
 		strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	if key != "" {
+		req.Header.Set("Idempotency-Key", key)
+	}
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	return rec
@@ -235,5 +269,104 @@ func TestAnOversizedBodyIsRefused(t *testing.T) {
 	huge := `{"customer_id": "` + strings.Repeat("a", 2<<20) + `"}`
 	if rec := post(t, submitServer(t, &fakeStore{}), huge); rec.Code != http.StatusBadRequest {
 		t.Fatalf("got %d, want 400 for an oversized body", rec.Code)
+	}
+}
+
+func TestTheIdempotencyKeyIsRequired(t *testing.T) {
+	// Required, not optional. Optional means the default is unsafe under retry
+	// and clients find out in production.
+	if rec := postWithKey(t, submitServer(t, &fakeStore{}), validBody, ""); rec.Code != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400 with no Idempotency-Key", rec.Code)
+	}
+}
+
+func TestAMalformedIdempotencyKeyIsRejected(t *testing.T) {
+	for _, key := range []string{"short", strings.Repeat("a", 129), "has spaces", "has/slash"} {
+		if rec := postWithKey(t, submitServer(t, &fakeStore{}), validBody, key); rec.Code != http.StatusBadRequest {
+			t.Errorf("key %q got %d, want 400", key, rec.Code)
+		}
+	}
+}
+
+func TestAnIdenticalRetryReplaysTheOriginalResponse(t *testing.T) {
+	store := &fakeStore{}
+	server := submitServer(t, store)
+
+	first := postWithKey(t, server, validBody, "retry-key-000001")
+	second := postWithKey(t, server, validBody, "retry-key-000001")
+
+	if first.Code != http.StatusAccepted || second.Code != http.StatusAccepted {
+		t.Fatalf("got %d then %d, want 202 both times", first.Code, second.Code)
+	}
+	if store.saved != 1 {
+		t.Fatalf("a retry created %d requests", store.saved)
+	}
+	if decode(t, first.Body.Bytes())["request_id"] != decode(t, second.Body.Bytes())["request_id"] {
+		t.Fatal("the retry returned a different request_id")
+	}
+	if second.Header().Get("Idempotency-Replayed") != "true" {
+		t.Fatal("the replay was not declared, so a client cannot tell it from a first submission")
+	}
+	if first.Header().Get("Idempotency-Replayed") != "" {
+		t.Fatal("the first submission was labelled a replay")
+	}
+}
+
+func TestAReorderedButIdenticalBodyStillReplays(t *testing.T) {
+	// Many HTTP clients reserialise before retrying. A digest over raw bytes
+	// would turn that into a 409 for a retry that is genuinely identical.
+	reordered := `{
+	  "requested_modes": ["STRIPMAP"],
+	  "bid_credits": 1200,
+	  "priority_tier": "COMMERCIAL",
+	  "window": {"end": "2026-08-08T13:00:00Z", "start": "2026-08-07T13:00:00Z"},
+	  "target": {"coordinates": [4.4, 51.9], "type": "Point"},
+	  "target_name": "Port of Rotterdam",
+	  "customer_id": "acme"
+	}`
+	store := &fakeStore{}
+	server := submitServer(t, store)
+
+	postWithKey(t, server, validBody, "reorder-key-0001")
+	second := postWithKey(t, server, reordered, "reorder-key-0001")
+
+	if second.Code != http.StatusAccepted {
+		t.Fatalf("got %d, want 202: %s", second.Code, second.Body)
+	}
+	if store.saved != 1 {
+		t.Fatalf("a reordered retry created %d requests", store.saved)
+	}
+}
+
+func TestTheSameKeyWithADifferentBodyIs409(t *testing.T) {
+	// A client bug that must surface. Silently replaying would discard a
+	// request the customer believes they submitted.
+	store := &fakeStore{}
+	server := submitServer(t, store)
+	different := strings.Replace(validBody, `"bid_credits": 1200`, `"bid_credits": 9999`, 1)
+
+	postWithKey(t, server, validBody, "conflict-key-001")
+	second := postWithKey(t, server, different, "conflict-key-001")
+
+	if second.Code != http.StatusConflict {
+		t.Fatalf("got %d, want 409: %s", second.Code, second.Body)
+	}
+	if decode(t, second.Body.Bytes())["reason_code"] != "IDEMPOTENCY_KEY_CONFLICT" {
+		t.Fatalf("wrong reason code: %s", second.Body)
+	}
+	if store.saved != 1 {
+		t.Fatalf("the conflicting submission was stored anyway (%d saves)", store.saved)
+	}
+}
+
+func TestDifferentKeysCreateDifferentRequests(t *testing.T) {
+	store := &fakeStore{}
+	server := submitServer(t, store)
+
+	postWithKey(t, server, validBody, "key-aaaaaaaa0001")
+	postWithKey(t, server, validBody, "key-bbbbbbbb0002")
+
+	if store.saved != 2 {
+		t.Fatalf("two distinct keys produced %d requests", store.saved)
 	}
 }
