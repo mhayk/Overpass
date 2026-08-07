@@ -100,15 +100,20 @@ jobs:
       # It lives here rather than in the `ci` workflow for that reason — the
       # per-language job has no database, and a version of these tests with a
       # fake connection would be testing the mock.
-      - name: Effectively-once processing, against the real database
+      # The idempotency guarantee is a property of a transaction, a unique
+      # constraint and a real durable consumer. There is no useful version of
+      # these with a mocked broker: what is under test is that JetStream
+      # redelivers, the dedup absorbs it, and the ack reaches the server.
+      - name: Effectively-once processing, against the real stack
         if: hashFiles('services/feasibility/pyproject.toml') != ''
         env:
           OVERPASS_TEST_DSN: postgres://overpass:overpass@localhost:5433/overpass
+          OVERPASS_TEST_NATS: nats://localhost:4222
         run: |
           curl -LsSf https://astral.sh/uv/install.sh | sh
           export PATH="$HOME/.local/bin:$PATH"
           cd services/feasibility
-          uv run pytest tests/test_idempotency.py -v
+          uv run pytest tests/test_idempotency.py tests/test_worker.py -v
 
       - name: NATS topology was applied
         run: |
