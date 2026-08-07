@@ -1,0 +1,68 @@
+name: Feature
+description: A new capability, tied to a milestone
+labels: ["type/feature"]
+body:
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Why this exists, in one or two sentences. What breaks or stays impossible without it.
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: >-
+        Checkboxes, each testable. "Works correctly" is not a criterion — name
+        the observable behaviour and how it is checked.
+      value: |
+        - [ ] 
+        - [ ] 
+        - [ ] 
+    validations:
+      required: true
+
+  - type: textarea
+    id: decisions
+    attributes:
+      label: Engineering decisions
+      description: >-
+        The choices this work forces, and whether any needs an ADR. MANDATORY,
+        even when the answer is "none" — the point is that the question is always
+        asked. Optional sections never get filled in.
+
+        This is also the handoff mechanism: whoever picks this up later inherits
+        the reasoning instead of re-deriving it and landing somewhere subtly
+        different.
+      placeholder: |
+        - Chose X over Y because ... . Costs us ... .
+        - Needs an ADR: yes/no. If yes, which number.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: risk
+    attributes:
+      label: Risk
+      description: >-
+        This is not severity. It selects the VERIFICATION STRATEGY. `high` means
+        generated code here is likely to look plausible and be wrong — orbital
+        geometry, concurrency safety, allocation invariants — and therefore gets
+        property-based or golden-reference tests rather than example tests.
+      options:
+        - "low — mechanical or well-understood"
+        - "medium — non-trivial, failure modes are visible"
+        - "high — correctness is hard and failure is SILENT"
+    validations:
+      required: true
+
+  - type: textarea
+    id: verification
+    attributes:
+      label: How will this be verified?
+      description: >-
+        For risk/high, name the ORACLE. If the answer is "the current output of
+        the code", that is a snapshot, not a test — it asserts the code still
+        does what it did yesterday, including if yesterday was wrong.

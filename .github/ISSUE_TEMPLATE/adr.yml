@@ -1,0 +1,31 @@
+name: ADR
+description: A decision that needs recording
+labels: ["type/adr"]
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: The question
+      description: Phrased as a question. What forced a decision here?
+    validations:
+      required: true
+
+  - type: textarea
+    id: options
+    attributes:
+      label: Options under consideration
+      description: >-
+        At least two, and at least one that is genuinely tempting. An ADR whose
+        alternatives are all obviously bad is an argument, not a decision.
+    validations:
+      required: true
+
+  - type: textarea
+    id: confirmation
+    attributes:
+      label: What would prove this wrong?
+      description: >-
+        Required. A decision nothing could falsify is a preference wearing a
+        decision's clothes.
+    validations:
+      required: true

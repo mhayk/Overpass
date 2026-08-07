@@ -1,0 +1,47 @@
+name: labels
+
+on:
+  push:
+    branches: [main]
+    paths: ['.github/labels.yml']
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  sync:
+    name: sync labels from .github/labels.yml
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Sync
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Upsert only — labels are never deleted here. A label removed from
+          # this file but still attached to closed issues would silently rewrite
+          # history if the sync pruned it.
+          python3 - <<'PY' > /tmp/labels.tsv
+          import re, sys
+          name = color = desc = None
+          out = []
+          for line in open('.github/labels.yml'):
+              line = line.rstrip('\n')
+              if m := re.match(r'^- name:\s*"(.+)"', line):
+                  if name: out.append((name, color, desc))
+                  name, color, desc = m.group(1), '', ''
+              elif m := re.match(r'^\s+color:\s*"(.+)"', line):
+                  color = m.group(1)
+              elif m := re.match(r'^\s+description:\s*"(.+)"', line):
+                  desc = m.group(1)
+          if name: out.append((name, color, desc))
+          for n, c, d in out:
+              print(f"{n}\t{c}\t{d}")
+          PY
+          while IFS=$'\t' read -r n c d; do
+            [ -z "$n" ] && continue
+            gh label create "$n" --color "$c" --description "$d" --force
+          done < /tmp/labels.tsv
