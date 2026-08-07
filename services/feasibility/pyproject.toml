@@ -26,6 +26,7 @@ dev = [
     "mypy>=1.14,<2",
     "ruff>=0.9,<0.10",
     "respx>=0.22,<0.23",
+    "pytest-asyncio>=0.25,<2",
 ]
 
 [build-system]
@@ -60,6 +61,8 @@ files = ["src", "tests"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --strict-markers --strict-config"
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
 
 # Neither Skyfield nor sgp4 ships a py.typed marker, so mypy cannot see their
 # signatures. Declared per-module rather than by relaxing strictness globally:

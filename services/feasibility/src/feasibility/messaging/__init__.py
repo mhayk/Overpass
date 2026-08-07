@@ -19,16 +19,30 @@ from feasibility.messaging.outbox import (
     mark_published,
     record_failure,
 )
+from feasibility.messaging.worker import (
+    CONSUMER,
+    STREAM,
+    WorkerConfig,
+    delivery_from,
+    handle_one,
+    run,
+)
 
 __all__ = [
+    "CONSUMER",
+    "STREAM",
     "Delivery",
     "NonRetryableError",
     "OutboxMessage",
     "Outcome",
+    "WorkerConfig",
     "already_processed",
     "claim_unpublished",
+    "delivery_from",
     "enqueue",
+    "handle_one",
     "mark_published",
     "process_once",
     "record_failure",
+    "run",
 ]
