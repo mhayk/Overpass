@@ -1,0 +1,769 @@
+openapi: 3.0.3
+
+# NOTE ON VERSION: this document is OpenAPI 3.0.3, not 3.1, even though the
+# event schemas in contracts/events/ are JSON Schema 2020-12. 3.1 would align
+# the two dialects exactly, which is the version we would prefer. It is not
+# used because oapi-codegen's 3.1 support is still immature, and a generator
+# that silently mis-generates is worse than a dialect mismatch we have written
+# down. The practical cost is small: 3.0's schema subset differs from 2020-12
+# mainly in `nullable` versus type unions, and `examples` versus `example`.
+# Revisit when oapi-codegen 3.1 support is stable.
+
+info:
+  title: Overpass Tasking API
+  version: 1.0.0
+  description: |
+    REST ingress for satellite tasking requests.
+
+    ## What this service is for
+
+    `tasking-api` is the availability-leaning edge of Overpass
+    (see ADR-0003). Its single job is to **never drop a customer request and
+    never block on computation**. It validates, persists, and publishes — and
+    returns. Feasibility and planning happen asynchronously, downstream.
+
+    This is why `POST /v1/tasking-requests` returns **202 Accepted**, not 201
+    Created with a plan. At submission time nobody knows whether the target is
+    imageable; finding out requires propagating the whole constellation. A
+    synchronous answer would mean an ingress latency budget governed by orbital
+    mechanics, which is exactly the coupling this architecture exists to avoid.
+
+    ## Request lifecycle
+
+    ```
+                      POST /v1/tasking-requests
+                                 |
+                            [validation]
+                             /         \
+                     (invalid)          (valid)
+                        |                  |
+                    REJECTED            RECEIVED  --- 202 Accepted
+                   (terminal)              |
+                                    [feasibility sweep]
+                                     /            \
+                        (no access / stale)     (opportunities found)
+                              |                        |
+                          INFEASIBLE            AWAITING_PLANNING
+                          (terminal)              /          \
+                                          (won round)      (lost round)
+                                              |                |
+                                           PLANNED       AWAITING_PLANNING
+                                              |           (ages, retries)
+                                     [simulated execution]        |
+                                              |             (deadline passes)
+                                          ACQUIRED                |
+                                          (terminal)           EXPIRED
+                                                               (terminal)
+
+    CANCELLED is reachable from RECEIVED, AWAITING_PLANNING, and PLANNED.
+    ```
+
+    Two distinctions the API takes seriously because they have different
+    customer remedies:
+
+    - **REJECTED** — the request never entered the pipeline. Fix your input.
+    - **INFEASIBLE** — the physics says no. No bid will change this.
+    - **AWAITING_PLANNING after losing a round** — you competed and lost.
+      Raise your bid, widen your window, or accept more imaging modes. The
+      `unfulfilment` field tells you which, with numbers.
+
+    ## Idempotency
+
+    `POST /v1/tasking-requests` **requires** an `Idempotency-Key` header. The
+    key is stored under a unique constraint in the same transaction as the
+    request. A replay with the same key and the same body returns the original
+    `202` and its original `request_id` — it does not create a second request.
+    A replay with the same key and a *different* body returns `409`, because
+    that is a client bug and silently treating it as a replay would lose a
+    request the customer believes they submitted.
+
+    Keys are scoped per `customer_id` and expire after 24 hours.
+
+    ## Not in scope, deliberately
+
+    No authentication, no multi-tenancy, no rate limiting by principal, no
+    billing. `customer_id` is a stub carried on the request body. These are
+    scope cuts stated in the README, not oversights.
+
+  contact:
+    name: Overpass
+    url: https://github.com/mhayk/Overpass
+  license:
+    name: MIT
+
+servers:
+  - url: http://localhost:8080
+    description: Local Docker Compose
+
+tags:
+  - name: tasking-requests
+    description: Submit and inspect tasking requests
+  - name: operations
+    description: Liveness and readiness
+
+paths:
+  /v1/tasking-requests:
+    post:
+      operationId: submitTaskingRequest
+      tags: [tasking-requests]
+      summary: Submit a tasking request
+      description: |
+        Validates the request, persists it, and writes an outbox row in a single
+        transaction. Returns immediately with `202 Accepted` and a state of
+        `RECEIVED`.
+
+        Validation here is deliberately *cheap and local*: field-level checks,
+        deadline in the future, window ordering, geometry well-formed, and
+        constraints that no configured sensor could ever satisfy. It does **not**
+        check whether the target is actually imageable — that requires orbital
+        propagation and is the whole reason this endpoint is asynchronous.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SubmitTaskingRequest'
+            examples:
+              wildfire:
+                summary: Civil-protection point target, urgent
+                value:
+                  customer_id: civil-protection-pt
+                  target_name: Serra da Estrela wildfire perimeter
+                  target:
+                    type: Point
+                    coordinates: [-7.6167, 40.3167]
+                  window:
+                    start: '2026-08-07T10:00:00Z'
+                    end: '2026-08-08T10:00:00Z'
+                  priority_tier: CIVIL_PROTECTION
+                  bid_credits: 4500
+                  requested_modes: [SPOTLIGHT, STRIPMAP]
+                  constraints:
+                    look_side: ANY
+                    max_incidence_deg: 40
+              commercial_area:
+                summary: Commercial polygon target, wide-area
+                value:
+                  customer_id: acme-imaging
+                  target_name: Port of Rotterdam
+                  target:
+                    type: Polygon
+                    coordinates:
+                      - [[4.02, 51.92], [4.18, 51.92], [4.18, 51.99], [4.02, 51.99], [4.02, 51.92]]
+                  window:
+                    start: '2026-08-07T00:00:00Z'
+                    end: '2026-08-14T00:00:00Z'
+                  priority_tier: COMMERCIAL
+                  bid_credits: 12000
+                  requested_modes: [SCAN]
+      responses:
+        '202':
+          description: |
+            Accepted. The request is durably persisted and the
+            `tasking.request.received.v1` event will be published by the outbox
+            relay. Also returned for an idempotent replay of an identical
+            submission, in which case `Idempotency-Replayed: true` is set.
+          headers:
+            Location:
+              schema: { type: string, format: uri-reference }
+              description: URL of the created request resource.
+            Idempotency-Replayed:
+              schema: { type: boolean }
+              description: Present and true when this response was replayed from a stored idempotency key rather than newly created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskingRequestAccepted'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/IdempotencyConflict'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+    get:
+      operationId: listTaskingRequests
+      tags: [tasking-requests]
+      summary: List tasking requests
+      description: |
+        Cursor-paginated. Offset pagination is not offered: this list is ordered
+        by submission time and grows continuously at the head, so offsets shift
+        under the reader and produce duplicates and gaps. An opaque cursor is
+        stable under concurrent inserts.
+      parameters:
+        - name: customer_id
+          in: query
+          schema:
+            $ref: '#/components/schemas/CustomerId'
+        - name: state
+          in: query
+          description: Repeatable. Multiple values are OR-ed.
+          schema:
+            type: array
+            items:
+              $ref: '#/components/schemas/RequestState'
+          style: form
+          explode: true
+        - name: submitted_after
+          in: query
+          schema: { type: string, format: date-time }
+        - name: submitted_before
+          in: query
+          schema: { type: string, format: date-time }
+        - name: cursor
+          in: query
+          description: Opaque cursor from a previous response's `next_cursor`. Not a page number and not parseable.
+          schema: { type: string, maxLength: 512 }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        '200':
+          description: A page of tasking requests, newest first.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskingRequestPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /v1/tasking-requests/{request_id}:
+    parameters:
+      - $ref: '#/components/parameters/RequestId'
+    get:
+      operationId: getTaskingRequest
+      tags: [tasking-requests]
+      summary: Get a tasking request and its current state
+      description: |
+        Returns the write-model view: what was submitted, what state it is in,
+        and — if it lost a planning round — a structured explanation of which
+        constraint bound.
+
+        This endpoint deliberately does **not** return the collection plan.
+        Plans are read-side data served by `plan-gateway`, which is eventually
+        consistent and separately scalable (CQRS-lite, ADR-0003). Serving plans
+        here would put read load on the availability-critical ingress path.
+      responses:
+        '200':
+          description: The tasking request.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskingRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/tasking-requests/{request_id}/cancellation:
+    parameters:
+      - $ref: '#/components/parameters/RequestId'
+    post:
+      operationId: cancelTaskingRequest
+      tags: [tasking-requests]
+      summary: Cancel a tasking request
+      description: |
+        Modelled as a sub-resource rather than `DELETE`, because cancelling is a
+        state transition that must be recorded, not a deletion. The request
+        remains readable afterwards — a customer needs to see that their
+        cancellation took effect, and the operator needs the audit trail.
+
+        Cancellation is asynchronous with respect to planning. Cancelling a
+        request that already holds an acquisition in a committed plan does not
+        retroactively rewrite that plan; it releases the slot at the next round
+        for that bucket.
+      responses:
+        '202':
+          description: Cancellation accepted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskingRequestAccepted'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: |
+            The request is in a terminal state (`ACQUIRED`, `REJECTED`,
+            `INFEASIBLE`, `EXPIRED`, or already `CANCELLED`) and cannot be
+            cancelled.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /healthz:
+    get:
+      operationId: getLiveness
+      tags: [operations]
+      summary: Liveness probe
+      description: Process is up. Checks nothing external — a liveness probe that fails on a dependency outage causes a restart loop that makes the outage worse.
+      responses:
+        '200':
+          description: Alive.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatus'
+
+  /readyz:
+    get:
+      operationId: getReadiness
+      tags: [operations]
+      summary: Readiness probe
+      description: |
+        Ready to accept traffic. Checks Postgres connectivity, because a request
+        that cannot be persisted must not be accepted — returning 202 for a
+        request we dropped would be the single worst thing this service could do.
+
+        Deliberately does **not** check NATS. The outbox decouples publication
+        from acceptance: with NATS down, requests are still persisted and drain
+        when the relay reconnects. Failing readiness on a broker outage would
+        turn a recoverable delay into refused customer traffic, discarding the
+        entire benefit of the outbox pattern.
+      responses:
+        '200':
+          description: Ready.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatus'
+        '503':
+          description: Not ready.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatus'
+
+components:
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: |
+        Client-generated key, unique per logical submission. Required, not
+        optional: making it optional means the default behaviour is unsafe under
+        retry, and clients discover that in production. A UUIDv4 is the expected
+        form. Scoped per `customer_id`, retained 24 hours.
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 128
+        pattern: '^[A-Za-z0-9._~-]{8,128}$'
+
+    RequestId:
+      name: request_id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+  responses:
+    BadRequest:
+      description: Malformed syntax — unparseable body, bad header, invalid query parameter.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+
+    UnprocessableEntity:
+      description: |
+        Syntactically valid but semantically rejected. Deadline in the past,
+        inverted window, unsupported target geometry, horizon longer than the
+        configured maximum, or constraints no configured sensor could satisfy.
+        Distinguished from 400 because the remedy is different: 400 means your
+        serialiser is wrong, 422 means your request is.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: https://overpass.dev/problems/validation-failed
+            title: Validation failed
+            status: 422
+            detail: The request window ends before it starts.
+            instance: /v1/tasking-requests
+            reason_code: WINDOW_INVERTED
+            errors:
+              - pointer: /window/end
+                code: window_inverted
+                message: must be after window.start
+
+    IdempotencyConflict:
+      description: |
+        The `Idempotency-Key` was previously used with a different request body.
+        This is always a client bug. Treating it as a replay would silently
+        discard a request the customer believes they submitted, so it is an
+        error rather than a convenience.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+
+    NotFound:
+      description: No such request.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+
+    TooManyRequests:
+      description: Rate limit exceeded.
+      headers:
+        Retry-After:
+          schema: { type: integer }
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+
+    ServiceUnavailable:
+      description: |
+        The request could not be persisted. Returned rather than accepted,
+        because acknowledging a request we did not store is unrecoverable
+        business damage — the customer believes it is in flight and it is not.
+      headers:
+        Retry-After:
+          schema: { type: integer }
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+
+  schemas:
+    CustomerId:
+      type: string
+      minLength: 1
+      maxLength: 64
+      pattern: '^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$'
+      description: Stub identifier. There is no authentication in this system; see the README scope cuts.
+
+    PriorityTier:
+      type: string
+      enum: [GOVERNMENT, CIVIL_PROTECTION, COMMERCIAL, BEST_EFFORT]
+      description: |
+        Customer class. The tier multiplier and the ageing curve that combine
+        with `bid_credits` to produce an effective value are **not** part of this
+        contract — they are planner configuration. That keeps fairness re-tunable
+        without a schema version, and keeps a published formula out of reach of
+        clients who would optimise against it.
+
+    ImagingMode:
+      type: string
+      enum: [SPOTLIGHT, STRIPMAP, SCAN]
+
+    LookSideConstraint:
+      type: string
+      enum: [LEFT, RIGHT, ANY]
+      default: ANY
+
+    RequestState:
+      type: string
+      enum:
+        - RECEIVED
+        - AWAITING_PLANNING
+        - PLANNED
+        - ACQUIRED
+        - INFEASIBLE
+        - REJECTED
+        - EXPIRED
+        - CANCELLED
+      description: |
+        See the lifecycle diagram in the API description. Terminal states are
+        `ACQUIRED`, `INFEASIBLE`, `REJECTED`, `EXPIRED`, and `CANCELLED`.
+        A request that loses a planning round returns to `AWAITING_PLANNING`
+        rather than failing — it ages, gains fairness weight, and competes again.
+
+    Position:
+      type: array
+      minItems: 2
+      maxItems: 2
+      items:
+        type: number
+      description: '[longitude, latitude] in decimal degrees, WGS84. Longitude first, per RFC 7946.'
+
+    PointGeometry:
+      type: object
+      required: [type, coordinates]
+      properties:
+        type:
+          type: string
+          enum: [Point]
+        coordinates:
+          $ref: '#/components/schemas/Position'
+
+    PolygonGeometry:
+      type: object
+      required: [type, coordinates]
+      properties:
+        type:
+          type: string
+          enum: [Polygon]
+        coordinates:
+          type: array
+          minItems: 1
+          items:
+            type: array
+            minItems: 4
+            items:
+              $ref: '#/components/schemas/Position'
+          description: First ring is the exterior boundary; subsequent rings are holes. Rings must be closed.
+
+    TargetGeometry:
+      oneOf:
+        - $ref: '#/components/schemas/PointGeometry'
+        - $ref: '#/components/schemas/PolygonGeometry'
+      discriminator:
+        propertyName: type
+      description: |
+        Point or Polygon only. `MultiPolygon` and `GeometryCollection` are
+        rejected: a disjoint target implies one request satisfied by several
+        non-adjacent acquisitions, which is a real feature with real scheduling
+        consequences and is out of scope. Rejecting at the boundary is honest;
+        silently mishandling would not be.
+
+    TimeWindow:
+      type: object
+      required: [start, end]
+      properties:
+        start: { type: string, format: date-time }
+        end: { type: string, format: date-time }
+
+    AcquisitionConstraints:
+      type: object
+      description: Optional narrowing of acceptable geometry. Constraints can only narrow the sensor's own limits, never widen them.
+      properties:
+        look_side:
+          $ref: '#/components/schemas/LookSideConstraint'
+        min_incidence_deg: { type: number, minimum: 0, maximum: 90 }
+        max_incidence_deg: { type: number, minimum: 0, maximum: 90 }
+        max_squint_deg: { type: number, minimum: 0, maximum: 90 }
+        excluded_satellite_ids:
+          type: array
+          maxItems: 64
+          items: { type: string, maxLength: 32 }
+
+    SubmitTaskingRequest:
+      type: object
+      required: [customer_id, target, window, priority_tier, bid_credits, requested_modes]
+      properties:
+        customer_id:
+          $ref: '#/components/schemas/CustomerId'
+        target_name:
+          type: string
+          maxLength: 128
+          description: Display label only. Never used in matching or allocation.
+        target:
+          $ref: '#/components/schemas/TargetGeometry'
+        window:
+          allOf:
+            - $ref: '#/components/schemas/TimeWindow'
+          description: |
+            `window.end` is the deadline. An acquisition finishing after it has
+            no value, so the planner treats late placement as infeasible rather
+            than as merely late.
+        priority_tier:
+          $ref: '#/components/schemas/PriorityTier'
+        bid_credits:
+          type: integer
+          minimum: 0
+          maximum: 100000000
+          description: |
+            Integer credits, not a float. Allocation compares and sums these
+            constantly, and float comparison in a tie-break is a bug waiting for
+            a specific input. Nothing settles these — there is no billing.
+        requested_modes:
+          type: array
+          minItems: 1
+          maxItems: 3
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/ImagingMode'
+          description: |
+            Acceptable modes, unordered. Listing more than one widens the
+            feasible set and measurably improves the chance of winning. Mode
+            flexibility is a real lever, and exposing it is a product decision.
+        constraints:
+          $ref: '#/components/schemas/AcquisitionConstraints'
+
+    TaskingRequestAccepted:
+      type: object
+      required: [request_id, state, submitted_at, correlation_id]
+      properties:
+        request_id: { type: string, format: uuid }
+        state:
+          $ref: '#/components/schemas/RequestState'
+        submitted_at: { type: string, format: date-time }
+        correlation_id:
+          type: string
+          format: uuid
+          description: |
+            Returned to the caller so a customer support conversation can start
+            with an identifier that greps the entire distributed trace, rather
+            than with a timestamp and a description.
+        estimated_feasibility_by:
+          type: string
+          format: date-time
+          description: Best-effort estimate of when opportunities will be computed. Advisory, never a guarantee.
+
+    UnfulfilmentExplanation:
+      type: object
+      description: |
+        Why the request lost its most recent planning round. Structured rather
+        than prose, because a shortfall the customer can act on has to be a
+        number, and because "unfulfilled by reason" is a chart on the operator's
+        dashboard. Which fields are populated depends on `reason_code`.
+      required: [reason_code, decided_at]
+      properties:
+        reason_code:
+          type: string
+          enum:
+            - LOST_TO_HIGHER_VALUE
+            - BLOCKED_BY_SLEW_CONSTRAINT
+            - DUTY_CYCLE_EXHAUSTED
+            - DEADLINE_PASSED
+            - NO_OPPORTUNITY_IN_BUCKET
+            - SUPERSEDED
+            - CANCELLED_BY_CUSTOMER
+        own_effective_value_credits:
+          type: integer
+          description: Your bid after tier multiplier and ageing.
+        winning_effective_value_credits:
+          type: integer
+        shortfall_credits:
+          type: integer
+          description: How much more effective value would have been needed to win. The most actionable number a losing customer can be given.
+        required_slew_s:
+          type: number
+          description: Attitude manoeuvre plus settling time needed to reach this opportunity from the neighbouring acquisition.
+        available_gap_s:
+          type: number
+          description: Idle time actually available. `required_slew_s > available_gap_s` is what `BLOCKED_BY_SLEW_CONSTRAINT` means, stated as two numbers.
+        duty_cycle_remaining_s: { type: number }
+        duty_cycle_required_s: { type: number }
+        age_rounds:
+          type: integer
+          description: Rounds lost so far. Drives the fairness ageing factor, so a repeatedly-losing request gains weight rather than starving forever.
+        eligible_for_retry: { type: boolean }
+        decided_at: { type: string, format: date-time }
+
+    TaskingRequest:
+      type: object
+      required: [request_id, customer_id, target, window, priority_tier, bid_credits, requested_modes, state, submitted_at, updated_at]
+      properties:
+        request_id: { type: string, format: uuid }
+        customer_id:
+          $ref: '#/components/schemas/CustomerId'
+        target_name: { type: string }
+        target:
+          $ref: '#/components/schemas/TargetGeometry'
+        window:
+          $ref: '#/components/schemas/TimeWindow'
+        priority_tier:
+          $ref: '#/components/schemas/PriorityTier'
+        bid_credits: { type: integer }
+        requested_modes:
+          type: array
+          items:
+            $ref: '#/components/schemas/ImagingMode'
+        constraints:
+          $ref: '#/components/schemas/AcquisitionConstraints'
+        state:
+          $ref: '#/components/schemas/RequestState'
+        state_reason:
+          type: string
+          nullable: true
+          description: |
+            Machine-readable code explaining a terminal or blocked state — the
+            rejection reason for `REJECTED`, the feasibility failure code for
+            `INFEASIBLE`. Null while the request is progressing normally.
+        opportunity_count:
+          type: integer
+          nullable: true
+          description: Feasible opportunities found. Null until the feasibility sweep completes; zero means the sweep ran and found none.
+        unfulfilment:
+          allOf:
+            - $ref: '#/components/schemas/UnfulfilmentExplanation'
+          nullable: true
+          description: Present when the request has lost at least one planning round.
+        acquisition_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Set once the request wins a slot. Fetch the plan itself from `plan-gateway`.
+        correlation_id: { type: string, format: uuid }
+        submitted_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+
+    TaskingRequestPage:
+      type: object
+      required: [items, has_more]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/TaskingRequest'
+        next_cursor:
+          type: string
+          nullable: true
+          description: Pass to `cursor` for the next page. Null when exhausted.
+        has_more: { type: boolean }
+
+    HealthStatus:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded, unavailable]
+        checks:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              status: { type: string, enum: [ok, failed] }
+              detail: { type: string }
+              latency_ms: { type: number }
+        version: { type: string }
+
+    Problem:
+      type: object
+      description: |
+        RFC 9457 Problem Details. Chosen over a bespoke error envelope because
+        it is a standard with existing client support, and because inventing a
+        third error shape for the third service is how APIs become inconsistent.
+        `reason_code` and `errors` are Overpass extensions, which the RFC
+        explicitly permits.
+      required: [type, title, status]
+      properties:
+        type:
+          type: string
+          format: uri
+          description: Stable URI identifying the problem class. Clients branch on this, never on `title`.
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        instance: { type: string }
+        reason_code:
+          type: string
+          description: |
+            The same closed enum carried on `tasking.request.rejected.v1`, so the
+            synchronous error and the asynchronous event agree on vocabulary.
+            One taxonomy, two transports.
+        errors:
+          type: array
+          items:
+            type: object
+            required: [pointer, code]
+            properties:
+              pointer:
+                type: string
+                description: RFC 6901 JSON Pointer into the submitted body, so a client can highlight the offending field rather than showing a wall of text.
+              code: { type: string }
+              message: { type: string }
+        correlation_id: { type: string, format: uuid }
