@@ -1,0 +1,57 @@
+# golangci-lint configuration.
+#
+# The linter set is chosen to catch classes of bug this specific system can
+# produce, not to enforce a house style. Anything that only produces taste
+# arguments is off — a linter that cries wolf gets disabled entirely, and then
+# the useful checks go with it.
+
+run:
+  timeout: 5m
+  tests: true
+
+linters:
+  enable:
+    - errcheck      # an unchecked error is how a failed COMMIT becomes a silent success
+    - govet
+    - staticcheck
+    - unused
+    - ineffassign
+    - bodyclose     # a leaked response body exhausts the pool under load; k6 will find it
+    - rowserrcheck  # sql.Rows.Err() unchecked silently truncates a result set
+    - sqlclosecheck
+    - contextcheck  # a dropped context breaks both cancellation and trace propagation
+    - errorlint     # wrapped-error comparison; %w vs %v
+    - nilerr
+    - noctx
+    - unconvert
+    - wastedassign
+    - misspell
+  disable:
+    # Formatting-only opinions. gofmt already decides this and re-litigating it
+    # in review is a waste of everyone's attention.
+    - lll
+    - gochecknoglobals
+    - gochecknoinits
+    - funlen
+    - gocognit
+    - cyclop
+
+linters-settings:
+  errcheck:
+    check-type-assertions: true
+    check-blank: true
+  govet:
+    enable-all: true
+    disable:
+      - fieldalignment  # struct padding micro-optimisation; not our bottleneck
+  errorlint:
+    errorf: true
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+  exclude-rules:
+    # Generated code is not ours to restyle. It is checked by compiling it and
+    # by the round-trip tests, which is a stronger check than linting anyway.
+    - path: '\.gen\.go$'
+      linters: [errcheck, govet, staticcheck, unused, misspell, unconvert]

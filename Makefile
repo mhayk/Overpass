@@ -137,6 +137,10 @@ test-web: ## Frontend unit tests
 	@if [ -f web/package.json ]; then cd web && npm test; \
 	else echo "skip: web not yet initialised"; fi
 
+.PHONY: coverage
+coverage: ## Enforce coverage thresholds (80% overall, 95% planner and geometry)
+	@$(ROOT)/scripts/coverage-gate.sh
+
 .PHONY: test-integration
 test-integration: ## Integration tests against real Postgres and NATS (Testcontainers)
 	@echo "not yet implemented — issue #30 (M1-18)"

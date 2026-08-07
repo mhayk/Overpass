@@ -1,0 +1,204 @@
+# Per-language CI: lint, type-check, test, coverage.
+#
+# Every job is guarded by a "does this exist yet?" check rather than being
+# commented out until its service is built. A commented-out job is invisible and
+# silently stays broken; a guarded job that reports "not yet initialised" is
+# visible, runs its guard on every push, and starts working the moment the
+# service lands — with no CI change needed.
+#
+# Path filters keep a Go-only change from paying for the Python and Node
+# toolchains.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Go
+  # ---------------------------------------------------------------------------
+  go:
+    name: go — lint, vet, test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache-dependency-path: '**/go.sum'
+
+      - name: Discover Go modules
+        id: modules
+        run: |
+          modules=$(find . -name go.mod -not -path './.tools/*' -exec dirname {} \; | sort)
+          echo "found:"; echo "$modules" | sed 's/^/  /'
+          {
+            echo 'list<<EOF'
+            echo "$modules"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: go vet
+        run: |
+          while read -r m; do
+            [ -z "$m" ] && continue
+            echo "==> $m"
+            (cd "$m" && go build ./... && go vet ./...)
+          done <<< "${{ steps.modules.outputs.list }}"
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v1.62.2
+          working-directory: gen/go
+          # gen/ is generated; linting it would report style opinions about code
+          # nobody wrote and cannot change without editing a generator. The
+          # hand-written contracttest package is still checked.
+          args: --timeout=5m ./contracttest/...
+
+      # -race is not optional and never will be. The concurrency this system
+      # will contain — idempotent consumers, an outbox relay with SKIP LOCKED,
+      # a planner holding an advisory lock — produces exactly the bugs that are
+      # invisible without it.
+      - name: go test -race
+        run: |
+          while read -r m; do
+            [ -z "$m" ] && continue
+            echo "==> $m"
+            (cd "$m" && go test -race -coverprofile=coverage.out -covermode=atomic ./...)
+          done <<< "${{ steps.modules.outputs.list }}"
+
+      - name: Coverage gate
+        run: ./scripts/coverage-gate.sh
+
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: go-coverage
+          path: '**/coverage.out'
+          if-no-files-found: ignore
+
+  # ---------------------------------------------------------------------------
+  # Python
+  # ---------------------------------------------------------------------------
+  python:
+    name: python — ruff, mypy, pytest
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Check whether feasibility-service exists yet
+        id: exists
+        run: |
+          if [ -f services/feasibility/pyproject.toml ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "services/feasibility not yet initialised — issue #24" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: ruff
+        if: steps.exists.outputs.ready == 'true'
+        working-directory: services/feasibility
+        run: |
+          uv run ruff check .
+          uv run ruff format --check .
+
+      # --strict from day one. Retrofitting strict typing onto a codebase that
+      # grew without it is a project of its own, and the orbital geometry code
+      # is precisely where a silently-wrong type would hide.
+      - name: mypy --strict
+        if: steps.exists.outputs.ready == 'true'
+        working-directory: services/feasibility
+        run: uv run mypy --strict .
+
+      - name: pytest
+        if: steps.exists.outputs.ready == 'true'
+        working-directory: services/feasibility
+        run: uv run pytest --cov --cov-report=term-missing --cov-report=xml
+
+      # Lints the repo-level Python (the contract tooling) regardless, so those
+      # scripts do not quietly rot while waiting for the service to exist.
+      - name: Lint repository tooling
+        run: uvx ruff@0.8.4 check scripts/
+
+  # ---------------------------------------------------------------------------
+  # Web
+  # ---------------------------------------------------------------------------
+  web:
+    name: web — eslint, tsc, vitest
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check whether web exists yet
+        id: exists
+        run: |
+          if [ -f web/package.json ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "web/ not yet initialised — issue #30" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - uses: actions/setup-node@v4
+        if: steps.exists.outputs.ready == 'true'
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install
+        if: steps.exists.outputs.ready == 'true'
+        working-directory: web
+        run: npm ci
+
+      - name: Lint and type-check
+        if: steps.exists.outputs.ready == 'true'
+        working-directory: web
+        run: |
+          npm run lint
+          npx tsc --noEmit
+
+      - name: Test
+        if: steps.exists.outputs.ready == 'true'
+        working-directory: web
+        run: npm test
+
+  # ---------------------------------------------------------------------------
+  # Shell
+  # ---------------------------------------------------------------------------
+  # The contract tooling and the stack bootstrap are shell scripts, and they are
+  # load-bearing: if contracts-verify.sh is subtly wrong, the drift gate stops
+  # gating and nobody notices. Unquoted variables and silent failures are worth
+  # catching in the scripts that guard everything else.
+  shell:
+    name: shell — shellcheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: shellcheck
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+          shellcheck --severity=warning scripts/*.sh deploy/nats/*.sh

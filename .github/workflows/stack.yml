@@ -1,0 +1,157 @@
+# Cold-start gate.
+#
+# The definition of done says:
+#
+#   git clone && docker compose up  ->  working, seeded system, under five
+#   minutes, on a clean machine.
+#
+# That is a requirement, so it is a gate. A requirement nobody measures is an
+# aspiration, and the specific failure this prevents is the classic one: it
+# works on the machine that built it, and nowhere else. A GitHub runner is the
+# closest thing to a clean machine available.
+#
+# It also asserts the stack is FUNCTIONAL, not merely healthy. Containers
+# reporting healthy while the database lacks btree_gist, or NATS has no streams,
+# would pass a naive check and fail the moment a service tried to use them.
+
+name: stack
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - 'docker-compose.yml'
+      - 'deploy/**'
+      - 'scripts/stack-up.sh'
+      - '.github/workflows/stack.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: stack-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  cold-start:
+    name: cold start under five minutes
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Deliberately NO Docker layer cache. Caching images would measure a warm
+      # start, and the claim being tested is about a clean machine.
+      - name: Cold start
+        env:
+          BUDGET_SECONDS: 300
+        run: ./scripts/stack-up.sh
+
+      - name: Postgres has the extensions the invariant depends on
+        run: |
+          set -euo pipefail
+          extensions=$(docker compose exec -T postgres \
+            psql -U overpass -d overpass -tAc \
+            "SELECT extname FROM pg_extension ORDER BY 1")
+          echo "$extensions"
+          for required in postgis btree_gist pgcrypto; do
+            echo "$extensions" | grep -qx "$required" \
+              || { echo "::error::missing extension $required"; exit 1; }
+          done
+
+      # The single most load-bearing assertion in this repository. If the
+      # exclusion constraint cannot be created, or does not reject an
+      # overlapping acquisition, then the central invariant lives in
+      # application code after all and ADR-0003 and ADR-0004 are both wrong.
+      #
+      # Note it also asserts the constraint is per-satellite: the same window
+      # on a DIFFERENT satellite must be accepted. A constraint that rejected
+      # both would look like it worked while serialising the whole
+      # constellation.
+      - name: The non-overlap invariant is enforced by the database
+        run: |
+          set -euo pipefail
+          docker compose exec -T postgres psql -U overpass -d overpass -v ON_ERROR_STOP=1 <<'SQL'
+          CREATE TABLE planning._ci_probe (
+            id           uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+            satellite_id text      NOT NULL,
+            acq_window   tstzrange NOT NULL,
+            CONSTRAINT no_overlap_per_satellite
+              EXCLUDE USING gist (satellite_id WITH =, acq_window WITH &&)
+          );
+          INSERT INTO planning._ci_probe (satellite_id, acq_window)
+          VALUES ('SENTINEL-1A', tstzrange('2026-08-07 18:32:20Z','2026-08-07 18:32:33Z'));
+          SQL
+
+          echo "--> an overlapping window on the SAME satellite must be rejected"
+          if docker compose exec -T postgres psql -U overpass -d overpass -v ON_ERROR_STOP=1 -c \
+            "INSERT INTO planning._ci_probe (satellite_id, acq_window)
+             VALUES ('SENTINEL-1A', tstzrange('2026-08-07 18:32:25Z','2026-08-07 18:32:40Z'));" 2>/dev/null
+          then
+            echo "::error::the exclusion constraint accepted an overlapping acquisition"
+            exit 1
+          fi
+          echo "    rejected, as required"
+
+          echo "--> the same window on a DIFFERENT satellite must be accepted"
+          docker compose exec -T postgres psql -U overpass -d overpass -v ON_ERROR_STOP=1 -c \
+            "INSERT INTO planning._ci_probe (satellite_id, acq_window)
+             VALUES ('ICEYE-X7', tstzrange('2026-08-07 18:32:25Z','2026-08-07 18:32:40Z'));"
+          echo "    accepted — the constraint is per-satellite, not global"
+
+          docker compose exec -T postgres psql -U overpass -d overpass -c "DROP TABLE planning._ci_probe;"
+
+      - name: NATS topology was applied
+        run: |
+          set -euo pipefail
+          streams=$(docker run --rm --network overpass natsio/nats-box:0.14.3 \
+            sh -c 'NATS_URL=nats://nats:4222 nats stream ls -j')
+          echo "$streams"
+          for required in TASKING FEASIBILITY PLANNING DLQ_TASKING DLQ_FEASIBILITY DLQ_PLANNING; do
+            echo "$streams" | grep -q "\"$required\"" \
+              || { echo "::error::missing stream $required"; exit 1; }
+          done
+
+      # Publish a real contract fixture and pull it back through the durable
+      # consumer that will actually handle it. Proves the topology is usable and
+      # — the part most implementations never check — that the W3C traceparent
+      # survives the hop, which is the whole basis of the distributed tracing
+      # story in ADR-0003.
+      - name: An event round-trips with its trace context intact
+        run: |
+          set -euo pipefail
+          out=$(docker run --rm --network overpass \
+            -v "$PWD/contracts:/contracts:ro" natsio/nats-box:0.14.3 sh -c '
+              export NATS_URL=nats://nats:4222
+              nats pub tasking.request.received.v1 \
+                "$(cat /contracts/examples/valid/tasking.request.received.v1/minimal.json)" \
+                -H "traceparent:00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01" >/dev/null
+              nats consumer next TASKING feasibility-worker --count 1 --timeout 15s
+            ')
+          echo "$out"
+          echo "$out" | grep -q '4bf92f3577b34da6a3ce929d0e0e4736' \
+            || { echo "::error::traceparent did not survive the NATS hop"; exit 1; }
+          echo "$out" | grep -q 'tasking.request.received.v1' \
+            || { echo "::error::event payload did not round-trip"; exit 1; }
+
+      - name: Observability is wired
+        run: |
+          set -euo pipefail
+          curl -sf http://localhost:9090/-/healthy   > /dev/null && echo "prometheus healthy"
+          curl -sf http://localhost:3001/api/health  > /dev/null && echo "grafana healthy"
+          rules=$(curl -sf http://localhost:9090/api/v1/rules | grep -o '"name":"[A-Za-z]*"' | wc -l)
+          echo "alert rules loaded: $rules"
+          [ "$rules" -ge 4 ] || { echo "::error::alert rules did not load"; exit 1; }
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          docker compose ps -a
+          docker compose logs --tail=80
+
+      - name: Tear down
+        if: always()
+        run: docker compose down -v --remove-orphans
