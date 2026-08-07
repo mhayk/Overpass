@@ -1,57 +1,82 @@
-# golangci-lint configuration.
+# golangci-lint configuration (schema v2).
 #
-# The linter set is chosen to catch classes of bug this specific system can
-# produce, not to enforce a house style. Anything that only produces taste
-# arguments is off — a linter that cries wolf gets disabled entirely, and then
-# the useful checks go with it.
+# v2 rather than v1 because v1.62 is built with Go 1.23 and refuses to load a
+# module targeting Go 1.25, which gen/go does — kin-openapi requires it. The
+# config format changed between the two, so this is the v2 shape.
+#
+# The linter set is chosen to catch classes of bug THIS system can produce, not
+# to enforce a house style. Anything that only produces taste arguments is off:
+# a linter that cries wolf gets disabled wholesale, and the useful checks go
+# with it.
+
+version: "2"
 
 run:
   timeout: 5m
   tests: true
 
 linters:
+  default: standard   # errcheck, govet, ineffassign, staticcheck, unused
   enable:
-    - errcheck      # an unchecked error is how a failed COMMIT becomes a silent success
-    - govet
-    - staticcheck
-    - unused
-    - ineffassign
-    - bodyclose     # a leaked response body exhausts the pool under load; k6 will find it
-    - rowserrcheck  # sql.Rows.Err() unchecked silently truncates a result set
+    # An unchecked error is how a failed COMMIT becomes a silent success. This
+    # is the single most valuable linter in a system whose central claim is that
+    # a state change and its event commit together or not at all.
+    - errcheck
+
+    # A leaked response body exhausts the connection pool under sustained load.
+    # The k6 suite at 1000 rps would find this eventually; the linter finds it now.
+    - bodyclose
+
+    # sql.Rows.Err() left unchecked silently truncates a result set — the planner
+    # would allocate over a partial candidate list and produce a plan that is
+    # "valid" for the wrong input.
+    - rowserrcheck
     - sqlclosecheck
-    - contextcheck  # a dropped context breaks both cancellation and trace propagation
-    - errorlint     # wrapped-error comparison; %w vs %v
-    - nilerr
-    - noctx
+
+    # A dropped context breaks cancellation AND trace propagation. Losing the
+    # trace across the async hop is precisely the thing this project claims to
+    # get right.
+    - contextcheck
+
+    # Wrapped-error comparison. %w vs %v, and == against a wrapped error.
+    - errorlint
+
+    - nilerr        # returning nil after checking err != nil
+    - noctx         # HTTP requests without a context
     - unconvert
     - wastedassign
     - misspell
-  disable:
-    # Formatting-only opinions. gofmt already decides this and re-litigating it
-    # in review is a waste of everyone's attention.
-    - lll
-    - gochecknoglobals
-    - gochecknoinits
-    - funlen
-    - gocognit
-    - cyclop
 
-linters-settings:
-  errcheck:
-    check-type-assertions: true
-    check-blank: true
-  govet:
-    enable-all: true
-    disable:
-      - fieldalignment  # struct padding micro-optimisation; not our bottleneck
-  errorlint:
-    errorf: true
+  exclusions:
+    rules:
+      # Generated code is not ours to restyle, and cannot be changed without
+      # editing a generator. It is verified by compiling it and by the
+      # round-trip tests, which is a stronger check than linting.
+      - path: '\.gen\.go$'
+        linters:
+          - errcheck
+          - govet
+          - staticcheck
+          - unused
+          - misspell
+          - unconvert
+
+  settings:
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment   # struct padding micro-optimisation; not our bottleneck
+    errorlint:
+      errorf: true
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
 
 issues:
   max-issues-per-linter: 0
   max-same-issues: 0
-  exclude-rules:
-    # Generated code is not ours to restyle. It is checked by compiling it and
-    # by the round-trip tests, which is a stronger check than linting anyway.
-    - path: '\.gen\.go$'
-      linters: [errcheck, govet, staticcheck, unused, misspell, unconvert]

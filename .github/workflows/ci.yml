@@ -62,7 +62,7 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v6
         with:
-          version: v1.62.2
+          version: v2.12.2
           working-directory: gen/go
           # gen/ is generated; linting it would report style opinions about code
           # nobody wrote and cannot change without editing a generator. The
