@@ -95,6 +95,21 @@ jobs:
       - name: The non-overlap invariant is enforced by the database
         run: ./scripts/db-invariants.sh
 
+      # The idempotent-consumer guarantee is a property of a transaction and a
+      # unique constraint, so it can only be tested against a real Postgres.
+      # It lives here rather than in the `ci` workflow for that reason — the
+      # per-language job has no database, and a version of these tests with a
+      # fake connection would be testing the mock.
+      - name: Effectively-once processing, against the real database
+        if: hashFiles('services/feasibility/pyproject.toml') != ''
+        env:
+          OVERPASS_TEST_DSN: postgres://overpass:overpass@localhost:5433/overpass
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          cd services/feasibility
+          uv run pytest tests/test_idempotency.py -v
+
       - name: NATS topology was applied
         run: |
           set -euo pipefail
