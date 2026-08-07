@@ -76,7 +76,11 @@ jobs:
       - name: golangci-lint — service modules
         run: |
           set -euo pipefail
-          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh             | sh -s -- -b "$(go env GOPATH)/bin" v2.12.2
+          # `go install` at the pinned version, exactly as `make tools` does it.
+          # The upstream install.sh was tried first and failed on a checksum
+          # mismatch — and it is fetched from `master`, so the installer itself
+          # is unpinned, which is a poor way to install a pinned tool.
+          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
           linted=0
           while read -r m; do
             [ -z "$m" ] && continue
