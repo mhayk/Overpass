@@ -75,6 +75,7 @@ func (s *SubmitService) Submit(
 	req domain.SubmitRequest,
 	key string,
 	fingerprint domain.Fingerprint,
+	traceHeaders map[string]string,
 ) (SubmitResult, domain.ValidationResult, error) {
 	now := s.clock.Now()
 
@@ -88,6 +89,13 @@ func (s *SubmitService) Submit(
 		return SubmitResult{}, domain.ValidationResult{}, err
 	}
 	constraints, err := json.Marshal(req.Constraints)
+	if err != nil {
+		return SubmitResult{}, domain.ValidationResult{}, err
+	}
+	if traceHeaders == nil {
+		traceHeaders = map[string]string{}
+	}
+	headers, err := json.Marshal(traceHeaders)
 	if err != nil {
 		return SubmitResult{}, domain.ValidationResult{}, err
 	}
@@ -112,7 +120,7 @@ func (s *SubmitService) Submit(
 		SchemaVersion: "1.0.0",
 		Subject:       "tasking.request.received.v1",
 		PayloadJSON:   payload,
-		HeadersJSON:   []byte(`{}`),
+		HeadersJSON:   headers,
 		OccurredAt:    now,
 	}
 
