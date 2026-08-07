@@ -25,6 +25,7 @@ paper trail is the point.
 | [0004](0004-postgresql-jsonb-over-document-store.md) | PostgreSQL with JSONB for semi-structured data, instead of adding a document store | accepted | M0 |
 | [0005](0005-docker-compose-over-kubernetes.md) | Docker Compose as the deployment target, not Kubernetes | accepted | M0 |
 | [0010](0010-test-strategy-and-coverage.md) | Treat the test suite as the verification harness for generated code, and gate coverage at 80/95 | accepted | M0 |
+| [0012](0012-retain-superseded-acquisitions.md) | Retain superseded acquisitions with a status, and make the non-overlap constraint partial and deferred | accepted | M1 |
 | [0013](0013-parallel-agent-execution-in-worktrees.md) | Run parallel agent work as one git worktree per contract boundary, not as concurrent agents in one checkout | accepted | M1 |
 
 ## Planned
@@ -40,33 +41,39 @@ before the constraint is felt is fiction.
 | 0008 | Idempotency: inbound HTTP keys and the idempotent-consumer pattern | M1 |
 | 0009 | CesiumJS and deck.gl division of labour | M1 |
 | 0011 | TLE sourcing: live Celestrak fetch at seed time, frozen snapshot for tests | M1 |
-| 0012 | Plan supersession semantics for re-planned horizon buckets | M2 |
+| 0014 | Planner-side re-planning semantics: round triggers, debounce, and in-flight requests | M2 |
 
-### Why 0011 and 0012 exist
+### Why 0011 and 0014 exist
 
-They are not in the original spec's ADR list. Both are consequences of decisions
-taken during M0 planning, and both are the kind of thing that would otherwise
-become an undocumented assumption:
+Neither is in the original spec's ADR list. Both are consequences of decisions
+taken later, and both are the kind of thing that would otherwise become an
+undocumented assumption:
 
 - **0011** — TLEs are fetched live from Celestrak at seed time, which exercises
   the `tle_epoch` staleness logic honestly but makes results non-deterministic.
   Golden-reference tests for orbital math therefore run against a *frozen*
   snapshot committed to `testdata/tle/`. Two TLE sources with two different
   purposes is exactly the sort of split that needs writing down.
-- **0012** — a horizon bucket can be planned more than once, because planning
-  rounds are triggered by either a cadence timer or an opportunity-arrival
-  debounce. That makes plan supersession a first-class concept:
-  `planning.plan.committed.v1` carries `plan_version` and `supersedes_plan_id`,
-  and a request can be unfulfilled with reason `SUPERSEDED`.
+- **0014** — the half of supersession that [0012](0012-retain-superseded-acquisitions.md)
+  deliberately did not decide. 0012 settles how superseded acquisitions are
+  *stored*, because M1-01 cannot write the exclusion constraint without knowing.
+  When a round fires, how the debounce interacts with the cadence timer, what
+  happens to a request holding an acquisition in a replaced plan, and whether
+  re-planning may be partial are planner decisions, and the constraint will not be
+  felt until M2.
 
-### Why 0013 is accepted while 0006–0012 are still planned
+### Why the numbers are out of order
 
 Numbers are allocated in the order decisions are *made*, not in the order they
 were anticipated. 0006–0012 were reserved during M0 planning for decisions M1 and
-M2 will force; they stay unwritten until the constraint is actually felt. 0013 was
-forced earlier than any of them — closing M0 is precisely what made concurrent
-work possible, so the question of how to execute it arrived at the M0/M1 boundary
-rather than inside M1.
+M2 would force, and they stay unwritten until the constraint is actually felt.
+
+Two arrived early. **0013** was forced by closing M0 — that is precisely what made
+concurrent work possible, so the question of how to execute it landed at the
+M0/M1 boundary. **0012** was reserved for M2 and forced in M1 instead: M1-01 has
+to write the non-overlap exclusion constraint, and the naive form of that
+constraint collides with the plan it is replacing. The storage half of
+supersession had to be decided before a single migration could be written.
 
 ## Conventions
 
