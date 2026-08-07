@@ -1,7 +1,7 @@
 -- Runs once, on an empty data directory only.
 --
 -- Extensions and schema namespaces only. Table definitions belong in versioned
--- migrations under db/migrations (issue #14) rather than here: this file runs
+-- migrations under db/migrations (issue #13) rather than here: this file runs
 -- exactly once ever, so anything in it can never be changed on an existing
 -- database, which makes it the wrong place for anything that will evolve.
 

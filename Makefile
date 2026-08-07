@@ -19,12 +19,30 @@ OAPI_CODEGEN_VERSION  := v2.4.1
 GO_JSONSCHEMA_VERSION := v0.24.1
 DATAMODEL_CG_VERSION  := 0.28.5
 GOLANGCI_LINT_VERSION := v2.12.2
+# goose v3.27.3 requires Go >= 1.25.7 — it will not build on an older toolchain,
+# and the failure is a module resolution error rather than anything obvious.
+# go.mod and the CI setup-go step are both on 1.25, which resolves to a patch
+# above that floor.
+GOOSE_VERSION         := v3.27.3
 
 ROOT        := $(shell git rev-parse --show-toplevel 2>/dev/null || pwd)
 TOOLS_BIN   := $(ROOT)/.tools/bin
 CONTRACTS   := $(ROOT)/contracts
 GEN         := $(ROOT)/gen
 GO_SERVICES := tasking-api planner plan-gateway
+MIGRATIONS  := $(ROOT)/db/migrations
+
+# One migration sequence for the whole database, not one per schema. The
+# schemas are namespaces inside a single Postgres and there are foreign keys
+# across them — planning.acquisitions references reference.satellites — so the
+# ordering is global whether or not it is tracked that way.
+#
+# DATABASE_URL is overridable so this points at a test database as easily as at
+# the compose stack.
+# Port 5433, matching the compose mapping — a developer machine very often has
+# a local Postgres already holding 5432.
+DATABASE_URL ?= postgres://overpass:overpass@localhost:5433/overpass?sslmode=disable
+GOOSE        := $(TOOLS_BIN)/goose -dir $(MIGRATIONS) postgres "$(DATABASE_URL)"
 
 export PATH := $(TOOLS_BIN):$(PATH)
 
@@ -82,6 +100,29 @@ clean: ## Stop the stack and destroy volumes and generated tool binaries
 .PHONY: logs
 logs: ## Tail logs from all services
 	docker compose logs -f --tail=100
+
+## Database
+
+.PHONY: migrate
+migrate: $(TOOLS_BIN)/goose ## Apply every pending migration
+	@$(GOOSE) up
+
+.PHONY: migrate-down
+migrate-down: $(TOOLS_BIN)/goose ## Roll back exactly one migration
+	@$(GOOSE) down
+
+.PHONY: migrate-status
+migrate-status: $(TOOLS_BIN)/goose ## Show which migrations have been applied
+	@$(GOOSE) status
+
+.PHONY: migrate-reset
+migrate-reset: $(TOOLS_BIN)/goose ## Roll every migration back, then re-apply — proves down works
+	@$(GOOSE) down-to 0
+	@$(GOOSE) up
+
+.PHONY: db-test
+db-test: ## Assert the non-overlap invariant against the running database
+	@$(ROOT)/scripts/db-invariants.sh
 
 .PHONY: seed
 seed: ## Seed the database with the constellation and sample customers
@@ -172,7 +213,11 @@ dlq-replay: ## Replay a dead-lettered message (STREAM=<name> EVENT_ID=<uuid>)
 ## Tooling
 
 .PHONY: tools
-tools: $(TOOLS_BIN)/golangci-lint $(TOOLS_BIN)/oapi-codegen $(TOOLS_BIN)/go-jsonschema ## Install pinned dev tools into .tools/bin
+tools: $(TOOLS_BIN)/golangci-lint $(TOOLS_BIN)/oapi-codegen $(TOOLS_BIN)/go-jsonschema $(TOOLS_BIN)/goose ## Install pinned dev tools into .tools/bin
+
+$(TOOLS_BIN)/goose:
+	@mkdir -p $(TOOLS_BIN)
+	GOBIN=$(TOOLS_BIN) go install github.com/pressly/goose/v3/cmd/goose@$(GOOSE_VERSION)
 
 $(TOOLS_BIN)/golangci-lint:
 	@mkdir -p $(TOOLS_BIN)
