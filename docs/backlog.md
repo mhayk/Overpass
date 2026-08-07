@@ -156,7 +156,7 @@ optimum, with runtimes.
 | M2-08 | Policy: `ExactDP` as ground truth | `type/feature` `area/planner` `risk/high` |
 | M2-09 | Fairness: priority-tier multipliers and ageing | `type/feature` `area/planner` `risk/medium` |
 | M2-10 | Plan supersession and re-planning | `type/feature` `area/planner` `risk/high` |
-| M2-11 | ADR-0012 — plan supersession semantics | `type/adr` `risk/low` |
+| M2-11 | ADR-0014 — planner-side re-planning semantics | `type/adr` `risk/low` |
 | M2-12 | Property-based tests for scheduler invariants | `type/test` `area/planner` `risk/high` |
 | M2-13 | Policy benchmark harness and `docs/policy-benchmark.md` | `type/perf` `area/planner` `risk/medium` |
 | M2-14 | ADR-0007 — allocation strategy, heuristic versus optimal | `type/adr` `risk/low` |
