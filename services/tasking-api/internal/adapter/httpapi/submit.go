@@ -99,7 +99,13 @@ func (s *Server) submit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, validation, err := s.submitter.Submit(r.Context(), req, key, fingerprint)
+	// Captured HERE, at write time, and carried through the outbox row.
+	// Capturing it in the relay instead would attribute the event to the poll
+	// loop and sever the trace at exactly the hop this project claims to
+	// preserve.
+	trace := traceHeaders(r)
+
+	result, validation, err := s.submitter.Submit(r.Context(), req, key, fingerprint, trace)
 	switch {
 	case errors.Is(err, port.ErrIdempotencyConflict):
 		// The key was reused with a different body. A client bug, surfaced
@@ -257,4 +263,23 @@ func decodeTarget(g geoJSONGeometry) (domain.Target, error) {
 	default:
 		return domain.Target{}, errors.New("target type must be Point or Polygon, got " + g.Type)
 	}
+}
+
+// traceHeaders collects what must travel with the event.
+//
+// W3C traceparent and tracestate if the caller supplied them, plus the
+// correlation id this service assigned. A consumer three hops away can then tie
+// its work back to the original HTTP request without anyone having planned for
+// that specific question.
+func traceHeaders(r *http.Request) map[string]string {
+	out := map[string]string{}
+	for _, name := range []string{"traceparent", "tracestate"} {
+		if v := r.Header.Get(name); v != "" {
+			out[name] = v
+		}
+	}
+	if id := CorrelationID(r.Context()); id != "" {
+		out["X-Correlation-Id"] = id
+	}
+	return out
 }

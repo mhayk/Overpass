@@ -63,7 +63,7 @@ func goodRequest() domain.SubmitRequest {
 
 func TestAValidSubmissionIsStoredAndReported(t *testing.T) {
 	store := &storeStub{}
-	result, validation, err := service(store).Submit(t.Context(), goodRequest(), "key-00000001", domain.Fingerprint{})
+	result, validation, err := service(store).Submit(t.Context(), goodRequest(), "key-00000001", domain.Fingerprint{}, nil)
 
 	if err != nil || !validation.OK() {
 		t.Fatalf("unexpected failure: err=%v validation=%+v", err, validation.Errors)
@@ -83,7 +83,7 @@ func TestValidationFailureNeverReachesTheStore(t *testing.T) {
 	bad.WindowStart, bad.WindowEnd = bad.WindowEnd, bad.WindowStart
 
 	store := &storeStub{}
-	_, validation, err := service(store).Submit(t.Context(), bad, "key-00000001", domain.Fingerprint{})
+	_, validation, err := service(store).Submit(t.Context(), bad, "key-00000001", domain.Fingerprint{}, nil)
 
 	if err != nil {
 		t.Fatalf("validation failure surfaced as an error: %v", err)
@@ -102,7 +102,7 @@ func TestAReplayIsReportedAsSuchWithTheOriginalIdentity(t *testing.T) {
 		SubmittedAt: appNow.Add(-time.Hour),
 	}}
 
-	result, _, err := service(store).Submit(t.Context(), goodRequest(), "key-00000001", domain.Fingerprint{})
+	result, _, err := service(store).Submit(t.Context(), goodRequest(), "key-00000001", domain.Fingerprint{}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestAConflictIsPropagatedAndNotWrapped(t *testing.T) {
 	// The handler branches on this to return 409, so it must survive intact
 	// rather than being folded into "could not persist".
 	store := &storeStub{err: port.ErrIdempotencyConflict}
-	_, _, err := service(store).Submit(t.Context(), goodRequest(), "key-00000001", domain.Fingerprint{})
+	_, _, err := service(store).Submit(t.Context(), goodRequest(), "key-00000001", domain.Fingerprint{}, nil)
 
 	if !errors.Is(err, port.ErrIdempotencyConflict) {
 		t.Fatalf("got %v, want ErrIdempotencyConflict", err)
@@ -138,7 +138,7 @@ func TestAStoreFailureBecomesErrNotPersisted(t *testing.T) {
 	// And it must, because the handler turns exactly this into a 503 rather
 	// than a 202. Acknowledging a dropped request is unrecoverable.
 	store := &storeStub{err: errors.New("connection refused")}
-	_, _, err := service(store).Submit(t.Context(), goodRequest(), "key-00000001", domain.Fingerprint{})
+	_, _, err := service(store).Submit(t.Context(), goodRequest(), "key-00000001", domain.Fingerprint{}, nil)
 
 	if !errors.Is(err, app.ErrNotPersisted) {
 		t.Fatalf("got %v, want ErrNotPersisted", err)
@@ -152,7 +152,7 @@ func TestAStoreFailureBecomesErrNotPersisted(t *testing.T) {
 func TestTheStoredRequestCarriesTheGeometryAsWKT(t *testing.T) {
 	store := &storeStub{}
 	req := goodRequest()
-	if _, _, err := service(store).Submit(t.Context(), req, "key-00000001", domain.Fingerprint{}); err != nil {
+	if _, _, err := service(store).Submit(t.Context(), req, "key-00000001", domain.Fingerprint{}, nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	// Longitude first. A swap here relocates the target to another hemisphere
@@ -168,7 +168,7 @@ func TestTheClaimExpiryIsTheTTLFromNow(t *testing.T) {
 	svc := app.NewSubmitService(captured, stubClock{appNow}, domain.ConfiguredSensors(),
 		domain.DefaultValidationPolicy())
 
-	if _, _, err := svc.Submit(t.Context(), goodRequest(), "key-00000001", domain.Fingerprint{}); err != nil {
+	if _, _, err := svc.Submit(t.Context(), goodRequest(), "key-00000001", domain.Fingerprint{}, nil); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	want := appNow.Add(app.KeyTTL)
