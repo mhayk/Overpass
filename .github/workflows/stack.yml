@@ -16,15 +16,22 @@
 
 name: stack
 
+# NO path filter on pull_request, deliberately. `cold start under five minutes`
+# is a REQUIRED status check on main. A path-filtered required check does not
+# report "skipped" when the paths do not match — it does not report at all, and
+# GitHub reads never-reported as pending, so any PR outside the filter is
+# blocked forever. That is not hypothetical: it blocked #80, a docs-only PR with
+# every other check green.
+#
+# Filtering here was an optimisation; the required check is a correctness
+# property, and the optimisation was worth about forty seconds. If you are
+# tempted to reintroduce the filter, drop the check from branch protection in
+# the same commit, and know that you have moved the gate from before the merge
+# to after it.
 on:
   push:
     branches: [main]
   pull_request:
-    paths:
-      - 'docker-compose.yml'
-      - 'deploy/**'
-      - 'scripts/stack-up.sh'
-      - '.github/workflows/stack.yml'
   workflow_dispatch:
 
 concurrency:
