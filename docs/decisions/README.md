@@ -25,6 +25,7 @@ paper trail is the point.
 | [0004](0004-postgresql-jsonb-over-document-store.md) | PostgreSQL with JSONB for semi-structured data, instead of adding a document store | accepted | M0 |
 | [0005](0005-docker-compose-over-kubernetes.md) | Docker Compose as the deployment target, not Kubernetes | accepted | M0 |
 | [0010](0010-test-strategy-and-coverage.md) | Treat the test suite as the verification harness for generated code, and gate coverage at 80/95 | accepted | M0 |
+| [0011](0011-tle-sourcing-live-and-frozen.md) | Fetch TLEs live from Celestrak at seed time, and test orbital math against a frozen snapshot | accepted | M1 |
 | [0012](0012-retain-superseded-acquisitions.md) | Retain superseded acquisitions with a status, and make the non-overlap constraint partial and deferred | accepted | M1 |
 | [0013](0013-parallel-agent-execution-in-worktrees.md) | Run parallel agent work as one git worktree per contract boundary, not as concurrent agents in one checkout | accepted | M1 |
 
@@ -40,20 +41,14 @@ before the constraint is felt is fiction.
 | 0007 | Allocation strategy, and the heuristic-versus-optimal tradeoff | M2 |
 | 0008 | Idempotency: inbound HTTP keys and the idempotent-consumer pattern | M1 |
 | 0009 | CesiumJS and deck.gl division of labour | M1 |
-| 0011 | TLE sourcing: live Celestrak fetch at seed time, frozen snapshot for tests | M1 |
 | 0014 | Planner-side re-planning semantics: round triggers, debounce, and in-flight requests | M2 |
 
-### Why 0011 and 0014 exist
+### Why 0014 exists
 
-Neither is in the original spec's ADR list. Both are consequences of decisions
-taken later, and both are the kind of thing that would otherwise become an
-undocumented assumption:
+It is not in the original spec's ADR list. It is a consequence of a decision
+taken later, and the kind of thing that would otherwise become an undocumented
+assumption:
 
-- **0011** — TLEs are fetched live from Celestrak at seed time, which exercises
-  the `tle_epoch` staleness logic honestly but makes results non-deterministic.
-  Golden-reference tests for orbital math therefore run against a *frozen*
-  snapshot committed to `testdata/tle/`. Two TLE sources with two different
-  purposes is exactly the sort of split that needs writing down.
 - **0014** — the half of supersession that [0012](0012-retain-superseded-acquisitions.md)
   deliberately did not decide. 0012 settles how superseded acquisitions are
   *stored*, because M1-01 cannot write the exclusion constraint without knowing.
