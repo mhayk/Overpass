@@ -11,6 +11,8 @@ requires-python = ">=3.12"
 # connection reuse, which is exactly the code nobody reviews carefully.
 dependencies = [
     "httpx>=0.28,<0.29",
+    "sgp4>=2.27,<3",
+    "skyfield>=1.54,<2",
 ]
 
 [dependency-groups]
@@ -54,3 +56,13 @@ files = ["src", "tests"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --strict-markers --strict-config"
+
+# Neither Skyfield nor sgp4 ships a py.typed marker, so mypy cannot see their
+# signatures. Declared per-module rather than by relaxing strictness globally:
+# this says exactly which two libraries are opaque, and everything we write on
+# top of them stays fully checked. The boundary is narrow on purpose — the
+# wrappers in feasibility.orbit annotate every value that crosses out of these
+# libraries, so an untyped return does not leak past propagation.py.
+[[tool.mypy.overrides]]
+module = ["skyfield.*", "sgp4.*"]
+ignore_missing_imports = true
