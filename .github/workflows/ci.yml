@@ -69,6 +69,24 @@ jobs:
           # hand-written contracttest package is still checked.
           args: --timeout=5m ./contracttest/...
 
+      # The action above is pinned to gen/go because that module needs the
+      # generated-code exception. Service modules get the linter in full, and
+      # they are discovered rather than listed — a hardcoded list is a list that
+      # silently omits the next service somebody adds.
+      - name: golangci-lint — service modules
+        run: |
+          set -euo pipefail
+          curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh             | sh -s -- -b "$(go env GOPATH)/bin" v2.12.2
+          linted=0
+          while read -r m; do
+            [ -z "$m" ] && continue
+            case "$m" in ./gen/*) continue ;; esac
+            echo "==> $m"
+            (cd "$m" && "$(go env GOPATH)/bin/golangci-lint" run --timeout=5m ./...)
+            linted=$((linted + 1))
+          done <<< "${{ steps.modules.outputs.list }}"
+          echo "linted $linted service module(s)"
+
       # -race is not optional and never will be. The concurrency this system
       # will contain — idempotent consumers, an outbox relay with SKIP LOCKED,
       # a planner holding an advisory lock — produces exactly the bugs that are
