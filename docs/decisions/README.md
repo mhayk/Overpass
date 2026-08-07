@@ -24,6 +24,7 @@ paper trail is the point.
 | [0003](0003-consistency-boundaries-and-cap-position.md) | Draw service boundaries along consistency requirements, and place each service deliberately on the CAP tradeoff | accepted | M0 |
 | [0004](0004-postgresql-jsonb-over-document-store.md) | PostgreSQL with JSONB for semi-structured data, instead of adding a document store | accepted | M0 |
 | [0005](0005-docker-compose-over-kubernetes.md) | Docker Compose as the deployment target, not Kubernetes | accepted | M0 |
+| [0010](0010-test-strategy-and-coverage.md) | Treat the test suite as the verification harness for generated code, and gate coverage at 80/95 | accepted | M0 |
 
 ## Planned
 
@@ -37,7 +38,6 @@ before the constraint is felt is fiction.
 | 0007 | Allocation strategy, and the heuristic-versus-optimal tradeoff | M2 |
 | 0008 | Idempotency: inbound HTTP keys and the idempotent-consumer pattern | M1 |
 | 0009 | CesiumJS and deck.gl division of labour | M1 |
-| 0010 | Test strategy and coverage targets | M0/M1 |
 | 0011 | TLE sourcing: live Celestrak fetch at seed time, frozen snapshot for tests | M1 |
 | 0012 | Plan supersession semantics for re-planned horizon buckets | M2 |
 
