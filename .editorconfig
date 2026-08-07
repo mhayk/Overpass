@@ -1,0 +1,43 @@
+# Settings chosen to agree with each formatter rather than to fight it:
+# gofmt for Go, ruff format for Python, prettier for TS/JSON/YAML/Markdown.
+# An .editorconfig that disagrees with the formatter just means every save
+# produces a diff the formatter then reverts.
+
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 2
+
+# gofmt uses tabs. This is not negotiable and not worth an opinion.
+[*.go]
+indent_style = tab
+indent_size = 4
+
+[Makefile]
+indent_style = tab
+
+[*.{py,pyi}]
+indent_size = 4
+max_line_length = 100
+
+[*.{ts,tsx,js,jsx,mjs,cjs}]
+indent_size = 2
+
+[*.{json,jsonc}]
+indent_size = 2
+
+[*.{yaml,yml}]
+indent_size = 2
+
+# Markdown: trailing whitespace is a hard line break, so trimming it changes
+# rendered output.
+[*.md]
+trim_trailing_whitespace = false
+
+[*.sh]
+indent_size = 2

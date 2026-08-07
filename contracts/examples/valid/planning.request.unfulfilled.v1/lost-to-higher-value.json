@@ -1,0 +1,27 @@
+{
+  "event_id": "31111111-2222-4333-8444-555555555555",
+  "event_type": "planning.request.unfulfilled.v1",
+  "schema_version": "1.0.0",
+  "occurred_at": "2026-08-07T09:14:07Z",
+  "correlation_id": "86666666-7777-4888-8999-aaaaaaaaaaaa",
+  "causation_id": "96666666-7777-4888-8999-aaaaaaaaaaaa",
+  "producer": "planner-service",
+  "data": {
+    "request_id": "dbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+    "customer_id": "acme-imaging",
+    "round_id": "ebbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+    "satellite_ids_considered": ["SENTINEL-1A", "ICEYE-X7"],
+    "reason_code": "LOST_TO_HIGHER_VALUE",
+    "explanation": {
+      "own_effective_value_credits": 8000,
+      "winning_request_id": "fbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+      "winning_effective_value_credits": 11250,
+      "shortfall_credits": 3251,
+      "best_rejected_opportunity_id": "0bbbbbbb-cccc-4ddd-8eee-ffffffffffff"
+    },
+    "age_rounds": 3,
+    "eligible_for_retry": true,
+    "next_round_eligible_at": "2026-08-08T00:00:00Z",
+    "decided_at": "2026-08-07T09:14:07Z"
+  }
+}
