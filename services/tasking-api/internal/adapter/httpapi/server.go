@@ -15,13 +15,14 @@ import (
 
 // Server owns the routing table and nothing else.
 type Server struct {
-	health *app.HealthService
-	log    *slog.Logger
+	health    *app.HealthService
+	submitter *app.SubmitService
+	log       *slog.Logger
 }
 
 // New builds the router.
-func New(health *app.HealthService, log *slog.Logger) *Server {
-	return &Server{health: health, log: log}
+func New(health *app.HealthService, submitter *app.SubmitService, log *slog.Logger) *Server {
+	return &Server{health: health, submitter: submitter, log: log}
 }
 
 // Routes returns the fully wired handler.
@@ -31,6 +32,7 @@ func (s *Server) Routes() http.Handler {
 
 	r.Get("/healthz", s.liveness)
 	r.Get("/readyz", s.readiness)
+	r.Post("/v1/tasking-requests", s.submit)
 	return r
 }
 
@@ -99,6 +101,10 @@ func (s *Server) readiness(w http.ResponseWriter, r *http.Request) {
 func writeJSON(w http.ResponseWriter, code int, body any) error {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
+	return encode(w, body)
+}
+
+func encode(w http.ResponseWriter, body any) error {
 	if err := json.NewEncoder(w).Encode(body); err != nil {
 		return fmt.Errorf("encoding response: %w", err)
 	}

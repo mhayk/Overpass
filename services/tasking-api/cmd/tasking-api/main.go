@@ -22,7 +22,14 @@ import (
 	"github.com/mhayk/overpass/services/tasking-api/internal/adapter/logging"
 	"github.com/mhayk/overpass/services/tasking-api/internal/adapter/postgres"
 	"github.com/mhayk/overpass/services/tasking-api/internal/app"
+	"github.com/mhayk/overpass/services/tasking-api/internal/domain"
 )
+
+// systemClock is the real clock. Everything that needs the time takes a
+// port.Clock instead of calling time.Now, so a test can pin it.
+type systemClock struct{}
+
+func (systemClock) Now() time.Time { return time.Now().UTC() }
 
 func main() {
 	// Signals are trapped BEFORE anything long-running starts, so a Ctrl-C
@@ -64,10 +71,16 @@ func run(ctx context.Context) error {
 	defer pool.Close()
 
 	health := app.NewHealthService(cfg.Version, cfg.ReadinessTimeout, postgres.NewProbe(pool))
+	submitter := app.NewSubmitService(
+		postgres.NewSubmissions(pool),
+		systemClock{},
+		domain.ConfiguredSensors(),
+		domain.DefaultValidationPolicy(),
+	)
 
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           httpapi.New(health, log).Routes(),
+		Handler:           httpapi.New(health, submitter, log).Routes(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
