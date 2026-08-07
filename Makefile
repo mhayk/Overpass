@@ -16,9 +16,9 @@ SHELL := /usr/bin/env bash
 # that reformats output would fail the codegen drift check for no semantic
 # reason, and debugging that is a bad afternoon.
 OAPI_CODEGEN_VERSION  := v2.4.1
-GO_JSONSCHEMA_VERSION := v0.17.0
+GO_JSONSCHEMA_VERSION := v0.24.1
 DATAMODEL_CG_VERSION  := 0.28.5
-GOLANGCI_LINT_VERSION := v1.62.2
+GOLANGCI_LINT_VERSION := v2.12.2
 
 ROOT        := $(shell git rev-parse --show-toplevel 2>/dev/null || pwd)
 TOOLS_BIN   := $(ROOT)/.tools/bin
@@ -137,6 +137,10 @@ test-web: ## Frontend unit tests
 	@if [ -f web/package.json ]; then cd web && npm test; \
 	else echo "skip: web not yet initialised"; fi
 
+.PHONY: coverage
+coverage: ## Enforce coverage thresholds (80% overall, 95% planner and geometry)
+	@$(ROOT)/scripts/coverage-gate.sh
+
 .PHONY: test-integration
 test-integration: ## Integration tests against real Postgres and NATS (Testcontainers)
 	@echo "not yet implemented — issue #30 (M1-18)"
@@ -172,7 +176,7 @@ tools: $(TOOLS_BIN)/golangci-lint $(TOOLS_BIN)/oapi-codegen $(TOOLS_BIN)/go-json
 
 $(TOOLS_BIN)/golangci-lint:
 	@mkdir -p $(TOOLS_BIN)
-	GOBIN=$(TOOLS_BIN) go install github.com/golangci/golangci-lint/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+	GOBIN=$(TOOLS_BIN) go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 
 $(TOOLS_BIN)/oapi-codegen:
 	@mkdir -p $(TOOLS_BIN)

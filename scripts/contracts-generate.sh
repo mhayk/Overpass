@@ -22,7 +22,7 @@ TOOLS="$ROOT/.tools/bin"
 # Pinned exactly. A generator minor bump that reformats output would fail the
 # drift check for no semantic reason, and debugging that is a bad afternoon.
 OAPI_CODEGEN_VERSION="v2.4.1"
-GO_JSONSCHEMA_VERSION="v0.17.0"
+GO_JSONSCHEMA_VERSION="v0.24.1"
 DATAMODEL_CG_VERSION="0.28.5"
 
 # datamodel-code-generator 0.28.5 cannot run under Python 3.14 — it maps

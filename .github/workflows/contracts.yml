@@ -1,0 +1,81 @@
+# Contracts CI — the gate that makes contracts-first real.
+#
+# Runs on every push and PR that touches contracts/, gen/, or the scripts that
+# tie them together. This is the most important workflow in the repository: if
+# it is green, the Go and Python halves of the system provably agree about what
+# an Opportunity is. If it is not, they do not, and everything downstream is
+# built on sand.
+
+name: contracts
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A new push to the same branch makes the in-flight run irrelevant. Cancelling
+# it frees a runner and shortens the feedback loop, which is the only thing CI
+# is actually for.
+concurrency:
+  group: contracts-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    name: validate, drift, round-trip
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          # 1.25 because gen/go's dependency graph requires it. Go would
+          # download the toolchain automatically, but pinning here makes the
+          # requirement visible instead of hiding it in a transitive bump.
+          go-version: '1.25'
+          cache-dependency-path: gen/go/go.sum
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # Cache the compiled generators. Building oapi-codegen and go-jsonschema
+      # from source is most of this job's wall-clock, and neither changes unless
+      # the pinned version in the Makefile changes.
+      - name: Cache codegen tools
+        uses: actions/cache@v4
+        with:
+          path: .tools/bin
+          key: codegen-tools-${{ runner.os }}-${{ hashFiles('Makefile', 'scripts/contracts-generate.sh') }}
+
+      # 1. Are the schemas well-formed, do the examples validate, and — the
+      #    check that carries real information — are the negative fixtures
+      #    actually rejected?
+      - name: Validate schemas, examples, and fixtures
+        run: make contracts-validate
+
+      # 2. Does gen/ match a fresh generation? This catches the two mistakes
+      #    that would otherwise desynchronise the two languages: editing a
+      #    schema without regenerating, and hand-editing generated code.
+      - name: Codegen drift gate
+        run: make contracts-verify
+
+      # 3. Do the generated types in BOTH languages actually accept what the
+      #    schema accepts and refuse what it refuses? Nothing guarantees two
+      #    independently written generators agree, so it is checked.
+      - name: Round-trip fixtures through generated Go and Python
+        run: make contracts-smoke
+
+      - name: Build and vet generated Go
+        working-directory: gen/go
+        run: |
+          go build ./...
+          go vet ./...
