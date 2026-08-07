@@ -35,10 +35,16 @@ CRITICAL_PATHS=(
 fail=0
 note() { printf '  %s\n' "$*"; }
 
-profiles=$(find . -name coverage.out -not -path './.tools/*' 2>/dev/null || true)
+# gen/ is excluded. Coverage of generated types measures nothing: the code was
+# not written by anyone, cannot be changed without editing a generator, and its
+# correctness is established by the round-trip tests in gen/go/contracttest and
+# by the drift gate — both stronger evidence than a percentage. Including it
+# would also drag the overall figure down with thousands of generated lines and
+# make the number meaningless for the code that matters.
+profiles=$(find . -name coverage.out -not -path './.tools/*' -not -path './gen/*' 2>/dev/null || true)
 if [[ -z "$profiles" ]]; then
-  echo "no coverage profiles found — no Go packages with tests yet"
-  echo "gate is declared and will apply from M1 (issue #14 onward)"
+  echo "no coverage profiles under services/ — no hand-written Go packages yet"
+  echo "gate is declared and applies from M1 (issue #14 onward)"
   exit 0
 fi
 
