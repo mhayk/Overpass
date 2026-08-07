@@ -1,0 +1,27 @@
+{
+  "event_id": "41111111-2222-4333-8444-555555555555",
+  "event_type": "planning.plan.committed.v1",
+  "schema_version": "1.0.0",
+  "occurred_at": "2026-08-07T09:14:07Z",
+  "correlation_id": "a6666666-7777-4888-8999-aaaaaaaaaaaa",
+  "causation_id": "b6666666-7777-4888-8999-aaaaaaaaaaaa",
+  "producer": "planner-service",
+  "data": {
+    "plan_id": "1bbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+    "round_id": "2bbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+    "satellite_id": "SENTINEL-1A",
+    "bucket": { "start": "2026-08-07T18:00:00Z", "end": "2026-08-08T00:00:00Z" },
+    "plan_version": 0,
+    "policy": "GREEDY_BY_VALUE_DENSITY",
+    "committed_at": "2026-08-07T09:14:07Z",
+    "acquisitions": [],
+    "metrics": {
+      "total_plan_value_credits": 0,
+      "requests_fulfilled": 0,
+      "candidate_opportunity_count": 0,
+      "duty_cycle_used_s": 0,
+      "duty_cycle_budget_s": 600,
+      "allocation_duration_ms": 4
+    }
+  }
+}

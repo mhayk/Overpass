@@ -1,0 +1,68 @@
+# Overpass
+#
+# Note what is deliberately NOT ignored: gen/ is committed. Reviewers see the
+# real generated types in a pull request, and a contributor can build without
+# installing three code generators. The codegen drift check in CI is what stops
+# the committed copy from quietly becoming a lie.
+
+# --- Go ---
+*.exe
+*.test
+*.out
+coverage.out
+coverage.html
+vendor/
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+dist/
+build/
+*.egg-info/
+
+# --- Node / web ---
+node_modules/
+.next/
+out/
+.turbo/
+*.tsbuildinfo
+npm-debug.log*
+yarn-error.log*
+
+# --- Tooling ---
+.tools/
+*.local
+
+# --- Environment ---
+# .env.example IS committed; real .env files are not.
+.env
+.env.*
+!.env.example
+
+# --- Local infrastructure state ---
+# Postgres and NATS data live in named Docker volumes, not bind mounts, so
+# nothing lands here in normal use. This is a guard against a stray override.
+.data/
+pgdata/
+natsdata/
+
+# --- Test and load-test output ---
+testdata/tle/cache/
+loadtest/results/
+playwright-report/
+test-results/
+
+# --- Editors and OS ---
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
