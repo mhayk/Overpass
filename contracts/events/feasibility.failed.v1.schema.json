@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://overpass.dev/contracts/events/feasibility.failed.v1.schema.json",
+  "title": "FeasibilityFailed",
+  "description": "feasibility-service could not produce opportunities for a request. This covers two genuinely different situations, distinguished by the retryable flag:\n\n1. A CORRECT NEGATIVE ANSWER — the geometry simply does not work. NO_ACCESS_IN_HORIZON means we propagated the whole constellation and no satellite can see this target at an acceptable incidence angle within the window. That is a final answer and the request moves to INFEASIBLE.\n\n2. A FAILURE TO ANSWER — TLE_STALE, TLE_UNAVAILABLE, PROPAGATION_ERROR. We do not know whether the target is imageable, and we refuse to guess. TLE_STALE in particular is a deliberate refusal: a days-old element set drifts enough to move an access window, and publishing a confidently wrong window is worse than publishing nothing.\n\nCollapsing these two into one code would make 'physically impossible' and 'we were unable to check' indistinguishable to both the customer and the operator, which is why the flag exists.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event_id", "event_type", "schema_version", "occurred_at", "correlation_id", "causation_id", "producer", "data"],
+  "properties": {
+    "event_id": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/EventId" },
+    "event_type": { "const": "feasibility.failed.v1" },
+    "schema_version": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/SchemaVersion" },
+    "occurred_at": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/OccurredAt" },
+    "correlation_id": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/CorrelationId" },
+    "causation_id": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/CausationId" },
+    "producer": { "const": "feasibility-service" },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request_id", "reason_code", "retryable", "failed_at"],
+      "properties": {
+        "request_id": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Uuid" },
+        "reason_code": {
+          "type": "string",
+          "enum": [
+            "NO_ACCESS_IN_HORIZON",
+            "CONSTRAINTS_TOO_NARROW",
+            "TLE_STALE",
+            "TLE_UNAVAILABLE",
+            "PROPAGATION_ERROR",
+            "UNSUPPORTED_TARGET_GEOMETRY",
+            "HORIZON_EXHAUSTED",
+            "INTERNAL_ERROR"
+          ],
+          "description": "NO_ACCESS_IN_HORIZON: propagated everything, nothing sees the target at a valid geometry. CONSTRAINTS_TOO_NARROW: access exists but the customer's own incidence/look-side constraints eliminated all of it — a distinct and actionable answer. TLE_STALE: the element set exceeded the staleness threshold and we refused to compute. HORIZON_EXHAUSTED: the deadline passed while the request was queued."
+        },
+        "retryable": {
+          "type": "boolean",
+          "description": "True when the failure is about OUR ability to answer rather than about the physics. Retryable failures go back to the stream with backoff; non-retryable ones move the request to INFEASIBLE and stop. Getting this wrong in either direction is expensive: retrying a physical impossibility burns compute forever, and not retrying a transient TLE fetch silently drops a satisfiable request."
+        },
+        "reason_detail": { "type": "string", "maxLength": 1024 },
+        "horizon": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/TimeWindow" },
+        "satellites_evaluated": { "type": "integer", "minimum": 0 },
+        "tle_references": {
+          "type": "array",
+          "items": { "$ref": "https://overpass.dev/contracts/common/sar.v1.schema.json#/$defs/TleReference" },
+          "description": "Present even on failure, and especially useful for TLE_STALE: it shows exactly which satellite's element set was too old and by how much."
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Which delivery attempt produced this failure. Compared against the stream's max-deliver limit to decide DLQ routing."
+        },
+        "failed_at": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Timestamp" }
+      }
+    }
+  },
+  "examples": [
+    {
+      "event_id": "bb22cc33-dd44-4e55-8f66-aa77bb88cc99",
+      "event_type": "feasibility.failed.v1",
+      "schema_version": "1.0.0",
+      "occurred_at": "2026-08-07T09:20:31.204Z",
+      "correlation_id": "2b3c4d5e-6f7a-4b8c-9d0e-1f2a3b4c5d6e",
+      "causation_id": "1c2d3e4f-5a6b-4c7d-8e9f-0a1b2c3d4e5f",
+      "producer": "feasibility-service",
+      "data": {
+        "request_id": "8a9b0c1d-2e3f-4a5b-8c6d-7e8f9a0b1c2d",
+        "reason_code": "TLE_STALE",
+        "retryable": true,
+        "reason_detail": "TLE for CAPELLA-14 is 79.2h old, exceeding the 48h staleness threshold. Refusing to compute rather than publishing a drifted access window.",
+        "horizon": { "start": "2026-08-07T10:00:00Z", "end": "2026-08-08T10:00:00Z" },
+        "satellites_evaluated": 6,
+        "tle_references": [
+          {
+            "satellite_id": "CAPELLA-14",
+            "norad_id": 55555,
+            "tle_epoch": "2026-08-04T02:00:00Z",
+            "tle_age_hours": 79.2,
+            "staleness": "STALE"
+          }
+        ],
+        "attempt": 1,
+        "failed_at": "2026-08-07T09:20:31.200Z"
+      }
+    }
+  ]
+}

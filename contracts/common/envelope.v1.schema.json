@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://overpass.dev/contracts/common/envelope.v1.schema.json",
+  "title": "EventEnvelope",
+  "description": "Fields carried by every Overpass event. These are not composed into event schemas via allOf: each event schema lists them explicitly and $refs the field definitions here. That is more verbose but keeps every event file readable on its own and keeps the Go and Python generators on their well-trodden paths. See contracts/README.md.",
+  "$defs": {
+    "EventId": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "description": "Unique identifier for this event instance. This is the deduplication key: consumers insert it into processed_events in the same transaction as the state change, so a redelivery hits the unique constraint and rolls back harmlessly. A retried publish of the same logical event MUST reuse the same event_id."
+    },
+    "CorrelationId": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "description": "Identifies the whole business transaction. Set once at ingress and propagated unchanged through every downstream event, so a single tasking request's entire fan-out is greppable in logs by one value."
+    },
+    "CausationId": {
+      "type": ["string", "null"],
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "description": "The event_id of the event that directly caused this one. Null only for events with no antecedent (ingress). Correlation gives you the tree; causation gives you the edges."
+    },
+    "OccurredAt": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339 UTC timestamp of when the fact became true in the producing service, NOT when it was published. Handlers use this plus state-machine guards to tolerate out-of-order arrival, because global ordering is explicitly not assumed."
+    },
+    "SchemaVersion": {
+      "type": "string",
+      "pattern": "^1\\.[0-9]+\\.[0-9]+$",
+      "description": "Semantic version of this event's schema within the v1 major line. Adding an optional field is a minor bump. Removing a field, making an optional field required, or narrowing a type requires a new major line (a .v2 subject and a new schema file) — published schemas are never edited in place."
+    },
+    "EventType": {
+      "type": "string",
+      "pattern": "^[a-z]+(\\.[a-z_]+)+\\.v[0-9]+$",
+      "description": "Fully qualified event type, identical to the NATS subject it is published on. Consumers dispatch on this rather than on subject, so replay from a file behaves identically to replay from the stream."
+    },
+    "Producer": {
+      "type": "string",
+      "enum": [
+        "tasking-api",
+        "feasibility-service",
+        "planner-service",
+        "plan-gateway",
+        "acquisition-simulator"
+      ],
+      "description": "Service that emitted this event. Present for operability, not for routing — nothing may branch on producer, or the contract stops being a contract."
+    }
+  }
+}

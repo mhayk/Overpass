@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://overpass.dev/contracts/common/primitives.v1.schema.json",
+  "title": "Primitives",
+  "description": "Scalar domain types shared across events and the REST surface. Defined once so that a change to, say, the bid range is a one-line change rather than a search-and-replace across twelve files.",
+  "$defs": {
+    "Uuid": {
+      "type": "string",
+      "format": "uuid",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+    },
+    "Timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "RFC 3339 timestamp. Always serialised in UTC with a trailing Z. The system has exactly one timezone and it is UTC; local time never enters the domain."
+    },
+    "CustomerId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$",
+      "description": "Opaque customer identifier. Deliberately a stub: there is no authentication or multi-tenancy in this system, and the README says so as a scope cut rather than leaving it to be discovered."
+    },
+    "SatelliteId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32,
+      "pattern": "^[A-Z0-9][A-Z0-9_-]{0,31}$",
+      "description": "Stable internal satellite identifier, e.g. SENTINEL-1A. Distinct from norad_id because a satellite outlives any particular TLE."
+    },
+    "NoradId": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 999999,
+      "description": "NORAD catalog number, as it appears in the TLE. The join key back to Celestrak."
+    },
+    "Credits": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 100000000,
+      "description": "Bid or value in integer credits. Integers, not floats: allocation compares and sums these constantly, and float comparison in a tie-break is a bug waiting for a specific input. There is no settlement — nothing charges these."
+    },
+    "PriorityTier": {
+      "type": "string",
+      "enum": [
+        "GOVERNMENT",
+        "CIVIL_PROTECTION",
+        "COMMERCIAL",
+        "BEST_EFFORT"
+      ],
+      "description": "Customer class. The tier multiplier and the ageing curve that turn (tier, bid, age) into an effective value are deliberately NOT part of this contract — they live in planner policy configuration, so fairness can be re-tuned without versioning a schema, and so clients cannot game a published formula."
+    },
+    "DurationSeconds": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Duration in seconds. Fractional seconds are meaningful here — slew times and dwell times are sub-second-sensitive."
+    },
+    "DurationMillis": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Elapsed wall-clock milliseconds, for operational metrics carried on events."
+    },
+    "Ratio": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "A normalised 0..1 ratio."
+    },
+    "TimeWindow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end"],
+      "properties": {
+        "start": { "$ref": "#/$defs/Timestamp" },
+        "end": { "$ref": "#/$defs/Timestamp" }
+      },
+      "description": "A half-open interval [start, end). JSON Schema cannot express end > start, so that check lives in the validating adapter on both sides of every boundary — noted here so its absence is not mistaken for an oversight."
+    }
+  }
+}

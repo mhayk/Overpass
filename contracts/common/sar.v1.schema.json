@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://overpass.dev/contracts/common/sar.v1.schema.json",
+  "title": "SarDomain",
+  "description": "SAR acquisition geometry and imaging modes. The single most important fact encoded here: SAR is SIDE-LOOKING. A target directly beneath the satellite is NOT imageable. Access therefore requires an incidence angle inside the sensor's valid band, a permitted look side, a squint within steering limits, and a slant range inside bounds — all four, simultaneously. Anything that models this as a nadir-pointing sensor is modelling a different instrument.",
+  "$defs": {
+    "ImagingMode": {
+      "type": "string",
+      "enum": ["SPOTLIGHT", "STRIPMAP", "SCAN"],
+      "description": "SPOTLIGHT: small area, finest resolution, longest dwell — the beam is steered to stare at one spot as the satellite passes. STRIPMAP: fixed beam, medium swath and resolution, dwell proportional to along-track length. SCAN: widest swath, coarsest resolution, shortest dwell per unit area. Mode selection interacts with both feasibility and plan value, which is why it is on the request rather than chosen silently."
+    },
+    "LookSide": {
+      "type": "string",
+      "enum": ["LEFT", "RIGHT"],
+      "description": "Which side of the ground track the beam points, in the along-track direction of travel. Some satellites and modes are constrained to one side; a target reachable only on the forbidden side is simply not accessible on that pass."
+    },
+    "LookSideConstraint": {
+      "type": "string",
+      "enum": ["LEFT", "RIGHT", "ANY"],
+      "description": "A customer-side preference or restriction. ANY means the planner may use either side."
+    },
+    "TleStaleness": {
+      "type": "string",
+      "enum": ["FRESH", "AGING", "STALE"],
+      "description": "Classification of tle_age_hours against configured thresholds. TLEs decay in accuracy — a days-old TLE drifts enough to move a computed access window by seconds to minutes, which is the difference between a valid plan and an unflyable one. FRESH: feasibility results are trusted. AGING: results are published with a flag and surfaced in the UI. STALE: feasibility REFUSES to compute and emits feasibility.failed.v1 with reason TLE_STALE. Refusing is the correct behaviour; producing a confidently wrong answer is not."
+    },
+    "TleReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["satellite_id", "norad_id", "tle_epoch", "tle_age_hours", "staleness"],
+      "properties": {
+        "satellite_id": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/SatelliteId" },
+        "norad_id": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/NoradId" },
+        "tle_epoch": {
+          "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Timestamp",
+          "description": "Epoch of the TLE used, decoded from the element set itself — not the time we fetched it."
+        },
+        "tle_age_hours": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Hours between tle_epoch and the time feasibility ran. Carried on the event so that a stale result is auditable after the fact, not just filterable at the time."
+        },
+        "staleness": { "$ref": "#/$defs/TleStaleness" }
+      },
+      "description": "Provenance of the orbital data behind a feasibility result. Present on every opportunity batch so that any computed window can be traced back to the exact element set that produced it."
+    },
+    "AccessGeometry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "incidence_angle_deg",
+        "look_side",
+        "squint_angle_deg",
+        "slant_range_km",
+        "elevation_angle_deg"
+      ],
+      "properties": {
+        "incidence_angle_deg": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 90,
+          "description": "Angle between the radar line of sight and the local vertical at the target. The sensor's valid band is configuration, not contract (default 15-45 degrees); the schema permits 0-90 so that a differently-specified sensor does not require a schema version. Values outside the configured band are filtered by feasibility and never appear on an opportunity."
+        },
+        "look_side": { "$ref": "#/$defs/LookSide" },
+        "squint_angle_deg": {
+          "type": "number",
+          "minimum": -90,
+          "maximum": 90,
+          "description": "Angle of the beam fore (positive) or aft (negative) of broadside. Zero is pure broadside. Bounded by the sensor's steering limit; SPOTLIGHT uses the widest range because staring at a fixed spot during a pass necessarily sweeps squint."
+        },
+        "slant_range_km": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 5000,
+          "description": "Line-of-sight distance from satellite to target. Bounded below by the sensor's minimum range and above by the link budget."
+        },
+        "elevation_angle_deg": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 90,
+          "description": "Elevation of the satellite above the target's local horizon. The complement of incidence for a spherical Earth; carried separately because the ellipsoidal computation makes them not quite complementary, and rounding that away would be exactly the sort of quiet error this project's golden tests exist to catch."
+        },
+        "ground_azimuth_deg": {
+          "type": "number",
+          "minimum": 0,
+          "exclusiveMaximum": 360,
+          "description": "Azimuth from target to satellite ground position, degrees clockwise from true north. Used by the frontend to draw the look direction."
+        },
+        "roll_angle_deg": {
+          "type": "number",
+          "minimum": -60,
+          "maximum": 60,
+          "description": "Spacecraft roll required to achieve this incidence angle. This is the input to slew_time(a, b): two acquisitions with very different roll angles need time between them for the attitude manoeuvre plus settling, which is what turns naive interval scheduling into scheduling with sequence-dependent setup times."
+        }
+      },
+      "description": "The four-plus-one geometric quantities that decide whether an acquisition is physically possible, plus the roll angle that decides whether it is reachable from the previous one."
+    },
+    "SensorModeParameters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "swath_width_km", "resolution_m", "min_dwell_s", "max_dwell_s"],
+      "properties": {
+        "mode": { "$ref": "#/$defs/ImagingMode" },
+        "swath_width_km": { "type": "number", "exclusiveMinimum": 0 },
+        "resolution_m": { "type": "number", "exclusiveMinimum": 0 },
+        "min_dwell_s": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/DurationSeconds" },
+        "max_dwell_s": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/DurationSeconds" },
+        "max_squint_deg": { "type": "number", "minimum": 0, "maximum": 90 },
+        "min_incidence_deg": { "type": "number", "minimum": 0, "maximum": 90 },
+        "max_incidence_deg": { "type": "number", "minimum": 0, "maximum": 90 },
+        "permitted_look_sides": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/LookSide" }
+        }
+      },
+      "description": "Per-mode sensor characteristics. Stored in a JSONB column because the fields genuinely differ per mode and will keep changing as the geometry model is refined — one of the four documented JSONB cases in ADR-0004."
+    },
+    "AcquisitionConstraints": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "look_side": { "$ref": "#/$defs/LookSideConstraint", "default": "ANY" },
+        "min_incidence_deg": { "type": "number", "minimum": 0, "maximum": 90 },
+        "max_incidence_deg": { "type": "number", "minimum": 0, "maximum": 90 },
+        "max_squint_deg": { "type": "number", "minimum": 0, "maximum": 90 },
+        "excluded_satellite_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "maxItems": 64,
+          "items": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/SatelliteId" }
+        }
+      },
+      "description": "Customer-supplied narrowing of the acceptable geometry. Every field is optional; omitting all of them means the sensor's own limits apply. Constraints can only narrow, never widen — a customer cannot request an incidence angle the sensor does not support."
+    }
+  }
+}

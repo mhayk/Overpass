@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://overpass.dev/contracts/events/acquisition.executed.v1.schema.json",
+  "title": "AcquisitionExecuted",
+  "description": "A planned acquisition has been executed — SIMULATED. There is no command uplink, no SAR image formation, and no downlink in this system; the producer is acquisition-simulator, and the README states this as a scope cut rather than leaving it to be discovered.\n\nThe event is not decorative. It closes the request lifecycle state machine (PLANNED -> ACQUIRED or back into contention), and it introduces the one thing a planner cannot control: reality diverging from the plan. Modelling failure statuses means the read model must handle an acquisition that was committed and then did not happen, which is a materially different code path from the happy one — and exactly the path most demo systems never exercise.\n\nIntroduced in M4.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event_id", "event_type", "schema_version", "occurred_at", "correlation_id", "causation_id", "producer", "data"],
+  "properties": {
+    "event_id": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/EventId" },
+    "event_type": { "const": "acquisition.executed.v1" },
+    "schema_version": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/SchemaVersion" },
+    "occurred_at": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/OccurredAt" },
+    "correlation_id": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/CorrelationId" },
+    "causation_id": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/CausationId" },
+    "producer": { "const": "acquisition-simulator" },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["acquisition_id", "plan_id", "satellite_id", "request_id", "mode", "scheduled_window", "status", "executed_at"],
+      "properties": {
+        "acquisition_id": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Uuid" },
+        "plan_id": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Uuid" },
+        "satellite_id": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/SatelliteId" },
+        "request_id": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Uuid" },
+        "customer_id": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/CustomerId" },
+        "mode": { "$ref": "https://overpass.dev/contracts/common/sar.v1.schema.json#/$defs/ImagingMode" },
+        "scheduled_window": {
+          "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/TimeWindow",
+          "description": "What the plan committed to."
+        },
+        "actual_window": {
+          "oneOf": [
+            { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/TimeWindow" },
+            { "type": "null" }
+          ],
+          "default": null,
+          "description": "What actually happened. Null for SKIPPED. Carried separately from scheduled_window so plan-versus-actual drift is measurable rather than assumed away — the interesting operational question is not whether acquisitions succeed, but by how much they slip."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["SUCCEEDED", "PARTIAL", "FAILED", "SKIPPED"],
+          "description": "PARTIAL means some usable data was collected but coverage or resolution fell short — the customer may or may not be satisfied, which is a genuinely ambiguous product case worth modelling. SKIPPED means the acquisition was never attempted, typically because the preceding slew overran."
+        },
+        "failure_reason": {
+          "oneOf": [
+            {
+              "type": "string",
+              "enum": ["ATTITUDE_ERROR", "SLEW_OVERRUN", "POWER_BUDGET_EXCEEDED", "THERMAL_LIMIT", "SENSOR_FAULT", "GROUND_ABORT", "TLE_DRIFT_MISS"]
+            },
+            { "type": "null" }
+          ],
+          "default": null,
+          "description": "Required when status is not SUCCEEDED. TLE_DRIFT_MISS is the domain-specific one and the reason it is worth simulating: the plan was computed against an element set that had drifted, the satellite was not quite where the propagation said it would be, and the target fell outside the swath. It is the physical consequence of the staleness threshold being set too loosely, and it closes the loop on why tle_epoch is tracked at all."
+        },
+        "collected_area_km2": { "type": "number", "minimum": 0 },
+        "achieved_resolution_m": { "type": "number", "exclusiveMinimum": 0 },
+        "target_coverage_ratio": {
+          "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Ratio",
+          "description": "Fraction of the requested target actually inside the collected footprint. The number that decides whether PARTIAL is acceptable."
+        },
+        "duty_cycle_consumed_s": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/DurationSeconds" },
+        "downlink_eta": {
+          "oneOf": [
+            { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Timestamp" },
+            { "type": "null" }
+          ],
+          "default": null,
+          "description": "Estimated time the product would be on the ground. Purely informational — ground-station and downlink scheduling is a second, structurally similar contention problem and is explicitly out of scope."
+        },
+        "executed_at": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Timestamp" }
+      }
+    }
+  },
+  "examples": [
+    {
+      "event_id": "ff66aa77-bb88-4c99-8d00-ee11ff22aa33",
+      "event_type": "acquisition.executed.v1",
+      "schema_version": "1.0.0",
+      "occurred_at": "2026-08-07T18:32:33.000Z",
+      "correlation_id": "9b8a7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d",
+      "causation_id": "dd44ee55-ff66-4a77-8b88-cc99dd00ee11",
+      "producer": "acquisition-simulator",
+      "data": {
+        "acquisition_id": "9c0d1e2f-3a4b-4c5d-8e6f-7a8b9c0d1e2f",
+        "plan_id": "7a8b9c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d",
+        "satellite_id": "SENTINEL-1A",
+        "request_id": "3c4d5e6f-7a8b-4c9d-8e1f-2a3b4c5d6e7f",
+        "customer_id": "civil-protection-pt",
+        "mode": "SPOTLIGHT",
+        "scheduled_window": { "start": "2026-08-07T18:32:20Z", "end": "2026-08-07T18:32:32.5Z" },
+        "actual_window": { "start": "2026-08-07T18:32:20.4Z", "end": "2026-08-07T18:32:32.9Z" },
+        "status": "SUCCEEDED",
+        "failure_reason": null,
+        "collected_area_km2": 102.4,
+        "achieved_resolution_m": 1.0,
+        "target_coverage_ratio": 1,
+        "duty_cycle_consumed_s": 18.5,
+        "downlink_eta": "2026-08-07T21:04:00Z",
+        "executed_at": "2026-08-07T18:32:32.900Z"
+      }
+    }
+  ]
+}

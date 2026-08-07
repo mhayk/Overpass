@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://overpass.dev/contracts/events/feasibility.opportunities.computed.v1.schema.json",
+  "title": "FeasibilityOpportunitiesComputed",
+  "description": "feasibility-service has propagated the constellation over the request's horizon and found at least one geometrically valid acquisition opportunity. An Opportunity is a (satellite, time window, geometry, mode) tuple that a real sensor could fly. It is a CANDIDATE, not a commitment — winning allocation is what turns it into an Acquisition.\n\nThis event is the fan-out point of the pipeline: one request produces one of these, carrying up to a few thousand opportunities. That size is why the planner batches by (satellite_id, bucket_start) rather than reacting per-opportunity.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event_id", "event_type", "schema_version", "occurred_at", "correlation_id", "causation_id", "producer", "data"],
+  "properties": {
+    "event_id": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/EventId" },
+    "event_type": { "const": "feasibility.opportunities.computed.v1" },
+    "schema_version": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/SchemaVersion" },
+    "occurred_at": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/OccurredAt" },
+    "correlation_id": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/CorrelationId" },
+    "causation_id": {
+      "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/CausationId",
+      "description": "The event_id of the tasking.request.received.v1 that triggered this sweep."
+    },
+    "producer": { "const": "feasibility-service" },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request_id", "computed_at", "horizon", "tle_references", "satellites_evaluated", "opportunity_count", "opportunities"],
+      "properties": {
+        "request_id": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Uuid" },
+        "computed_at": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Timestamp" },
+        "horizon": {
+          "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/TimeWindow",
+          "description": "The interval actually searched. Normally equal to the request window, but clamped to the configured maximum planning horizon — so a customer asking for a 30-day window gets an honest answer about the 7 days we searched, rather than a silent truncation."
+        },
+        "tle_references": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "https://overpass.dev/contracts/common/sar.v1.schema.json#/$defs/TleReference" },
+          "description": "Provenance for every satellite considered, including ones that produced no opportunities. This is what makes a computed window auditable back to the exact element set that produced it — and what makes 'the plan looked wrong because the TLE was two days old' a diagnosable statement rather than a guess."
+        },
+        "satellites_evaluated": { "type": "integer", "minimum": 0 },
+        "opportunity_count": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Length of the opportunities array. Redundant on purpose: consumers log and alert on it without deserialising a multi-megabyte array."
+        },
+        "truncated": {
+          "type": "boolean",
+          "default": false,
+          "description": "True if more opportunities existed than the configured per-request cap, and the lowest-quality ones were dropped. A silent cap would make the planner look worse than it is for reasons invisible in the data, so the cap is declared."
+        },
+        "compute_duration_ms": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/DurationMillis" },
+        "opportunities": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 20000,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["opportunity_id", "satellite_id", "mode", "access_window", "acquisition_duration_s", "geometry", "footprint", "duty_cycle_cost_s", "quality_score"],
+            "properties": {
+              "opportunity_id": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Uuid" },
+              "satellite_id": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/SatelliteId" },
+              "mode": { "$ref": "https://overpass.dev/contracts/common/sar.v1.schema.json#/$defs/ImagingMode" },
+              "access_window": {
+                "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/TimeWindow",
+                "description": "The interval within which the acquisition may START. The acquisition itself occupies acquisition_duration_s from whatever start the planner chooses. Distinguishing the window from the duration is what gives the planner slack to shift an acquisition and absorb a slew — collapsing them into a fixed interval would throw away the system's main scheduling freedom."
+              },
+              "acquisition_duration_s": {
+                "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/DurationSeconds",
+                "description": "Dwell required for this mode over this target."
+              },
+              "orbit_number": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Revolution number at the time of access. The duty-cycle budget is enforced per orbit, so this is the bucketing key for that knapsack dimension."
+              },
+              "geometry": { "$ref": "https://overpass.dev/contracts/common/sar.v1.schema.json#/$defs/AccessGeometry" },
+              "footprint": {
+                "$ref": "https://overpass.dev/contracts/common/geometry.v1.schema.json#/$defs/Polygon",
+                "description": "Ground footprint the sensor would collect, on the WGS84 ellipsoid. Drives both the containment check against the target and the 2D coverage view."
+              },
+              "duty_cycle_cost_s": {
+                "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/DurationSeconds",
+                "description": "Imaging seconds this acquisition charges against the satellite's per-orbit power and thermal budget. Usually equals acquisition_duration_s, but modes with a warm-up or calibration overhead charge more — which is precisely what makes the duty cycle a knapsack constraint rather than a restatement of the interval constraint."
+              },
+              "quality_score": {
+                "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Ratio",
+                "description": "Normalised geometric quality, 0..1, derived from where the incidence angle sits in the sensor's band and how far the beam is squinted. A tie-break input to allocation and NOT a value: value comes from the bid and tier. Keeping quality and value separate keeps the mechanism honest."
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "event_id": "aa11bb22-cc33-4d44-8e55-ff66aa77bb88",
+      "event_type": "feasibility.opportunities.computed.v1",
+      "schema_version": "1.0.0",
+      "occurred_at": "2026-08-07T09:14:04.881Z",
+      "correlation_id": "9b8a7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d",
+      "causation_id": "0f1d2c3b-4a59-4687-9c8d-1e2f3a4b5c6d",
+      "producer": "feasibility-service",
+      "data": {
+        "request_id": "3c4d5e6f-7a8b-4c9d-8e1f-2a3b4c5d6e7f",
+        "computed_at": "2026-08-07T09:14:04.870Z",
+        "horizon": { "start": "2026-08-07T10:00:00Z", "end": "2026-08-08T10:00:00Z" },
+        "tle_references": [
+          {
+            "satellite_id": "SENTINEL-1A",
+            "norad_id": 39634,
+            "tle_epoch": "2026-08-06T21:41:12Z",
+            "tle_age_hours": 11.6,
+            "staleness": "FRESH"
+          }
+        ],
+        "satellites_evaluated": 6,
+        "opportunity_count": 1,
+        "truncated": false,
+        "compute_duration_ms": 742,
+        "opportunities": [
+          {
+            "opportunity_id": "d1e2f3a4-b5c6-4d7e-8f90-1a2b3c4d5e6f",
+            "satellite_id": "SENTINEL-1A",
+            "mode": "SPOTLIGHT",
+            "access_window": { "start": "2026-08-07T18:32:11Z", "end": "2026-08-07T18:33:47Z" },
+            "acquisition_duration_s": 12.5,
+            "orbit_number": 61204,
+            "geometry": {
+              "incidence_angle_deg": 33.7,
+              "look_side": "RIGHT",
+              "squint_angle_deg": -4.1,
+              "slant_range_km": 812.4,
+              "elevation_angle_deg": 54.9,
+              "ground_azimuth_deg": 281.3,
+              "roll_angle_deg": 29.2
+            },
+            "footprint": {
+              "type": "Polygon",
+              "coordinates": [[[-7.66, 40.28], [-7.57, 40.28], [-7.57, 40.35], [-7.66, 40.35], [-7.66, 40.28]]]
+            },
+            "duty_cycle_cost_s": 18.5,
+            "quality_score": 0.91
+          }
+        ]
+      }
+    }
+  ]
+}

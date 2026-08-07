@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://overpass.dev/contracts/events/tasking.request.rejected.v1.schema.json",
+  "title": "TaskingRequestRejected",
+  "description": "A tasking request was refused by tasking-api before entering the pipeline. Note this is a REJECTION, not an UNFULFILMENT: the request never became work. A request that was accepted and later lost the allocation gets planning.request.unfulfilled.v1 instead. Keeping the two distinct matters because they have completely different customer remedies — fix your input versus raise your bid.\n\nWhy this is an event at all, given that the caller already got a 4xx synchronously: the read model in plan-gateway needs the rejection for the customer's request history, and the operator needs rejection rates per reason as a metric. Publishing it is how those stay consistent with the write side.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event_id", "event_type", "schema_version", "occurred_at", "correlation_id", "causation_id", "producer", "data"],
+  "properties": {
+    "event_id": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/EventId" },
+    "event_type": { "const": "tasking.request.rejected.v1" },
+    "schema_version": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/SchemaVersion" },
+    "occurred_at": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/OccurredAt" },
+    "correlation_id": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/CorrelationId" },
+    "causation_id": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/CausationId" },
+    "producer": { "const": "tasking-api" },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request_id", "customer_id", "reason_code", "rejected_at"],
+      "properties": {
+        "request_id": {
+          "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Uuid",
+          "description": "Assigned even for rejected requests, so the customer has a stable handle to quote in support and so the rejection is addressable in the read model."
+        },
+        "customer_id": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/CustomerId" },
+        "reason_code": {
+          "type": "string",
+          "enum": [
+            "VALIDATION_FAILED",
+            "DEADLINE_IN_PAST",
+            "WINDOW_INVERTED",
+            "HORIZON_TOO_LONG",
+            "TARGET_UNSUPPORTED_GEOMETRY",
+            "TARGET_TOO_LARGE",
+            "UNSUPPORTED_MODE",
+            "CONSTRAINTS_UNSATISFIABLE",
+            "IDEMPOTENCY_KEY_CONFLICT",
+            "RATE_LIMITED"
+          ],
+          "description": "Machine-readable rejection cause. A closed enum, not free text, because the frontend's 'why?' panel branches on it and dashboards aggregate by it. CONSTRAINTS_UNSATISFIABLE covers constraints that no configured sensor could ever meet — caught at ingress rather than wasting a feasibility sweep to discover it. IDEMPOTENCY_KEY_CONFLICT means the key was reused with a different payload, which is a client bug and must not be silently treated as a replay."
+        },
+        "reason_detail": {
+          "type": "string",
+          "maxLength": 1024,
+          "description": "Human-readable elaboration. Never parsed."
+        },
+        "field_errors": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["pointer", "code"],
+            "properties": {
+              "pointer": {
+                "type": "string",
+                "description": "RFC 6901 JSON Pointer into the submitted body, e.g. /window/end. Lets the frontend highlight the offending field rather than showing a wall of text."
+              },
+              "code": { "type": "string", "maxLength": 64 },
+              "message": { "type": "string", "maxLength": 512 }
+            }
+          }
+        },
+        "rejected_at": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Timestamp" }
+      }
+    }
+  },
+  "examples": [
+    {
+      "event_id": "5a6b7c8d-9e0f-4a1b-8c2d-3e4f5a6b7c8d",
+      "event_type": "tasking.request.rejected.v1",
+      "schema_version": "1.0.0",
+      "occurred_at": "2026-08-07T09:15:44.002Z",
+      "correlation_id": "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+      "causation_id": null,
+      "producer": "tasking-api",
+      "data": {
+        "request_id": "7f8e9d0c-1b2a-4c3d-8e4f-5a6b7c8d9e0f",
+        "customer_id": "acme-imaging",
+        "reason_code": "DEADLINE_IN_PAST",
+        "reason_detail": "window.end is 2026-08-06T00:00:00Z, which is before the current time.",
+        "field_errors": [
+          { "pointer": "/window/end", "code": "deadline_in_past", "message": "must be in the future" }
+        ],
+        "rejected_at": "2026-08-07T09:15:44.000Z"
+      }
+    }
+  ]
+}

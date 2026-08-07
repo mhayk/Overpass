@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://overpass.dev/contracts/events/tasking.request.received.v1.schema.json",
+  "title": "TaskingRequestReceived",
+  "description": "A customer tasking request has been validated and durably persisted by tasking-api. Published through the transactional outbox in the same transaction that wrote the request row, so this event exists if and only if the request exists. Consumed by feasibility-service (to compute opportunities) and plan-gateway (to materialise the read model).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event_id", "event_type", "schema_version", "occurred_at", "correlation_id", "causation_id", "producer", "data"],
+  "properties": {
+    "event_id": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/EventId" },
+    "event_type": { "const": "tasking.request.received.v1" },
+    "schema_version": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/SchemaVersion" },
+    "occurred_at": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/OccurredAt" },
+    "correlation_id": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/CorrelationId" },
+    "causation_id": {
+      "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/CausationId",
+      "description": "Always null. This is the root of the causation tree — nothing inside Overpass caused it."
+    },
+    "producer": { "const": "tasking-api" },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request_id", "customer_id", "target", "window", "priority_tier", "bid_credits", "requested_modes", "submitted_at"],
+      "properties": {
+        "request_id": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Uuid" },
+        "customer_id": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/CustomerId" },
+        "target_name": {
+          "type": "string",
+          "maxLength": 128,
+          "description": "Human label for the target. Display only — never used in matching or allocation."
+        },
+        "target": { "$ref": "https://overpass.dev/contracts/common/geometry.v1.schema.json#/$defs/TargetGeometry" },
+        "window": {
+          "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/TimeWindow",
+          "description": "The customer's acceptable acquisition window. window.end is the deadline: an acquisition that finishes after it has no value, so the planner treats it as infeasible rather than as merely late."
+        },
+        "priority_tier": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/PriorityTier" },
+        "bid_credits": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Credits" },
+        "requested_modes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": { "$ref": "https://overpass.dev/contracts/common/sar.v1.schema.json#/$defs/ImagingMode" },
+          "description": "Acceptable imaging modes, unordered. Listing more than one widens the feasible set and therefore improves the chance of winning — mode flexibility is a real lever a customer can pull, and making it visible is a product decision, not an implementation detail."
+        },
+        "constraints": { "$ref": "https://overpass.dev/contracts/common/sar.v1.schema.json#/$defs/AcquisitionConstraints" },
+        "submitted_at": {
+          "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Timestamp",
+          "description": "When tasking-api accepted the request. Distinct from occurred_at only in that a retried outbox publish keeps submitted_at fixed. Also the origin for the fairness ageing factor."
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "event_id": "0f1d2c3b-4a59-4687-9c8d-1e2f3a4b5c6d",
+      "event_type": "tasking.request.received.v1",
+      "schema_version": "1.0.0",
+      "occurred_at": "2026-08-07T09:14:02.117Z",
+      "correlation_id": "9b8a7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d",
+      "causation_id": null,
+      "producer": "tasking-api",
+      "data": {
+        "request_id": "3c4d5e6f-7a8b-4c9d-8e1f-2a3b4c5d6e7f",
+        "customer_id": "civil-protection-pt",
+        "target_name": "Serra da Estrela wildfire perimeter",
+        "target": { "type": "Point", "coordinates": [-7.6167, 40.3167] },
+        "window": { "start": "2026-08-07T10:00:00Z", "end": "2026-08-08T10:00:00Z" },
+        "priority_tier": "CIVIL_PROTECTION",
+        "bid_credits": 4500,
+        "requested_modes": ["SPOTLIGHT", "STRIPMAP"],
+        "constraints": { "look_side": "ANY", "max_incidence_deg": 40 },
+        "submitted_at": "2026-08-07T09:14:02.101Z"
+      }
+    }
+  ]
+}

@@ -1,0 +1,135 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://overpass.dev/contracts/events/planning.request.unfulfilled.v1.schema.json",
+  "title": "PlanningRequestUnfulfilled",
+  "description": "A request that had at least one feasible opportunity did not win an acquisition in this round. This is the most product-significant event in the system, and the explanation object is the reason it exists.\n\nMost scheduling systems tell a customer 'no'. This one tells them WHICH constraint bound, and by how much: you were outbid by this much, or you fit the window but not the slew, or the satellite's power budget ran out, or your deadline passed while you waited. That is what powers the 'why was my request rejected?' panel in the frontend, and it is the UI equivalent of an ADR — the system explains its decisions rather than announcing them.\n\nDesigning the explanation as structured, per-reason data rather than a message string is deliberate: strings cannot be aggregated, charted, or acted on. 'Requests unfulfilled by reason' is a domain metric, and a bid-adjustment suggestion is only possible if the shortfall is a number.\n\nUNFULFILLED IS NOT REJECTED. A rejection (tasking.request.rejected.v1) means the request never entered the pipeline. Unfulfilled means it competed and lost — usually retryable, often by changing one input.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event_id", "event_type", "schema_version", "occurred_at", "correlation_id", "causation_id", "producer", "data"],
+  "properties": {
+    "event_id": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/EventId" },
+    "event_type": { "const": "planning.request.unfulfilled.v1" },
+    "schema_version": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/SchemaVersion" },
+    "occurred_at": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/OccurredAt" },
+    "correlation_id": {
+      "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/CorrelationId",
+      "description": "Carries the ORIGINATING REQUEST's correlation_id, not the round's. That is what lets one grep follow a single customer's request from ingress through to the reason it lost."
+    },
+    "causation_id": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/CausationId" },
+    "producer": { "const": "planner-service" },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request_id", "reason_code", "eligible_for_retry", "decided_at"],
+      "properties": {
+        "request_id": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Uuid" },
+        "customer_id": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/CustomerId" },
+        "round_id": {
+          "oneOf": [
+            { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Uuid" },
+            { "type": "null" }
+          ],
+          "description": "Null when the request never reached a round — e.g. DEADLINE_PASSED discovered by the sweeper."
+        },
+        "satellite_ids_considered": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/SatelliteId" }
+        },
+        "reason_code": {
+          "type": "string",
+          "enum": [
+            "LOST_TO_HIGHER_VALUE",
+            "BLOCKED_BY_SLEW_CONSTRAINT",
+            "DUTY_CYCLE_EXHAUSTED",
+            "DEADLINE_PASSED",
+            "NO_OPPORTUNITY_IN_BUCKET",
+            "SUPERSEDED",
+            "CANCELLED_BY_CUSTOMER"
+          ],
+          "description": "Which constraint actually bound. These are the four real ways to lose plus three bookkeeping cases:\n  LOST_TO_HIGHER_VALUE — the window existed and was free, but someone else's effective value was higher. Actionable: bid more, or widen your window.\n  BLOCKED_BY_SLEW_CONSTRAINT — the window was free, but reaching it from the neighbouring acquisition needed more attitude-slew time than the gap allowed. This is the sequence-dependent setup cost made visible, and it is the reason this scheduling problem is not simple interval scheduling.\n  DUTY_CYCLE_EXHAUSTED — the satellite's per-orbit imaging-seconds budget ran out. The knapsack dimension bound, not the interval one.\n  DEADLINE_PASSED — the request's window closed before a round could place it.\n  NO_OPPORTUNITY_IN_BUCKET — feasible elsewhere in the horizon, just not in this bucket. Bookkeeping: the request stays alive for later buckets.\n  SUPERSEDED — this request held an acquisition in a plan that has been replaced by a higher plan_version which did not include it. Only possible because a bucket can be re-planned.\n  CANCELLED_BY_CUSTOMER — withdrawn before allocation."
+        },
+        "explanation": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Structured, reason-specific detail. Which fields are populated depends on reason_code; all are optional so a single object shape serves every case rather than forcing a discriminated union through the generators.",
+          "properties": {
+            "own_effective_value_credits": {
+              "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Credits",
+              "description": "This request's value after tier multiplier and ageing. Shown next to the winner's so the customer sees the actual gap rather than being told 'you lost'."
+            },
+            "winning_request_id": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Uuid" },
+            "winning_effective_value_credits": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Credits" },
+            "shortfall_credits": {
+              "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Credits",
+              "description": "How much more effective value would have been needed to win. The single most useful number a losing customer can receive, and only expressible because the reason is structured data rather than prose."
+            },
+            "blocking_acquisition_id": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Uuid" },
+            "required_slew_s": {
+              "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/DurationSeconds",
+              "description": "Attitude manoeuvre plus settling time needed to reach this opportunity's roll angle from the neighbouring acquisition's."
+            },
+            "available_gap_s": {
+              "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/DurationSeconds",
+              "description": "Idle time actually available. required_slew_s > available_gap_s is the BLOCKED_BY_SLEW_CONSTRAINT condition, stated as two numbers the customer can see."
+            },
+            "duty_cycle_remaining_s": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/DurationSeconds" },
+            "duty_cycle_required_s": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/DurationSeconds" },
+            "deadline": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Timestamp" },
+            "superseded_by_plan_id": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Uuid" },
+            "best_rejected_opportunity_id": {
+              "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Uuid",
+              "description": "The strongest candidate this request had. The frontend renders it as a ghost on the timeline, so the de-confliction decision is visible rather than only its result."
+            }
+          }
+        },
+        "age_rounds": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "How many rounds this request has now lost. Input to the fairness ageing factor: a repeatedly-losing request gains weight over time, so pure highest-bid allocation does not starve low-bid customers forever. Carried on the event so the ageing behaviour is observable from outside the planner rather than being an invisible internal bias."
+        },
+        "eligible_for_retry": {
+          "type": "boolean",
+          "description": "Whether this request stays in contention for future rounds. False for DEADLINE_PASSED and CANCELLED_BY_CUSTOMER, which are terminal; true for the competitive losses, which are exactly the ones the ageing factor exists to eventually resolve."
+        },
+        "next_round_eligible_at": {
+          "oneOf": [
+            { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Timestamp" },
+            { "type": "null" }
+          ],
+          "default": null
+        },
+        "decided_at": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Timestamp" }
+      }
+    }
+  },
+  "examples": [
+    {
+      "event_id": "ee55ff66-aa77-4b88-8c99-dd00ee11ff22",
+      "event_type": "planning.request.unfulfilled.v1",
+      "schema_version": "1.0.0",
+      "occurred_at": "2026-08-07T09:14:07.410Z",
+      "correlation_id": "5e6f7a8b-9c0d-4e1f-8a2b-3c4d5e6f7a8b",
+      "causation_id": "cc33dd44-ee55-4f66-8a77-bb88cc99dd00",
+      "producer": "planner-service",
+      "data": {
+        "request_id": "1e2f3a4b-5c6d-4e7f-8a9b-0c1d2e3f4a5b",
+        "customer_id": "acme-imaging",
+        "round_id": "6f7a8b9c-0d1e-4f2a-8b3c-4d5e6f7a8b9c",
+        "satellite_ids_considered": ["SENTINEL-1A"],
+        "reason_code": "BLOCKED_BY_SLEW_CONSTRAINT",
+        "explanation": {
+          "own_effective_value_credits": 8000,
+          "blocking_acquisition_id": "9c0d1e2f-3a4b-4c5d-8e6f-7a8b9c0d1e2f",
+          "required_slew_s": 42.8,
+          "available_gap_s": 19.5,
+          "best_rejected_opportunity_id": "2f3a4b5c-6d7e-4f8a-8b9c-0d1e2f3a4b5c"
+        },
+        "age_rounds": 1,
+        "eligible_for_retry": true,
+        "next_round_eligible_at": "2026-08-08T00:00:00Z",
+        "decided_at": "2026-08-07T09:14:07.400Z"
+      }
+    }
+  ]
+}
