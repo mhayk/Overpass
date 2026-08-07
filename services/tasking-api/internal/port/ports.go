@@ -26,3 +26,39 @@ type DependencyProbe interface {
 type Clock interface {
 	Now() time.Time
 }
+
+// SubmissionStore persists a tasking request and its outbox event atomically.
+//
+// One method, and it takes both, because they must commit together. An
+// interface with Save and Publish as separate calls is an interface that
+// permits the dual-write problem — the adapter could satisfy it correctly, but
+// nothing would stop the next one from not.
+type SubmissionStore interface {
+	Save(ctx context.Context, req StoredRequest, event OutboxEvent) error
+}
+
+// StoredRequest is what the write model needs, already validated.
+type StoredRequest struct {
+	RequestID       string
+	CustomerID      string
+	TargetName      string
+	TargetWKT       string
+	WindowStart     time.Time
+	WindowEnd       time.Time
+	PriorityTier    string
+	BidCredits      int64
+	RequestedModes  []string
+	ConstraintsJSON []byte
+	SubmittedAt     time.Time
+}
+
+// OutboxEvent is the event that must exist if and only if the request does.
+type OutboxEvent struct {
+	EventID       string
+	EventType     string
+	SchemaVersion string
+	Subject       string
+	PayloadJSON   []byte
+	HeadersJSON   []byte
+	OccurredAt    time.Time
+}
