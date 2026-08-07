@@ -103,10 +103,103 @@ what stops the checked-in copy from becoming a lie.
 | `events/*.schema.json` | `datamodel-code-generator` | `gen/python/overpass_contracts/` — Pydantic v2 models |
 
 ```bash
+make contracts-validate   # schemas valid, examples and fixtures behave
 make contracts-generate   # regenerate everything
 make contracts-verify     # regenerate into a temp dir, fail on any diff
-make contracts-validate   # validate all examples/ fixtures against their schemas
+make contracts-smoke      # round-trip fixtures through the generated Go AND Python
+make contracts            # all of the above
 ```
+
+### Generator constraints, and the two real bugs they caused
+
+These are not trivia. Each one produced code that compiled, passed `go vet`,
+looked correct, and was broken — which is precisely the failure mode this
+project's test strategy exists to catch. They are recorded here because the next
+person to touch a schema will otherwise rediscover them the hard way.
+
+**Absolute `$id`, relative `$ref`.** `go-jsonschema` resolves `$ref` as a
+filesystem path; handed an absolute URI it tries to *HTTP-fetch* it and fails
+with a JSON parse error on the returned HTML. Python's `referencing` resolves a
+relative ref against the document's `$id`, producing the absolute URI it already
+has registered. Absolute `$id` plus relative `$ref` is the only combination both
+accept. Absolute refs work only in Python; dropping `$id` would forfeit the
+stable identity that versioning depends on.
+
+**`const` is rendered as `interface{}`.** `go-jsonschema` has no handling for
+`const`, so `"event_type": {"const": "..."}` generated an untyped
+`interface{}` field — losing exactly the type safety a discriminator exists to
+provide. A single-value `enum` is semantically identical in JSON Schema and
+generates a proper named type with a constant. Every `const` in these schemas is
+written as an enum of one for this reason.
+
+**Defined types do not inherit methods — timestamps could not decode.**
+`go-jsonschema` emits `type OccurredAt time.Time` for a `date-time` field. That
+is a *defined type*, not an alias, so it does **not** inherit `time.Time`'s
+`MarshalJSON`/`UnmarshalJSON`. Every timestamp in every event failed to decode
+at runtime:
+
+```
+json: cannot unmarshal string into Go struct field ... of type events.OccurredAt
+```
+
+`scripts/contracts-generate.sh` emits `gen/go/events/time_json.gen.go` with the
+missing methods, discovering the affected types by scanning the generated output
+so a new timestamp field in a future schema is covered automatically. Found by
+the round-trip test in `gen/go/contracttest`, not by reading the output.
+
+**`format: uuid` plus `pattern` is unparseable in Python.**
+`datamodel-code-generator` maps `format: uuid` onto Python's `UUID` type, and a
+string `pattern` cannot be applied to it — pydantic raises `TypeError` at parse
+time, so every event carrying an id was unparseable. The pattern was
+belt-and-braces, added because JSON Schema treats `format` as an annotation
+rather than an assertion by default. The correct fix is one rule stated once:
+keep `format`, and turn on format *assertion* in the validator
+(`FormatChecker`), rather than smuggling the same constraint in twice in
+mutually incompatible ways.
+
+**`prefixItems` is silently dropped by the Python generator.** The GeoJSON
+`Position` — a 2-tuple with longitude in `[-180, 180]` and latitude in
+`[-90, 90]` — becomes a bare `RootModel[list]` with only a length constraint.
+Element bounds vanish, so a longitude of `200.5` or a swapped lat/lon pair parses
+cleanly. **This one is not fixed, it is documented and asserted**, in the
+`PYDANTIC_REJECTS` table in `scripts/contracts_smoke.py` and the `structural`
+table in `gen/go/contracttest/roundtrip_test.go`. An unclassified fixture fails
+the run, so the gap cannot grow quietly.
+
+**Toolchain pins that are not about reproducibility.**
+`datamodel-code-generator` 0.28.5 maps `sys.version_info` onto a closed enum and
+raises on anything it does not recognise, so it *cannot run* under Python 3.14.
+`scripts/contracts-generate.sh` pins the interpreter it runs under (3.12),
+independently of whatever `python3` is on `PATH`.
+
+**`output:` must not be set in the oapi-codegen config.** The config file's
+output path wins over the `-o` flag, which silently made the drift check
+regenerate into `gen/` instead of its scratch tree — so it compared a directory
+against itself and passed unconditionally. A verification gate that cannot fail
+is worse than no gate, because it is trusted. Output location is a property of
+the invocation and is always passed with `-o`.
+
+### What the two bindings actually guarantee
+
+The generated types are **not** the authority on validity. The JSON Schema is.
+Services validate against the schema at the boundary — inbound on consume,
+outbound before publish — and never treat "it parsed into the model" as "it is
+valid".
+
+| Constraint | JSON Schema | Go (`encoding/json`) | Python (Pydantic) |
+| --- | --- | --- | --- |
+| Required fields | yes | yes | yes |
+| Undeclared fields (`additionalProperties: false`) | yes | yes, with `DisallowUnknownFields` | yes, `extra='forbid'` |
+| Enum membership | yes | **no** — named string types | yes, `Literal` |
+| Numeric bounds | yes | **no** | yes |
+| Array length | yes | **no** | yes |
+| String pattern / format | yes | **no** | yes |
+| `prefixItems` element bounds | yes | **no** | **no** |
+
+Go is the weaker binding, because the generator renders constrained scalars as
+plain named types. That is a fact about the tool, not a reason to distrust the
+contract — it is a reason to validate at the boundary, which is where validation
+belongs anyway.
 
 **Cost of this choice:** three generator dependencies and two toolchains.
 **What it buys:** the contract becomes a build-time gate rather than a

@@ -7,23 +7,23 @@
   "additionalProperties": false,
   "required": ["event_id", "event_type", "schema_version", "occurred_at", "correlation_id", "causation_id", "producer", "data"],
   "properties": {
-    "event_id": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/EventId" },
-    "event_type": { "const": "tasking.request.rejected.v1" },
-    "schema_version": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/SchemaVersion" },
-    "occurred_at": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/OccurredAt" },
-    "correlation_id": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/CorrelationId" },
-    "causation_id": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/CausationId" },
-    "producer": { "const": "tasking-api" },
+    "event_id": { "$ref": "../common/envelope.v1.schema.json#/$defs/EventId" },
+    "event_type": { "enum": ["tasking.request.rejected.v1"] },
+    "schema_version": { "$ref": "../common/envelope.v1.schema.json#/$defs/SchemaVersion" },
+    "occurred_at": { "$ref": "../common/envelope.v1.schema.json#/$defs/OccurredAt" },
+    "correlation_id": { "$ref": "../common/envelope.v1.schema.json#/$defs/CorrelationId" },
+    "causation_id": { "$ref": "../common/envelope.v1.schema.json#/$defs/CausationId" },
+    "producer": { "enum": ["tasking-api"] },
     "data": {
       "type": "object",
       "additionalProperties": false,
       "required": ["request_id", "customer_id", "reason_code", "rejected_at"],
       "properties": {
         "request_id": {
-          "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Uuid",
+          "$ref": "../common/primitives.v1.schema.json#/$defs/Uuid",
           "description": "Assigned even for rejected requests, so the customer has a stable handle to quote in support and so the rejection is addressable in the read model."
         },
-        "customer_id": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/CustomerId" },
+        "customer_id": { "$ref": "../common/primitives.v1.schema.json#/$defs/CustomerId" },
         "reason_code": {
           "type": "string",
           "enum": [
@@ -62,7 +62,7 @@
             }
           }
         },
-        "rejected_at": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Timestamp" }
+        "rejected_at": { "$ref": "../common/primitives.v1.schema.json#/$defs/Timestamp" }
       }
     }
   },

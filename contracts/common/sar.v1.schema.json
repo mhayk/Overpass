@@ -29,10 +29,10 @@
       "additionalProperties": false,
       "required": ["satellite_id", "norad_id", "tle_epoch", "tle_age_hours", "staleness"],
       "properties": {
-        "satellite_id": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/SatelliteId" },
-        "norad_id": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/NoradId" },
+        "satellite_id": { "$ref": "primitives.v1.schema.json#/$defs/SatelliteId" },
+        "norad_id": { "$ref": "primitives.v1.schema.json#/$defs/NoradId" },
         "tle_epoch": {
-          "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Timestamp",
+          "$ref": "primitives.v1.schema.json#/$defs/Timestamp",
           "description": "Epoch of the TLE used, decoded from the element set itself — not the time we fetched it."
         },
         "tle_age_hours": {
@@ -103,8 +103,8 @@
         "mode": { "$ref": "#/$defs/ImagingMode" },
         "swath_width_km": { "type": "number", "exclusiveMinimum": 0 },
         "resolution_m": { "type": "number", "exclusiveMinimum": 0 },
-        "min_dwell_s": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/DurationSeconds" },
-        "max_dwell_s": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/DurationSeconds" },
+        "min_dwell_s": { "$ref": "primitives.v1.schema.json#/$defs/DurationSeconds" },
+        "max_dwell_s": { "$ref": "primitives.v1.schema.json#/$defs/DurationSeconds" },
         "max_squint_deg": { "type": "number", "minimum": 0, "maximum": 90 },
         "min_incidence_deg": { "type": "number", "minimum": 0, "maximum": 90 },
         "max_incidence_deg": { "type": "number", "minimum": 0, "maximum": 90 },
@@ -130,7 +130,7 @@
           "type": "array",
           "uniqueItems": true,
           "maxItems": 64,
-          "items": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/SatelliteId" }
+          "items": { "$ref": "primitives.v1.schema.json#/$defs/SatelliteId" }
         }
       },
       "description": "Customer-supplied narrowing of the acceptable geometry. Every field is optional; omitting all of them means the sensor's own limits apply. Constraints can only narrow, never widen — a customer cannot request an incidence angle the sensor does not support."

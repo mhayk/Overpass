@@ -50,14 +50,19 @@ contracts-validate: ## Validate every event schema and its examples
 
 .PHONY: contracts-generate
 contracts-generate: ## Regenerate Go and Python types from the contracts
-	@echo "not yet implemented — issue #7 (M0-07)"
+	@$(ROOT)/scripts/contracts-generate.sh
 
 .PHONY: contracts-verify
 contracts-verify: ## Fail if regeneration would change anything (CI drift gate)
-	@echo "not yet implemented — issue #7 (M0-07)"
+	@$(ROOT)/scripts/contracts-verify.sh
+
+.PHONY: contracts-smoke
+contracts-smoke: ## Round-trip fixtures through the generated Go and Python types
+	@cd $(ROOT)/gen/go && go test ./contracttest/...
+	@$(ROOT)/scripts/contracts-smoke.sh
 
 .PHONY: contracts
-contracts: contracts-validate contracts-generate ## Validate then regenerate
+contracts: contracts-validate contracts-generate contracts-smoke ## Validate, regenerate, round-trip
 
 ## Development
 

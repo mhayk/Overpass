@@ -24,7 +24,7 @@ import sys
 from pathlib import Path
 
 import yaml
-from jsonschema import Draft202012Validator
+from jsonschema import Draft202012Validator, FormatChecker
 from openapi_spec_validator import validate as validate_openapi
 from referencing import Registry, Resource
 
@@ -53,14 +53,53 @@ def fail(message: str, detail: str = "") -> None:
             print(f"       {DIM}{line}{RESET}")
 
 
+def validator_for(schema: dict, registry: Registry) -> Draft202012Validator:
+    """Build a validator anchored at the schema's own ``$id``.
+
+    Subtle and worth spelling out. The schemas cross-reference each other with
+    *relative* paths (``../common/envelope.v1.schema.json#/$defs/EventId``), and
+    a relative ref is only meaningful relative to a base URI. Handing the raw
+    dict to ``Draft202012Validator`` leaves the base empty, so the ref stays
+    relative and fails to resolve.
+
+    Validating against ``{"$ref": <the schema's absolute $id>}`` instead makes
+    the registry resolve the document first. Everything inside it then resolves
+    against that document's own ``$id``, which is exactly what the relative refs
+    were written against.
+    """
+    return Draft202012Validator(
+        {"$ref": schema["$id"]},
+        registry=registry,
+        # Turn `format` from an annotation into an ASSERTION.
+        #
+        # JSON Schema treats `format` as advisory by default: `"format": "uuid"`
+        # documents intent and enforces nothing. That is why these schemas
+        # originally carried a redundant `pattern` alongside it — which then
+        # broke the Python generator, because a string pattern cannot be applied
+        # to the UUID type it produces.
+        #
+        # Asserting `format` here is the correct fix: one rule, stated once,
+        # actually enforced. `date-time` assertion additionally requires the
+        # rfc3339-validator package, which the runner installs.
+        format_checker=FormatChecker(),
+    )
+
+
 def build_registry() -> Registry:
     """Resolve $refs across files by registering every schema under its $id.
 
-    The schemas reference each other with absolute URIs
-    (https://overpass.dev/contracts/...) rather than relative paths. Absolute
-    URIs resolve identically no matter which directory a validator runs from,
-    which matters because these same schemas are consumed by Go and Python
-    generators with completely different working directories.
+    Every schema declares an absolute ``$id`` and refers to its siblings by
+    relative path. That combination is deliberate and is the only one both
+    toolchains accept:
+
+    - ``go-jsonschema`` resolves refs as filesystem paths. Given an absolute
+      URI it tries to HTTP-fetch it, which fails.
+    - Python's ``referencing`` resolves a relative ref against the document's
+      ``$id``, producing the absolute URI it already has registered.
+
+    Absolute ``$id`` + relative ``$ref`` satisfies both. Absolute refs satisfy
+    only Python; omitting ``$id`` entirely would lose the stable identity that
+    versioning depends on.
     """
     resources = []
     for path in sorted(CONTRACTS.rglob("*.schema.json")):
@@ -92,7 +131,7 @@ def check_examples(registry: Registry) -> None:
         if not examples:
             fail(f"{name} has no examples", "every event schema must carry at least one")
             continue
-        validator = Draft202012Validator(schema, registry=registry)
+        validator = validator_for(schema, registry)
         for index, example in enumerate(examples):
             errors = sorted(validator.iter_errors(example), key=lambda e: list(e.path))
             if errors:
@@ -116,9 +155,7 @@ def check_fixtures(registry: Registry) -> None:
     validators: dict[str, Draft202012Validator] = {}
     for path in sorted((CONTRACTS / "events").glob("*.schema.json")):
         schema = json.loads(path.read_text())
-        validators[path.name.removesuffix(".schema.json")] = Draft202012Validator(
-            schema, registry=registry
-        )
+        validators[path.name.removesuffix(".schema.json")] = validator_for(schema, registry)
 
     found = False
     for expectation in ("valid", "invalid"):

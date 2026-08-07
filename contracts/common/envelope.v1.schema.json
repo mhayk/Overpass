@@ -7,19 +7,16 @@
     "EventId": {
       "type": "string",
       "format": "uuid",
-      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
       "description": "Unique identifier for this event instance. This is the deduplication key: consumers insert it into processed_events in the same transaction as the state change, so a redelivery hits the unique constraint and rolls back harmlessly. A retried publish of the same logical event MUST reuse the same event_id."
     },
     "CorrelationId": {
       "type": "string",
       "format": "uuid",
-      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
       "description": "Identifies the whole business transaction. Set once at ingress and propagated unchanged through every downstream event, so a single tasking request's entire fan-out is greppable in logs by one value."
     },
     "CausationId": {
       "type": ["string", "null"],
       "format": "uuid",
-      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
       "description": "The event_id of the event that directly caused this one. Null only for events with no antecedent (ingress). Correlation gives you the tree; causation gives you the edges."
     },
     "OccurredAt": {

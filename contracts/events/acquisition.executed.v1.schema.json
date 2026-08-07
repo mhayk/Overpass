@@ -7,31 +7,31 @@
   "additionalProperties": false,
   "required": ["event_id", "event_type", "schema_version", "occurred_at", "correlation_id", "causation_id", "producer", "data"],
   "properties": {
-    "event_id": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/EventId" },
-    "event_type": { "const": "acquisition.executed.v1" },
-    "schema_version": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/SchemaVersion" },
-    "occurred_at": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/OccurredAt" },
-    "correlation_id": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/CorrelationId" },
-    "causation_id": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/CausationId" },
-    "producer": { "const": "acquisition-simulator" },
+    "event_id": { "$ref": "../common/envelope.v1.schema.json#/$defs/EventId" },
+    "event_type": { "enum": ["acquisition.executed.v1"] },
+    "schema_version": { "$ref": "../common/envelope.v1.schema.json#/$defs/SchemaVersion" },
+    "occurred_at": { "$ref": "../common/envelope.v1.schema.json#/$defs/OccurredAt" },
+    "correlation_id": { "$ref": "../common/envelope.v1.schema.json#/$defs/CorrelationId" },
+    "causation_id": { "$ref": "../common/envelope.v1.schema.json#/$defs/CausationId" },
+    "producer": { "enum": ["acquisition-simulator"] },
     "data": {
       "type": "object",
       "additionalProperties": false,
       "required": ["acquisition_id", "plan_id", "satellite_id", "request_id", "mode", "scheduled_window", "status", "executed_at"],
       "properties": {
-        "acquisition_id": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Uuid" },
-        "plan_id": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Uuid" },
-        "satellite_id": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/SatelliteId" },
-        "request_id": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Uuid" },
-        "customer_id": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/CustomerId" },
-        "mode": { "$ref": "https://overpass.dev/contracts/common/sar.v1.schema.json#/$defs/ImagingMode" },
+        "acquisition_id": { "$ref": "../common/primitives.v1.schema.json#/$defs/Uuid" },
+        "plan_id": { "$ref": "../common/primitives.v1.schema.json#/$defs/Uuid" },
+        "satellite_id": { "$ref": "../common/primitives.v1.schema.json#/$defs/SatelliteId" },
+        "request_id": { "$ref": "../common/primitives.v1.schema.json#/$defs/Uuid" },
+        "customer_id": { "$ref": "../common/primitives.v1.schema.json#/$defs/CustomerId" },
+        "mode": { "$ref": "../common/sar.v1.schema.json#/$defs/ImagingMode" },
         "scheduled_window": {
-          "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/TimeWindow",
+          "$ref": "../common/primitives.v1.schema.json#/$defs/TimeWindow",
           "description": "What the plan committed to."
         },
         "actual_window": {
           "oneOf": [
-            { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/TimeWindow" },
+            { "$ref": "../common/primitives.v1.schema.json#/$defs/TimeWindow" },
             { "type": "null" }
           ],
           "default": null,
@@ -56,19 +56,19 @@
         "collected_area_km2": { "type": "number", "minimum": 0 },
         "achieved_resolution_m": { "type": "number", "exclusiveMinimum": 0 },
         "target_coverage_ratio": {
-          "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Ratio",
+          "$ref": "../common/primitives.v1.schema.json#/$defs/Ratio",
           "description": "Fraction of the requested target actually inside the collected footprint. The number that decides whether PARTIAL is acceptable."
         },
-        "duty_cycle_consumed_s": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/DurationSeconds" },
+        "duty_cycle_consumed_s": { "$ref": "../common/primitives.v1.schema.json#/$defs/DurationSeconds" },
         "downlink_eta": {
           "oneOf": [
-            { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Timestamp" },
+            { "$ref": "../common/primitives.v1.schema.json#/$defs/Timestamp" },
             { "type": "null" }
           ],
           "default": null,
           "description": "Estimated time the product would be on the ground. Purely informational — ground-station and downlink scheduling is a second, structurally similar contention problem and is explicitly out of scope."
         },
-        "executed_at": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Timestamp" }
+        "executed_at": { "$ref": "../common/primitives.v1.schema.json#/$defs/Timestamp" }
       }
     }
   },

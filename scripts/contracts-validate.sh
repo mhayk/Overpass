@@ -29,4 +29,5 @@ exec uv run --quiet --no-project \
   --with referencing==0.35.1 \
   --with openapi-spec-validator==0.7.1 \
   --with pyyaml==6.0.2 \
+  --with rfc3339-validator==0.1.4 \
   python scripts/contracts_validate.py "$@"

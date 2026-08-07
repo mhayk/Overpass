@@ -7,46 +7,46 @@
   "additionalProperties": false,
   "required": ["event_id", "event_type", "schema_version", "occurred_at", "correlation_id", "causation_id", "producer", "data"],
   "properties": {
-    "event_id": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/EventId" },
-    "event_type": { "const": "tasking.request.received.v1" },
-    "schema_version": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/SchemaVersion" },
-    "occurred_at": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/OccurredAt" },
-    "correlation_id": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/CorrelationId" },
+    "event_id": { "$ref": "../common/envelope.v1.schema.json#/$defs/EventId" },
+    "event_type": { "enum": ["tasking.request.received.v1"] },
+    "schema_version": { "$ref": "../common/envelope.v1.schema.json#/$defs/SchemaVersion" },
+    "occurred_at": { "$ref": "../common/envelope.v1.schema.json#/$defs/OccurredAt" },
+    "correlation_id": { "$ref": "../common/envelope.v1.schema.json#/$defs/CorrelationId" },
     "causation_id": {
-      "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/CausationId",
+      "$ref": "../common/envelope.v1.schema.json#/$defs/CausationId",
       "description": "Always null. This is the root of the causation tree — nothing inside Overpass caused it."
     },
-    "producer": { "const": "tasking-api" },
+    "producer": { "enum": ["tasking-api"] },
     "data": {
       "type": "object",
       "additionalProperties": false,
       "required": ["request_id", "customer_id", "target", "window", "priority_tier", "bid_credits", "requested_modes", "submitted_at"],
       "properties": {
-        "request_id": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Uuid" },
-        "customer_id": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/CustomerId" },
+        "request_id": { "$ref": "../common/primitives.v1.schema.json#/$defs/Uuid" },
+        "customer_id": { "$ref": "../common/primitives.v1.schema.json#/$defs/CustomerId" },
         "target_name": {
           "type": "string",
           "maxLength": 128,
           "description": "Human label for the target. Display only — never used in matching or allocation."
         },
-        "target": { "$ref": "https://overpass.dev/contracts/common/geometry.v1.schema.json#/$defs/TargetGeometry" },
+        "target": { "$ref": "../common/geometry.v1.schema.json#/$defs/TargetGeometry" },
         "window": {
-          "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/TimeWindow",
+          "$ref": "../common/primitives.v1.schema.json#/$defs/TimeWindow",
           "description": "The customer's acceptable acquisition window. window.end is the deadline: an acquisition that finishes after it has no value, so the planner treats it as infeasible rather than as merely late."
         },
-        "priority_tier": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/PriorityTier" },
-        "bid_credits": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Credits" },
+        "priority_tier": { "$ref": "../common/primitives.v1.schema.json#/$defs/PriorityTier" },
+        "bid_credits": { "$ref": "../common/primitives.v1.schema.json#/$defs/Credits" },
         "requested_modes": {
           "type": "array",
           "minItems": 1,
           "maxItems": 3,
           "uniqueItems": true,
-          "items": { "$ref": "https://overpass.dev/contracts/common/sar.v1.schema.json#/$defs/ImagingMode" },
+          "items": { "$ref": "../common/sar.v1.schema.json#/$defs/ImagingMode" },
           "description": "Acceptable imaging modes, unordered. Listing more than one widens the feasible set and therefore improves the chance of winning — mode flexibility is a real lever a customer can pull, and making it visible is a product decision, not an implementation detail."
         },
-        "constraints": { "$ref": "https://overpass.dev/contracts/common/sar.v1.schema.json#/$defs/AcquisitionConstraints" },
+        "constraints": { "$ref": "../common/sar.v1.schema.json#/$defs/AcquisitionConstraints" },
         "submitted_at": {
-          "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Timestamp",
+          "$ref": "../common/primitives.v1.schema.json#/$defs/Timestamp",
           "description": "When tasking-api accepted the request. Distinct from occurred_at only in that a retried outbox publish keeps submitted_at fixed. Also the origin for the fairness ageing factor."
         }
       }

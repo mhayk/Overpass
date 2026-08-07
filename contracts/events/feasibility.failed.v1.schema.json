@@ -7,19 +7,19 @@
   "additionalProperties": false,
   "required": ["event_id", "event_type", "schema_version", "occurred_at", "correlation_id", "causation_id", "producer", "data"],
   "properties": {
-    "event_id": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/EventId" },
-    "event_type": { "const": "feasibility.failed.v1" },
-    "schema_version": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/SchemaVersion" },
-    "occurred_at": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/OccurredAt" },
-    "correlation_id": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/CorrelationId" },
-    "causation_id": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/CausationId" },
-    "producer": { "const": "feasibility-service" },
+    "event_id": { "$ref": "../common/envelope.v1.schema.json#/$defs/EventId" },
+    "event_type": { "enum": ["feasibility.failed.v1"] },
+    "schema_version": { "$ref": "../common/envelope.v1.schema.json#/$defs/SchemaVersion" },
+    "occurred_at": { "$ref": "../common/envelope.v1.schema.json#/$defs/OccurredAt" },
+    "correlation_id": { "$ref": "../common/envelope.v1.schema.json#/$defs/CorrelationId" },
+    "causation_id": { "$ref": "../common/envelope.v1.schema.json#/$defs/CausationId" },
+    "producer": { "enum": ["feasibility-service"] },
     "data": {
       "type": "object",
       "additionalProperties": false,
       "required": ["request_id", "reason_code", "retryable", "failed_at"],
       "properties": {
-        "request_id": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Uuid" },
+        "request_id": { "$ref": "../common/primitives.v1.schema.json#/$defs/Uuid" },
         "reason_code": {
           "type": "string",
           "enum": [
@@ -39,11 +39,11 @@
           "description": "True when the failure is about OUR ability to answer rather than about the physics. Retryable failures go back to the stream with backoff; non-retryable ones move the request to INFEASIBLE and stop. Getting this wrong in either direction is expensive: retrying a physical impossibility burns compute forever, and not retrying a transient TLE fetch silently drops a satisfiable request."
         },
         "reason_detail": { "type": "string", "maxLength": 1024 },
-        "horizon": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/TimeWindow" },
+        "horizon": { "$ref": "../common/primitives.v1.schema.json#/$defs/TimeWindow" },
         "satellites_evaluated": { "type": "integer", "minimum": 0 },
         "tle_references": {
           "type": "array",
-          "items": { "$ref": "https://overpass.dev/contracts/common/sar.v1.schema.json#/$defs/TleReference" },
+          "items": { "$ref": "../common/sar.v1.schema.json#/$defs/TleReference" },
           "description": "Present even on failure, and especially useful for TLE_STALE: it shows exactly which satellite's element set was too old and by how much."
         },
         "attempt": {
@@ -51,7 +51,7 @@
           "minimum": 1,
           "description": "Which delivery attempt produced this failure. Compared against the stream's max-deliver limit to decide DLQ routing."
         },
-        "failed_at": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Timestamp" }
+        "failed_at": { "$ref": "../common/primitives.v1.schema.json#/$defs/Timestamp" }
       }
     }
   },
