@@ -96,3 +96,19 @@ func unavailable() Problem {
 		Detail: "The request was valid but could not be durably stored. It has NOT been accepted; retry.",
 	}
 }
+
+// idempotencyConflict is returned when a key is reused with a different body.
+//
+// 409 and not a replay. The client believes it submitted two different things;
+// telling it one of them succeeded when the other was discarded is worse than
+// telling it the key was already used.
+func idempotencyConflict() Problem {
+	return Problem{
+		Type:   ProblemBase + "idempotency-key-conflict",
+		Title:  "Idempotency key already used with a different body",
+		Status: http.StatusConflict,
+		Detail: "This Idempotency-Key was used for a different request. Use a new key, " +
+			"or resend the original body byte-for-byte.",
+		ReasonCode: "IDEMPOTENCY_KEY_CONFLICT",
+	}
+}

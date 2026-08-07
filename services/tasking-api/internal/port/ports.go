@@ -9,6 +9,7 @@ package port
 
 import (
 	"context"
+	"errors"
 	"time"
 )
 
@@ -27,14 +28,36 @@ type Clock interface {
 	Now() time.Time
 }
 
-// SubmissionStore persists a tasking request and its outbox event atomically.
+// SubmissionStore persists a tasking request, its idempotency claim, and its
+// outbox event — atomically.
 //
-// One method, and it takes both, because they must commit together. An
-// interface with Save and Publish as separate calls is an interface that
-// permits the dual-write problem — the adapter could satisfy it correctly, but
-// nothing would stop the next one from not.
+// One method taking all three, because they must commit together. Separate
+// Save and Publish calls would permit the dual-write problem; separate Claim
+// and Save calls would leave a crash window in which the key exists and the
+// request does not, permanently swallowing that submission.
 type SubmissionStore interface {
-	Save(ctx context.Context, req StoredRequest, event OutboxEvent) error
+	// Save returns Replay when the key has already been used with the SAME
+	// body, and ErrIdempotencyConflict when it was used with a different one.
+	Save(ctx context.Context, claim IdempotencyClaim, req StoredRequest, event OutboxEvent) (Replay, error)
+
+	// PurgeExpiredKeys removes claims past their expiry. Returns how many.
+	PurgeExpiredKeys(ctx context.Context, now time.Time) (int64, error)
+}
+
+// IdempotencyClaim is the client's key and the fingerprint of what it sent.
+type IdempotencyClaim struct {
+	CustomerID  string
+	Key         string
+	Fingerprint string
+	ExpiresAt   time.Time
+}
+
+// Replay describes an earlier response being served again.
+type Replay struct {
+	Replayed    bool
+	RequestID   string
+	State       string
+	SubmittedAt time.Time
 }
 
 // StoredRequest is what the write model needs, already validated.
@@ -62,3 +85,10 @@ type OutboxEvent struct {
 	HeadersJSON   []byte
 	OccurredAt    time.Time
 }
+
+// ErrIdempotencyConflict means the key was reused with a different body.
+//
+// A client bug, and it must surface. Silently treating it as a replay discards
+// a request the customer believes they submitted, and they find out when the
+// image never arrives.
+var ErrIdempotencyConflict = errors.New("idempotency key reused with a different body")
