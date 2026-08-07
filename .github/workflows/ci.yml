@@ -202,3 +202,76 @@ jobs:
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
           shellcheck --severity=warning scripts/*.sh deploy/nats/*.sh
+
+      # A script committed without its executable bit fails on the runner with
+      # "Permission denied" and exit 126 — which reads like a broken script
+      # rather than a broken file mode, and costs a CI round trip to work out.
+      # It is an easy mistake to make from Windows, where `chmod +x` in the
+      # working tree does not reach the index without `git update-index`.
+      - name: Every script is executable
+        run: |
+          set -euo pipefail
+          missing=0
+          for f in scripts/*.sh deploy/nats/*.sh; do
+            if [[ ! -x "$f" ]]; then
+              echo "::error file=$f::not executable — run: git update-index --chmod=+x $f"
+              missing=$((missing + 1))
+            fi
+          done
+          if [[ "$missing" -gt 0 ]]; then
+            echo "$missing script(s) missing the executable bit"
+            exit 1
+          fi
+          echo "all scripts executable"
+
+      # The gate's own tests. They are a pure function of a changed-file list,
+      # so they need no repository state and run in milliseconds — there is no
+      # reason for them to live anywhere but next to the linter that guards the
+      # same scripts.
+      - name: Path-ownership gate self-test
+        run: ./scripts/check-path-ownership.test.sh
+
+  # ---------------------------------------------------------------------------
+  # Path ownership
+  # ---------------------------------------------------------------------------
+  # ADR-0013 keeps parallel agent tracks safe with a rule about which paths a
+  # branch may touch. The ADR itself lists "stated, not enforced" as a cost.
+  # This is the enforcement.
+  #
+  # pull_request only. On a push to main the merge has already happened, so
+  # there is nothing left to gate and the diff to compare against is the branch
+  # itself.
+  path-ownership:
+    name: path ownership — one track per change
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The merge base is needed to know what this branch actually changed.
+          # The default shallow clone does not have it.
+          fetch-depth: 0
+
+      - name: Deliberate crossing?
+        id: hatch
+        env:
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          if [[ ",$LABELS," == *",crosses-tracks,"* ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::labelled crosses-tracks — ownership rule waived for this pull request"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check path ownership
+        if: steps.hatch.outputs.skip == 'false'
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          git diff --name-only "$BASE...$HEAD" | tee /tmp/changed.txt
+          echo "---"
+          ./scripts/check-path-ownership.sh < /tmp/changed.txt

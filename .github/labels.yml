@@ -69,3 +69,12 @@
 - name: "risk/low"
   color: "f9d0c4"
   description: "Mechanical or well-understood"
+
+# The one escape hatch in the ADR-0013 path-ownership gate. A change that
+# genuinely spans services — the M1 integration work, chaos tests, anything
+# end-to-end — carries this and the gate stands down. It weakens the rule on
+# purpose: the ADR asks for crossings to be LOUD, not impossible, and a labelled
+# crossing is visible in review while a silent one is not.
+- name: "crosses-tracks"
+  color: "d93f0b"
+  description: "Deliberately spans more than one track; waives the ADR-0013 path-ownership gate"

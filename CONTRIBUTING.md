@@ -71,6 +71,35 @@ generator behaviour, and reverting one silently breaks a language binding.
 Adding an optional field is a minor version bump; anything else is a new major
 line.
 
+## One track per change
+
+CI enforces the [ADR-0013](docs/decisions/0013-parallel-agent-execution-in-worktrees.md)
+path-ownership rule, so that several people or agents can work in parallel
+without silently moving something the others are building against. Two rules,
+both decided from your diff alone:
+
+1. **At most one track directory per change.** The tracks are
+   `services/tasking-api/`, `services/feasibility/`, `services/planner/`,
+   `services/plan-gateway/`, and `web/`.
+2. **A shared-fate path lands on its own.** Those are `contracts/`, `gen/`,
+   `db/migrations/`, `CLAUDE.md`, and `docs/decisions/`. Contract changes
+   serialise — that is what M0 bought. `contracts/` and `gen/` together are fine,
+   because `make contracts` moves both as one unit.
+
+Everything else — `Makefile`, `scripts/`, `deploy/`, `docs/` outside
+`docs/decisions/`, `.github/` — is common, and a track may touch it freely.
+
+Check before you push:
+
+    git diff --name-only origin/main... | ./scripts/check-path-ownership.sh
+
+**If the crossing is deliberate**, label the pull request `crosses-tracks` and
+the gate stands down. Integration work that genuinely spans services — the
+end-to-end tests, the demo seed, tracing across every hop — is supposed to use
+this. The hatch exists because the point of the rule is that crossings are
+*visible*, not that they are impossible; a labelled crossing gets read in review,
+a silent one does not.
+
 ## Decisions
 
 Every non-obvious choice gets recorded, at the scale that fits:
