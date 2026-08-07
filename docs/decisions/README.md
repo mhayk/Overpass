@@ -25,6 +25,7 @@ paper trail is the point.
 | [0004](0004-postgresql-jsonb-over-document-store.md) | PostgreSQL with JSONB for semi-structured data, instead of adding a document store | accepted | M0 |
 | [0005](0005-docker-compose-over-kubernetes.md) | Docker Compose as the deployment target, not Kubernetes | accepted | M0 |
 | [0010](0010-test-strategy-and-coverage.md) | Treat the test suite as the verification harness for generated code, and gate coverage at 80/95 | accepted | M0 |
+| [0013](0013-parallel-agent-execution-in-worktrees.md) | Run parallel agent work as one git worktree per contract boundary, not as concurrent agents in one checkout | accepted | M1 |
 
 ## Planned
 
@@ -57,6 +58,15 @@ become an undocumented assumption:
   debounce. That makes plan supersession a first-class concept:
   `planning.plan.committed.v1` carries `plan_version` and `supersedes_plan_id`,
   and a request can be unfulfilled with reason `SUPERSEDED`.
+
+### Why 0013 is accepted while 0006–0012 are still planned
+
+Numbers are allocated in the order decisions are *made*, not in the order they
+were anticipated. 0006–0012 were reserved during M0 planning for decisions M1 and
+M2 will force; they stay unwritten until the constraint is actually felt. 0013 was
+forced earlier than any of them — closing M0 is precisely what made concurrent
+work possible, so the question of how to execute it arrived at the M0/M1 boundary
+rather than inside M1.
 
 ## Conventions
 

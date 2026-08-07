@@ -107,6 +107,19 @@ distributed trace.
 | M1-18 | Integration tests with Testcontainers: duplicate and out-of-order delivery | `type/test` `area/ci` `risk/high` |
 | M1-19 | Seed data and `make demo` | `type/chore` `area/infra` `risk/low` |
 | M1-20 | OTel tracing across the first async hop | `type/feature` `area/observability` `risk/medium` |
+| M1-21 | OpenAPI spec for `plan-gateway` read API | `type/feature` `area/contracts` `area/plan-gateway` `risk/medium` |
+| M1-22 | ADR-0013 — parallel agent execution model | `type/adr` `type/docs` `risk/low` |
+
+M1-21 and M1-22 are not in the original decomposition. Both come from
+[ADR-0013](decisions/0013-parallel-agent-execution-in-worktrees.md), which decided
+how M1 is executed concurrently and, in checking its own premise, found that
+`plan-gateway`'s read API is frozen in no contract.
+
+**M1-21 is a prerequisite, not a parallel track.** It blocks M1-16: `web` renders
+what `plan-gateway` serves, and with no contract between them those two tracks
+cannot fork without inventing incompatible interpretations of the same boundary.
+M1-01 is a prerequisite for the same reason — tracks A and C both build against
+that schema.
 
 ---
 
