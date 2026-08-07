@@ -1,0 +1,16 @@
+apiVersion: 1
+
+providers:
+  - name: overpass
+    orgId: 1
+    type: file
+    disableDeletion: false
+    # Dashboards are committed JSON under deploy/grafana/dashboards and
+    # provisioned on startup. A dashboard that exists only in someone's Grafana
+    # instance does not exist. Editing in the UI is allowed for exploration, but
+    # anything worth keeping gets exported back into the repo (issue #51).
+    allowUiUpdates: true
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: true

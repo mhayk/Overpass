@@ -67,8 +67,8 @@ contracts: contracts-validate contracts-generate contracts-smoke ## Validate, re
 ## Development
 
 .PHONY: up
-up: ## Bring the whole stack up (docker compose up -d, waits for healthy)
-	docker compose up -d --wait
+up: ## Bring the whole stack up and wait for it to be genuinely ready
+	@$(ROOT)/scripts/stack-up.sh
 
 .PHONY: down
 down: ## Stop the stack, keep volumes
