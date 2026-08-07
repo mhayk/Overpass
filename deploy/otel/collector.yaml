@@ -1,0 +1,73 @@
+# OpenTelemetry Collector pipeline.
+#
+# Services export here over OTLP; the collector batches, and re-exposes metrics
+# for Prometheus to scrape. Traces currently go to the debug exporter — a real
+# trace backend (Tempo or Jaeger) lands with issue #50, when there is enough of
+# a pipeline for an end-to-end trace to be worth looking at.
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+        cors:
+          # The browser exports spans directly for frontend timings.
+          allowed_origins:
+            - "http://localhost:3000"
+
+processors:
+  # Bounded queueing. Without a memory limiter a traffic spike during a k6 run
+  # can OOM the collector, which loses telemetry at exactly the moment it is
+  # most wanted.
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 400
+    spike_limit_mib: 100
+
+  batch:
+    timeout: 5s
+    send_batch_size: 1024
+    send_batch_max_size: 2048
+
+  resource:
+    attributes:
+      - key: deployment.environment
+        value: local
+        action: upsert
+
+exporters:
+  debug:
+    verbosity: basic
+
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    # Keep OTel resource attributes as labels so metrics can be sliced by
+    # service without a join.
+    resource_to_telemetry_conversion:
+      enabled: true
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+service:
+  extensions: [health_check]
+  telemetry:
+    metrics:
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: 0.0.0.0
+                port: 8888
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [debug]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [prometheus]

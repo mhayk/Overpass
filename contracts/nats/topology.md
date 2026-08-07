@@ -139,13 +139,20 @@ A message that fails `max_deliver` times is a poison message. Retrying it foreve
 would consume a consumer slot indefinitely and starve healthy traffic.
 
 ```
-TASKING.dlq       <- tasking.dlq.>
-FEASIBILITY.dlq   <- feasibility.dlq.>
-PLANNING.dlq      <- planning.dlq.>
+DLQ_TASKING       <- dlq.tasking.>
+DLQ_FEASIBILITY   <- dlq.feasibility.>
+DLQ_PLANNING      <- dlq.planning.>, dlq.acquisition.>
 ```
 
+**Dead letters use a `dlq.` PREFIX, not a `.dlq.` infix.** The obvious-looking
+`tasking.dlq.>` is already captured by the `TASKING` stream's `tasking.>`
+wildcard, and NATS refuses to create two streams whose subjects overlap
+(`subjects overlap with an existing stream`, error 10065). Prefixing keeps the
+subject spaces disjoint, and mapping between them stays a pure string operation
+in both directions — which is what keeps the replay tooling trivial.
+
 On terminal failure the consumer publishes the original payload to
-`<domain>.dlq.<original-subject>` with these headers, then acks the original:
+`dlq.<original-subject>` with these headers, then acks the original:
 
 | Header | Meaning |
 | --- | --- |
@@ -158,12 +165,12 @@ On terminal failure the consumer publishes the original payload to
 
 ### Replay procedure
 
-1. `make dlq-inspect STREAM=FEASIBILITY` — list dead messages with reason and count.
+1. `make dlq-inspect STREAM=DLQ_FEASIBILITY` — list dead messages with reason and count.
 2. Diagnose from the preserved `traceparent`. The original trace is intact, so
    the failure is inspectable in Grafana rather than reconstructed from logs.
 3. Fix the cause. A poison message is almost always a code bug or a bad
    deployment, not a bad message.
-4. `make dlq-replay STREAM=FEASIBILITY EVENT_ID=<uuid>` — republish to the
+4. `make dlq-replay STREAM=DLQ_FEASIBILITY EVENT_ID=<uuid>` — republish to the
    original subject.
 
 Replay is safe **because consumers are idempotent**. If a message partially

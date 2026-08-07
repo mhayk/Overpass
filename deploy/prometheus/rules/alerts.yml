@@ -1,0 +1,58 @@
+# Alert rules.
+#
+# Every rule here is about a failure mode this architecture actually has, not a
+# generic CPU/memory template. If a rule cannot be traced to a specific design
+# decision it should not exist, because an alert nobody can act on trains people
+# to ignore alerts.
+
+groups:
+  - name: overpass-delivery
+    interval: 30s
+    rules:
+      - alert: DeadLetterQueueNotEmpty
+        expr: sum(overpass_dlq_depth) > 0
+        for: 1m
+        labels: { severity: warning }
+        annotations:
+          summary: "Messages have been dead-lettered"
+          description: >-
+            A message exhausted its max-deliver limit. This is almost always a
+            code bug or a bad deployment, not a bad message. Inspect with
+            `make dlq-inspect`, fix the cause, then `make dlq-replay` — replay
+            is safe because consumers are idempotent.
+
+      - alert: OutboxRelayLagging
+        expr: overpass_outbox_pending_seconds > 30
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: "Outbox relay is falling behind"
+          description: >-
+            Events are persisted but unpublished for over 30s. Ingress is
+            unaffected by design — that is the point of the outbox — but the
+            rest of the pipeline is starved.
+
+  - name: overpass-domain
+    interval: 30s
+    rules:
+      - alert: TleStale
+        expr: max(overpass_tle_age_hours) > 48
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "A TLE has exceeded the staleness threshold"
+          description: >-
+            feasibility-service refuses to compute against a stale element set
+            rather than publishing a drifted access window. Requests for the
+            affected satellite will fail with TLE_STALE until a refresh.
+
+      - alert: PlannerRoundsSlow
+        expr: histogram_quantile(0.95, sum(rate(overpass_allocation_duration_ms_bucket[5m])) by (le)) > 800
+        for: 5m
+        labels: { severity: warning }
+        annotations:
+          summary: "Planner p95 above the 800ms budget"
+          description: >-
+            Allocation is exceeding its stated SLO. The planner holds an
+            advisory lock for the duration of a round, so a slow round blocks
+            everything else for that satellite and bucket.

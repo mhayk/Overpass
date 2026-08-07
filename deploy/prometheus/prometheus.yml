@@ -1,0 +1,48 @@
+# Scrape config for the Overpass stack.
+#
+# Static targets, not service discovery. On a single-host Compose network the
+# set of services is known at write time and DNS resolves by service name, so
+# discovery would add a moving part with nothing to discover.
+
+global:
+  scrape_interval: 10s
+  evaluation_interval: 10s
+  external_labels:
+    environment: local
+    system: overpass
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # Metrics the collector has received from the services via OTLP and
+  # re-exposes. Application metrics arrive here, not by scraping each service
+  # directly, so a service that is restarting does not produce a scrape gap
+  # for metrics it already reported.
+  - job_name: otel-collector
+    static_configs:
+      - targets: ["otel-collector:8889"]
+
+  # Direct scrape of the collector's own internal telemetry — queue depth,
+  # dropped spans. Distinct from the job above, which is application data
+  # passing through it.
+  - job_name: otel-collector-internal
+    static_configs:
+      - targets: ["otel-collector:8888"]
+
+  # Application services, added as they are built (M1+). Prometheus tolerates
+  # targets that do not resolve yet — they report as down, which is accurate.
+  - job_name: overpass-services
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - "tasking-api:8080"
+          - "plan-gateway:8081"
+          - "planner:8082"
+          - "feasibility:8000"
+        labels:
+          tier: application

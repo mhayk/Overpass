@@ -1,0 +1,258 @@
+# Overpass — local stack.
+#
+# The requirement this file serves, from the definition of done:
+#
+#   git clone && docker compose up  ->  working, seeded system, under five
+#   minutes, on a clean machine.
+#
+# That budget is the constraint behind most of the choices here. See
+# ADR-0005 for why this is Docker Compose and not Kubernetes, and what
+# production would actually require.
+#
+#   make up      bring everything up and wait for healthy
+#   make down    stop, keep data
+#   make clean   stop and destroy volumes
+#
+# Application services (tasking-api, feasibility, planner, plan-gateway, web)
+# are NOT here yet — they arrive in M1 as they are built, tracked by issues
+# #14 through #33. The placeholder block at the bottom of this file records
+# exactly what lands and when. Declaring services with build contexts that do
+# not exist would break `docker compose config` for everyone, which is a worse
+# kind of placeholder than a comment.
+
+name: overpass
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  # ---------------------------------------------------------------------------
+  # PostgreSQL + PostGIS
+  # ---------------------------------------------------------------------------
+  # The system's only database, deliberately (ADR-0004). Relational core because
+  # the allocation invariant is a transactional constraint; JSONB for the
+  # genuinely semi-structured payloads; PostGIS for target and footprint
+  # geometry. One store, one consistency model, one transaction boundary — which
+  # is also what makes the transactional outbox and idempotent consumers
+  # possible at all.
+  postgres:
+    image: postgis/postgis:16-3.4
+    container_name: overpass-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-overpass}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-overpass}
+      POSTGRES_DB: ${POSTGRES_DB:-overpass}
+      # Checksums cost a few percent and turn silent corruption into a loud
+      # error. On a laptop with a bind-mounted volume that is a good trade.
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    ports:
+      # 5433 on the host, not 5432. A developer machine very often already has
+      # a local Postgres on 5432, and "port is already allocated" is a poor
+      # first impression for a project whose headline claim is that one command
+      # brings up a working system. Same reasoning as Grafana on 3001. Inside
+      # the compose network everything still talks to postgres:5432.
+      - "${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      # Runs once, on an empty data directory only.
+      - ./deploy/postgres/init:/docker-entrypoint-initdb.d:ro
+    command:
+      # Tuned for a laptop under load testing, not for production. The planner
+      # holds an advisory lock plus a transaction per round, and the k6 suite
+      # drives 1000 rps at ingress, so connection headroom matters more than
+      # memory frugality here.
+      - "postgres"
+      - "-c"
+      - "max_connections=200"
+      - "-c"
+      - "shared_buffers=256MB"
+      - "-c"
+      - "work_mem=16MB"
+      # Log anything slower than 200ms. Cheap, and it means a slow query during
+      # a load test leaves evidence instead of just a latency spike.
+      - "-c"
+      - "log_min_duration_statement=200"
+    healthcheck:
+      # pg_isready with the real user and database, not the default. A check
+      # that passes before the target database exists produces exactly the
+      # race that health-gated depends_on is here to prevent.
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-overpass} -d ${POSTGRES_DB:-overpass}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  # NATS JetStream
+  # ---------------------------------------------------------------------------
+  # Durable streams, at-least-once delivery, per-consumer acking, replay, DLQ —
+  # in one static binary with no coordination service (ADR-0002).
+  nats:
+    image: nats:2.10-alpine
+    container_name: overpass-nats
+    restart: unless-stopped
+    command:
+      - "--jetstream"
+      - "--store_dir=/data"
+      # HTTP monitoring on 8222 — this is what the healthcheck hits, and where
+      # stream and consumer state is inspectable without the CLI.
+      - "--http_port=8222"
+      - "--name=overpass-nats"
+    ports:
+      - "${NATS_PORT:-4222}:4222"
+      - "${NATS_MONITOR_PORT:-8222}:8222"
+    volumes:
+      # File storage, not memory. Memory storage would lose in-flight work on a
+      # broker restart and make the durability claims in ADR-0002 false.
+      - nats-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -S -O /dev/null http://localhost:8222/healthz 2>&1 | grep -q '200 OK'"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  # NATS topology init
+  # ---------------------------------------------------------------------------
+  # Creates the streams and consumers declared in contracts/nats/topology.md.
+  #
+  # Declared here and applied by an init container rather than created lazily
+  # from application code, for two reasons: the topology is reviewable in a pull
+  # request, and two services cannot race to create the same stream with
+  # different settings. Idempotent — safe on every `up`.
+  nats-init:
+    image: natsio/nats-box:0.14.3
+    container_name: overpass-nats-init
+    depends_on:
+      nats:
+        condition: service_healthy
+    volumes:
+      - ./deploy/nats:/etc/overpass-nats:ro
+    entrypoint: ["/bin/sh", "/etc/overpass-nats/init.sh"]
+    environment:
+      NATS_URL: nats://nats:4222
+    restart: "no"
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  # OpenTelemetry Collector
+  # ---------------------------------------------------------------------------
+  # One trace must span HTTP ingress -> publish -> Python consumer -> publish ->
+  # Go planner -> commit. Services export here; the collector fans out to the
+  # trace backend and exposes metrics for Prometheus to scrape.
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.115.1
+    container_name: overpass-otel-collector
+    restart: unless-stopped
+    command: ["--config=/etc/otel/collector.yaml"]
+    volumes:
+      - ./deploy/otel/collector.yaml:/etc/otel/collector.yaml:ro
+    ports:
+      - "${OTLP_GRPC_PORT:-4317}:4317"   # OTLP gRPC — what the Go services use
+      - "${OTLP_HTTP_PORT:-4318}:4318"   # OTLP HTTP — what the browser can use
+      - "8889:8889"                      # Prometheus exposition of collected metrics
+    healthcheck:
+      test: ["CMD", "/otelcol-contrib", "--version"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  # Prometheus
+  # ---------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v3.0.1
+    container_name: overpass-prometheus
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      # 15 days is far more than this project needs, but it costs nothing on a
+      # laptop and means a load-test run from last week is still comparable.
+      - "--storage.tsdb.retention.time=15d"
+      - "--web.enable-lifecycle"
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  # Grafana
+  # ---------------------------------------------------------------------------
+  # Datasources and dashboards are provisioned from committed files. A dashboard
+  # that exists only in someone's Grafana instance does not exist.
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: overpass-grafana
+    restart: unless-stopped
+    environment:
+      # No login. This is a local demo stack with no data worth protecting, and
+      # a login prompt between a reviewer and the dashboards is pure friction.
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Admin"
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_USERS_DEFAULT_THEME: "dark"
+      GF_LOG_LEVEL: "warn"
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      # 3001, not 3000 — the Next.js frontend takes 3000 in M1 and a port clash
+      # discovered then would be an annoying thing to debug.
+      - "${GRAFANA_PORT:-3001}:3000"
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:3000/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
+  # Application services — M1 onward
+  # ---------------------------------------------------------------------------
+  # Deliberately absent rather than stubbed. Each arrives with the issue that
+  # builds it:
+  #
+  #   tasking-api          Go       #15  ports 8080     depends: postgres, nats
+  #   feasibility-service  Python   #24  no ports       depends: nats, postgres
+  #   plan-gateway         Go       #28  ports 8081     depends: postgres, nats
+  #   planner-service      Go       #34  no ports       depends: postgres, nats
+  #   web                  Next.js  #30  ports 3000     depends: plan-gateway
+  #   acquisition-simulator Go      #56  no ports       depends: nats
+  #
+  # All of them are twelve-factor — configuration from environment, logs to
+  # stdout, no local state — so each is a ~15 line addition here and nothing
+  # about this file needs to change to accommodate them.
+
+volumes:
+  postgres-data:
+  nats-data:
+  prometheus-data:
+  grafana-data:
+
+networks:
+  default:
+    name: overpass
