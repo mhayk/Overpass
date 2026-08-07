@@ -7,26 +7,26 @@
   "additionalProperties": false,
   "required": ["event_id", "event_type", "schema_version", "occurred_at", "correlation_id", "causation_id", "producer", "data"],
   "properties": {
-    "event_id": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/EventId" },
-    "event_type": { "const": "planning.request.unfulfilled.v1" },
-    "schema_version": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/SchemaVersion" },
-    "occurred_at": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/OccurredAt" },
+    "event_id": { "$ref": "../common/envelope.v1.schema.json#/$defs/EventId" },
+    "event_type": { "enum": ["planning.request.unfulfilled.v1"] },
+    "schema_version": { "$ref": "../common/envelope.v1.schema.json#/$defs/SchemaVersion" },
+    "occurred_at": { "$ref": "../common/envelope.v1.schema.json#/$defs/OccurredAt" },
     "correlation_id": {
-      "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/CorrelationId",
+      "$ref": "../common/envelope.v1.schema.json#/$defs/CorrelationId",
       "description": "Carries the ORIGINATING REQUEST's correlation_id, not the round's. That is what lets one grep follow a single customer's request from ingress through to the reason it lost."
     },
-    "causation_id": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/CausationId" },
-    "producer": { "const": "planner-service" },
+    "causation_id": { "$ref": "../common/envelope.v1.schema.json#/$defs/CausationId" },
+    "producer": { "enum": ["planner-service"] },
     "data": {
       "type": "object",
       "additionalProperties": false,
       "required": ["request_id", "reason_code", "eligible_for_retry", "decided_at"],
       "properties": {
-        "request_id": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Uuid" },
-        "customer_id": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/CustomerId" },
+        "request_id": { "$ref": "../common/primitives.v1.schema.json#/$defs/Uuid" },
+        "customer_id": { "$ref": "../common/primitives.v1.schema.json#/$defs/CustomerId" },
         "round_id": {
           "oneOf": [
-            { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Uuid" },
+            { "$ref": "../common/primitives.v1.schema.json#/$defs/Uuid" },
             { "type": "null" }
           ],
           "description": "Null when the request never reached a round — e.g. DEADLINE_PASSED discovered by the sweeper."
@@ -34,7 +34,7 @@
         "satellite_ids_considered": {
           "type": "array",
           "uniqueItems": true,
-          "items": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/SatelliteId" }
+          "items": { "$ref": "../common/primitives.v1.schema.json#/$defs/SatelliteId" }
         },
         "reason_code": {
           "type": "string",
@@ -55,30 +55,30 @@
           "description": "Structured, reason-specific detail. Which fields are populated depends on reason_code; all are optional so a single object shape serves every case rather than forcing a discriminated union through the generators.",
           "properties": {
             "own_effective_value_credits": {
-              "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Credits",
+              "$ref": "../common/primitives.v1.schema.json#/$defs/Credits",
               "description": "This request's value after tier multiplier and ageing. Shown next to the winner's so the customer sees the actual gap rather than being told 'you lost'."
             },
-            "winning_request_id": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Uuid" },
-            "winning_effective_value_credits": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Credits" },
+            "winning_request_id": { "$ref": "../common/primitives.v1.schema.json#/$defs/Uuid" },
+            "winning_effective_value_credits": { "$ref": "../common/primitives.v1.schema.json#/$defs/Credits" },
             "shortfall_credits": {
-              "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Credits",
+              "$ref": "../common/primitives.v1.schema.json#/$defs/Credits",
               "description": "How much more effective value would have been needed to win. The single most useful number a losing customer can receive, and only expressible because the reason is structured data rather than prose."
             },
-            "blocking_acquisition_id": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Uuid" },
+            "blocking_acquisition_id": { "$ref": "../common/primitives.v1.schema.json#/$defs/Uuid" },
             "required_slew_s": {
-              "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/DurationSeconds",
+              "$ref": "../common/primitives.v1.schema.json#/$defs/DurationSeconds",
               "description": "Attitude manoeuvre plus settling time needed to reach this opportunity's roll angle from the neighbouring acquisition's."
             },
             "available_gap_s": {
-              "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/DurationSeconds",
+              "$ref": "../common/primitives.v1.schema.json#/$defs/DurationSeconds",
               "description": "Idle time actually available. required_slew_s > available_gap_s is the BLOCKED_BY_SLEW_CONSTRAINT condition, stated as two numbers the customer can see."
             },
-            "duty_cycle_remaining_s": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/DurationSeconds" },
-            "duty_cycle_required_s": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/DurationSeconds" },
-            "deadline": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Timestamp" },
-            "superseded_by_plan_id": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Uuid" },
+            "duty_cycle_remaining_s": { "$ref": "../common/primitives.v1.schema.json#/$defs/DurationSeconds" },
+            "duty_cycle_required_s": { "$ref": "../common/primitives.v1.schema.json#/$defs/DurationSeconds" },
+            "deadline": { "$ref": "../common/primitives.v1.schema.json#/$defs/Timestamp" },
+            "superseded_by_plan_id": { "$ref": "../common/primitives.v1.schema.json#/$defs/Uuid" },
             "best_rejected_opportunity_id": {
-              "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Uuid",
+              "$ref": "../common/primitives.v1.schema.json#/$defs/Uuid",
               "description": "The strongest candidate this request had. The frontend renders it as a ghost on the timeline, so the de-confliction decision is visible rather than only its result."
             }
           }
@@ -94,12 +94,12 @@
         },
         "next_round_eligible_at": {
           "oneOf": [
-            { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Timestamp" },
+            { "$ref": "../common/primitives.v1.schema.json#/$defs/Timestamp" },
             { "type": "null" }
           ],
           "default": null
         },
-        "decided_at": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Timestamp" }
+        "decided_at": { "$ref": "../common/primitives.v1.schema.json#/$defs/Timestamp" }
       }
     }
   },

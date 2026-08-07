@@ -7,28 +7,28 @@
   "additionalProperties": false,
   "required": ["event_id", "event_type", "schema_version", "occurred_at", "correlation_id", "causation_id", "producer", "data"],
   "properties": {
-    "event_id": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/EventId" },
-    "event_type": { "const": "planning.round.triggered.v1" },
-    "schema_version": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/SchemaVersion" },
-    "occurred_at": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/OccurredAt" },
+    "event_id": { "$ref": "../common/envelope.v1.schema.json#/$defs/EventId" },
+    "event_type": { "enum": ["planning.round.triggered.v1"] },
+    "schema_version": { "$ref": "../common/envelope.v1.schema.json#/$defs/SchemaVersion" },
+    "occurred_at": { "$ref": "../common/envelope.v1.schema.json#/$defs/OccurredAt" },
     "correlation_id": {
-      "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/CorrelationId",
+      "$ref": "../common/envelope.v1.schema.json#/$defs/CorrelationId",
       "description": "A round aggregates many requests, so it cannot inherit a single request's correlation_id. It gets a fresh one; the per-request threads are re-joined through candidate_request_ids and through the request_id on each unfulfilment event."
     },
     "causation_id": {
-      "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/CausationId",
+      "$ref": "../common/envelope.v1.schema.json#/$defs/CausationId",
       "description": "For OPPORTUNITY_DEBOUNCE triggers, the event_id of the opportunities event that tipped the threshold. Null for CADENCE."
     },
-    "producer": { "const": "planner-service" },
+    "producer": { "enum": ["planner-service"] },
     "data": {
       "type": "object",
       "additionalProperties": false,
       "required": ["round_id", "satellite_id", "bucket", "trigger", "policy", "candidate_opportunity_count", "triggered_at"],
       "properties": {
-        "round_id": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Uuid" },
-        "satellite_id": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/SatelliteId" },
+        "round_id": { "$ref": "../common/primitives.v1.schema.json#/$defs/Uuid" },
+        "satellite_id": { "$ref": "../common/primitives.v1.schema.json#/$defs/SatelliteId" },
         "bucket": {
-          "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/TimeWindow",
+          "$ref": "../common/primitives.v1.schema.json#/$defs/TimeWindow",
           "description": "Fixed horizon bucket, aligned to UTC. bucket.start is floor(t, bucket_duration) and is half of the round identity and of the advisory-lock key. Fixed alignment rather than a rolling window is what makes rounds reproducible and replayable — a rolling window would make the same input produce different partitions depending on when it ran."
         },
         "trigger": {
@@ -50,22 +50,22 @@
           "type": "array",
           "uniqueItems": true,
           "maxItems": 5000,
-          "items": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Uuid" },
+          "items": { "$ref": "../common/primitives.v1.schema.json#/$defs/Uuid" },
           "description": "Distinct requests competing in this round. The input side of the ledger: every one of these must appear either as an acquisition in the committed plan or as a planning.request.unfulfilled.v1. A contract test asserts exactly that conservation property, because a request that silently vanishes between rounds is the worst possible failure mode for a customer."
         },
         "duty_cycle_budget_s": {
-          "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/DurationSeconds",
+          "$ref": "../common/primitives.v1.schema.json#/$defs/DurationSeconds",
           "description": "Imaging seconds available per orbit for this satellite in this bucket. The knapsack dimension layered on top of the interval constraints."
         },
         "supersedes_plan_id": {
           "oneOf": [
-            { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Uuid" },
+            { "$ref": "../common/primitives.v1.schema.json#/$defs/Uuid" },
             { "type": "null" }
           ],
           "default": null,
           "description": "The plan being replaced, when trigger is REPLAN. Null on a first plan for the bucket."
         },
-        "triggered_at": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Timestamp" }
+        "triggered_at": { "$ref": "../common/primitives.v1.schema.json#/$defs/Timestamp" }
       }
     }
   },

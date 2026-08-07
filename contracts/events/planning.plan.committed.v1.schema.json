@@ -7,25 +7,25 @@
   "additionalProperties": false,
   "required": ["event_id", "event_type", "schema_version", "occurred_at", "correlation_id", "causation_id", "producer", "data"],
   "properties": {
-    "event_id": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/EventId" },
-    "event_type": { "const": "planning.plan.committed.v1" },
-    "schema_version": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/SchemaVersion" },
-    "occurred_at": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/OccurredAt" },
-    "correlation_id": { "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/CorrelationId" },
+    "event_id": { "$ref": "../common/envelope.v1.schema.json#/$defs/EventId" },
+    "event_type": { "enum": ["planning.plan.committed.v1"] },
+    "schema_version": { "$ref": "../common/envelope.v1.schema.json#/$defs/SchemaVersion" },
+    "occurred_at": { "$ref": "../common/envelope.v1.schema.json#/$defs/OccurredAt" },
+    "correlation_id": { "$ref": "../common/envelope.v1.schema.json#/$defs/CorrelationId" },
     "causation_id": {
-      "$ref": "https://overpass.dev/contracts/common/envelope.v1.schema.json#/$defs/CausationId",
+      "$ref": "../common/envelope.v1.schema.json#/$defs/CausationId",
       "description": "The event_id of the planning.round.triggered.v1 that opened this round."
     },
-    "producer": { "const": "planner-service" },
+    "producer": { "enum": ["planner-service"] },
     "data": {
       "type": "object",
       "additionalProperties": false,
       "required": ["plan_id", "round_id", "satellite_id", "bucket", "plan_version", "policy", "committed_at", "acquisitions", "metrics"],
       "properties": {
-        "plan_id": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Uuid" },
-        "round_id": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Uuid" },
-        "satellite_id": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/SatelliteId" },
-        "bucket": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/TimeWindow" },
+        "plan_id": { "$ref": "../common/primitives.v1.schema.json#/$defs/Uuid" },
+        "round_id": { "$ref": "../common/primitives.v1.schema.json#/$defs/Uuid" },
+        "satellite_id": { "$ref": "../common/primitives.v1.schema.json#/$defs/SatelliteId" },
+        "bucket": { "$ref": "../common/primitives.v1.schema.json#/$defs/TimeWindow" },
         "plan_version": {
           "type": "integer",
           "minimum": 1,
@@ -33,7 +33,7 @@
         },
         "supersedes_plan_id": {
           "oneOf": [
-            { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Uuid" },
+            { "$ref": "../common/primitives.v1.schema.json#/$defs/Uuid" },
             { "type": "null" }
           ],
           "default": null
@@ -42,7 +42,7 @@
           "type": "string",
           "enum": ["GREEDY_BY_BID", "GREEDY_BY_VALUE_DENSITY", "VICKREY_SEALED_BID", "EXACT_DP"]
         },
-        "committed_at": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Timestamp" },
+        "committed_at": { "$ref": "../common/primitives.v1.schema.json#/$defs/Timestamp" },
         "acquisitions": {
           "type": "array",
           "maxItems": 2000,
@@ -52,33 +52,33 @@
             "additionalProperties": false,
             "required": ["acquisition_id", "request_id", "opportunity_id", "mode", "window", "geometry", "awarded_value_credits"],
             "properties": {
-              "acquisition_id": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Uuid" },
-              "request_id": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Uuid" },
-              "opportunity_id": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Uuid" },
-              "customer_id": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/CustomerId" },
-              "mode": { "$ref": "https://overpass.dev/contracts/common/sar.v1.schema.json#/$defs/ImagingMode" },
+              "acquisition_id": { "$ref": "../common/primitives.v1.schema.json#/$defs/Uuid" },
+              "request_id": { "$ref": "../common/primitives.v1.schema.json#/$defs/Uuid" },
+              "opportunity_id": { "$ref": "../common/primitives.v1.schema.json#/$defs/Uuid" },
+              "customer_id": { "$ref": "../common/primitives.v1.schema.json#/$defs/CustomerId" },
+              "mode": { "$ref": "../common/sar.v1.schema.json#/$defs/ImagingMode" },
               "window": {
-                "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/TimeWindow",
+                "$ref": "../common/primitives.v1.schema.json#/$defs/TimeWindow",
                 "description": "The committed acquisition interval — a concrete start chosen inside the opportunity's access_window, plus the dwell. This is the exact interval stored in the tstzrange column that the exclusion constraint guards."
               },
-              "geometry": { "$ref": "https://overpass.dev/contracts/common/sar.v1.schema.json#/$defs/AccessGeometry" },
-              "footprint": { "$ref": "https://overpass.dev/contracts/common/geometry.v1.schema.json#/$defs/Polygon" },
+              "geometry": { "$ref": "../common/sar.v1.schema.json#/$defs/AccessGeometry" },
+              "footprint": { "$ref": "../common/geometry.v1.schema.json#/$defs/Polygon" },
               "slew_time_from_previous_s": {
-                "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/DurationSeconds",
+                "$ref": "../common/primitives.v1.schema.json#/$defs/DurationSeconds",
                 "description": "Attitude manoeuvre plus settling time required after the preceding acquisition in this plan. Null-equivalent (absent) for the first acquisition. Carried on the event so the frontend timeline can render the slew gap as a real, occupied block rather than as apparent idle time — making the sequence-dependent setup cost visible is the difference between a Gantt chart and an explanation."
               },
               "gap_from_previous_s": {
-                "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/DurationSeconds",
+                "$ref": "../common/primitives.v1.schema.json#/$defs/DurationSeconds",
                 "description": "Actual idle time between the previous acquisition's end and this one's start. Must be >= slew_time_from_previous_s; the property-based test asserts this over arbitrary generated plans."
               },
-              "duty_cycle_cost_s": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/DurationSeconds" },
+              "duty_cycle_cost_s": { "$ref": "../common/primitives.v1.schema.json#/$defs/DurationSeconds" },
               "awarded_value_credits": {
-                "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Credits",
+                "$ref": "../common/primitives.v1.schema.json#/$defs/Credits",
                 "description": "Effective value this acquisition contributed to the objective: a function of bid, priority-tier multiplier, and ageing. The function itself is planner configuration, deliberately not part of the contract."
               },
               "clearing_price_credits": {
                 "oneOf": [
-                  { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Credits" },
+                  { "$ref": "../common/primitives.v1.schema.json#/$defs/Credits" },
                   { "type": "null" }
                 ],
                 "default": null,
@@ -93,21 +93,21 @@
           "required": ["total_plan_value_credits", "requests_fulfilled", "candidate_opportunity_count", "duty_cycle_used_s", "duty_cycle_budget_s", "allocation_duration_ms"],
           "description": "The round's own scorecard. Carried on the event rather than only scraped from Prometheus so that policy comparison can be done by replaying the event log — the benchmark harness needs plan value and runtime side by side, per policy, over identical inputs.",
           "properties": {
-            "total_plan_value_credits": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Credits" },
+            "total_plan_value_credits": { "$ref": "../common/primitives.v1.schema.json#/$defs/Credits" },
             "requests_fulfilled": { "type": "integer", "minimum": 0 },
             "requests_unfulfilled": { "type": "integer", "minimum": 0 },
             "candidate_opportunity_count": { "type": "integer", "minimum": 0 },
             "satellite_utilisation_ratio": {
-              "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Ratio",
+              "$ref": "../common/primitives.v1.schema.json#/$defs/Ratio",
               "description": "Imaging seconds committed divided by imaging seconds available in the bucket. Read alongside duty_cycle_used_s: high utilisation with an exhausted duty cycle means the constraint that bound was power, not time."
             },
-            "duty_cycle_used_s": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/DurationSeconds" },
-            "duty_cycle_budget_s": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/DurationSeconds" },
-            "total_slew_time_s": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/DurationSeconds" },
-            "allocation_duration_ms": { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/DurationMillis" },
+            "duty_cycle_used_s": { "$ref": "../common/primitives.v1.schema.json#/$defs/DurationSeconds" },
+            "duty_cycle_budget_s": { "$ref": "../common/primitives.v1.schema.json#/$defs/DurationSeconds" },
+            "total_slew_time_s": { "$ref": "../common/primitives.v1.schema.json#/$defs/DurationSeconds" },
+            "allocation_duration_ms": { "$ref": "../common/primitives.v1.schema.json#/$defs/DurationMillis" },
             "optimality_ratio": {
               "oneOf": [
-                { "$ref": "https://overpass.dev/contracts/common/primitives.v1.schema.json#/$defs/Ratio" },
+                { "$ref": "../common/primitives.v1.schema.json#/$defs/Ratio" },
                 { "type": "null" }
               ],
               "default": null,

@@ -1,0 +1,46 @@
+# oapi-codegen configuration for tasking-api.
+#
+# `strict-server: true` is the decision worth defending here. Without it,
+# oapi-codegen generates handlers taking (http.ResponseWriter, *http.Request)
+# and it is entirely up to the handler to return a shape the spec describes —
+# the generated code cannot tell you when you have drifted. With it, each
+# operation gets a typed request struct and a typed response union, so
+# returning an undeclared status code is a compile error rather than a
+# contract violation discovered by a client.
+#
+# The cost is real: handlers are coupled to generated types, and a spec change
+# breaks the build. That is the point. A contract change SHOULD break the build
+# — the alternative is that it breaks a consumer instead.
+
+package: taskingapi
+
+# NOTE: `output:` is deliberately absent. oapi-codegen lets the config file's
+# output path win over the -o flag, which silently made the drift check
+# regenerate into gen/ instead of into its scratch tree — so the check compared
+# a directory against itself and passed no matter what. Output location is a
+# property of the invocation, not of the contract, and it is passed with -o by
+# scripts/contracts-generate.sh.
+
+generate:
+  models: true
+  chi-server: true
+  strict-server: true
+  # The spec is embedded so the service can serve its own OpenAPI document at
+  # runtime. A spec served from the binary is necessarily the spec that binary
+  # was built against; a spec served from a file or a wiki is a spec that drifts.
+  embedded-spec: true
+
+output-options:
+  # Emit every schema in components, not only those reachable from an
+  # operation. Some types (RequestState, the unfulfilment reason enum) are
+  # shared with the event contracts and are needed by the state machine even
+  # though no endpoint returns them directly.
+  skip-prune: false
+  user-templates: {}
+
+compatibility:
+  # Keep additionalProperties out of generated structs. Our schemas are strict
+  # by design (see contracts/README.md), so a catch-all map would be dead
+  # weight on every type and would quietly make the strictness unobservable
+  # in Go.
+  disable-required-readonly-as-pointer: false
