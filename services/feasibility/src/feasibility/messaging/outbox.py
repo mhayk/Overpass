@@ -24,6 +24,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
+from psycopg.pq import TransactionStatus
+
 if TYPE_CHECKING:
     import psycopg
 
@@ -83,7 +85,33 @@ def claim_unpublished(
     `FOR UPDATE SKIP LOCKED` so that two relay instances can drain the same
     table without either blocking on the other or handing out the same row
     twice. Ordered by id, which is the insertion order the events happened in.
+
+    MUST be called inside an open transaction, and refuses otherwise. Row locks
+    live for the length of the transaction that took them, so on an autocommit
+    connection the lock is released the instant this statement returns — the
+    rows come back looking claimed and are not, and a second relay hands out the
+    same events. That is a duplicate publish, discovered under concurrency,
+    which is the worst way to discover one.
+
+    This guard exists because the first version of this function did exactly
+    that, and every test passed: they were reading, not racing.
+
+    The check is on the connection's TRANSACTION STATUS, not on its
+    `autocommit` setting. Those are different things and the first version of
+    the guard confused them: `connection.transaction()` opens a real
+    transaction block even on an autocommit connection, so keying off the
+    setting rejected correct callers. Measured — INTRANS inside
+    `.transaction()`, IDLE outside, identically in both modes.
     """
+    if connection.info.transaction_status != TransactionStatus.INTRANS:
+        detail = (
+            "claim_unpublished requires an open transaction. Row locks live only as "
+            "long as the transaction that took them, so outside one the FOR UPDATE "
+            "is released immediately and a second relay claims the same rows. Wrap "
+            "the claim, the publish and the mark in one `with connection.transaction():`."
+        )
+        raise RuntimeError(detail)
+
     with connection.cursor() as cursor:
         cursor.execute(
             """

@@ -113,7 +113,7 @@ jobs:
           curl -LsSf https://astral.sh/uv/install.sh | sh
           export PATH="$HOME/.local/bin:$PATH"
           cd services/feasibility
-          uv run pytest tests/test_idempotency.py tests/test_worker.py -v
+          uv run pytest tests/test_idempotency.py tests/test_worker.py tests/test_relay.py -v
 
       - name: NATS topology was applied
         run: |

@@ -85,6 +85,19 @@ def a_delivery(event_id: str | None = None, delivered: int = 1) -> Delivery:
     )
 
 
+def pending(
+    connection: psycopg.Connection[Any],
+) -> list[tuple[int, str, str, bytes, dict[str, str]]]:
+    """claim_unpublished inside a transaction, which is the only legal way.
+
+    The function refuses an autocommit connection on purpose: row locks live
+    only as long as the transaction that took them, so an autocommit claim
+    hands out rows it has not actually reserved.
+    """
+    with connection.transaction():
+        return claim_unpublished(connection)
+
+
 class TestEffectivelyOnce:
     def test_five_deliveries_produce_exactly_one_result(
         self, connection: psycopg.Connection[Any], results_table: str
@@ -244,8 +257,7 @@ class TestOutbox:
 
         assert process_once(connection, "test-outbox", delivery, handler) is Outcome.PROCESSED
 
-        pending = claim_unpublished(connection)
-        assert any(row[1] == event_id for row in pending)
+        assert any(row[1] == event_id for row in pending(connection))
 
     def test_a_rolled_back_handler_leaves_no_event_behind(
         self, connection: psycopg.Connection[Any], results_table: str
@@ -272,7 +284,7 @@ class TestOutbox:
         with pytest.raises(RuntimeError):
             process_once(connection, "test-outbox-rollback", delivery, handler)
 
-        assert all(row[1] != event_id for row in claim_unpublished(connection))
+        assert all(row[1] != event_id for row in pending(connection))
 
     def test_the_traceparent_survives_the_hop(self, connection: psycopg.Connection[Any]) -> None:
         # Dropping it is how one distributed trace silently becomes two, and the
@@ -292,7 +304,7 @@ class TestOutbox:
                     headers={"traceparent": traceparent},
                 ),
             )
-        row = next(r for r in claim_unpublished(connection) if r[1] == event_id)
+        row = next(r for r in pending(connection) if r[1] == event_id)
         assert row[4]["traceparent"] == traceparent
 
     def test_publishing_marks_the_row_and_stops_claiming_it(
@@ -312,10 +324,10 @@ class TestOutbox:
                     headers={},
                 ),
             )
-        row = next(r for r in claim_unpublished(connection) if r[1] == event_id)
+        row = next(r for r in pending(connection) if r[1] == event_id)
         with connection.cursor() as cur:
             mark_published(cur, row[0])
-        assert all(r[1] != event_id for r in claim_unpublished(connection))
+        assert all(r[1] != event_id for r in pending(connection))
 
     def test_a_failed_publish_keeps_the_row_and_counts_the_attempt(
         self, connection: psycopg.Connection[Any]
@@ -337,7 +349,7 @@ class TestOutbox:
                     headers={},
                 ),
             )
-        row = next(r for r in claim_unpublished(connection) if r[1] == event_id)
+        row = next(r for r in pending(connection) if r[1] == event_id)
         with connection.cursor() as cur:
             record_failure(cur, row[0], "connection refused")
             cur.execute(
@@ -347,7 +359,7 @@ class TestOutbox:
 
         assert attempts == 1
         assert "refused" in last_error
-        assert any(r[1] == event_id for r in claim_unpublished(connection))
+        assert any(r[1] == event_id for r in pending(connection))
 
     def test_the_same_event_id_cannot_be_enqueued_twice(
         self, connection: psycopg.Connection[Any]
