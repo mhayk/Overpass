@@ -109,17 +109,29 @@ distributed trace.
 | M1-20 | OTel tracing across the first async hop | `type/feature` `area/observability` `risk/medium` |
 | M1-21 | OpenAPI spec for `plan-gateway` read API | `type/feature` `area/contracts` `area/plan-gateway` `risk/medium` |
 | M1-22 | ADR-0013 — parallel agent execution model | `type/adr` `type/docs` `risk/low` |
+| M1-23 | Cold-start gate is a required check that cannot report on most PRs | `type/bug` `area/ci` `risk/medium` |
+| M1-24 | Enforce the ADR-0013 path-ownership rule in CI | `type/chore` `area/ci` `risk/medium` |
 
-M1-21 and M1-22 are not in the original decomposition. Both come from
+M1-21 to M1-24 are not in the original decomposition. All four descend from
 [ADR-0013](decisions/0013-parallel-agent-execution-in-worktrees.md), which decided
-how M1 is executed concurrently and, in checking its own premise, found that
-`plan-gateway`'s read API is frozen in no contract.
+how M1 is executed concurrently — and then, in checking its own premise, kept
+turning things up:
 
-**M1-21 is a prerequisite, not a parallel track.** It blocks M1-16: `web` renders
-what `plan-gateway` serves, and with no contract between them those two tracks
-cannot fork without inventing incompatible interpretations of the same boundary.
-M1-01 is a prerequisite for the same reason — tracks A and C both build against
-that schema.
+- **M1-21** — `plan-gateway`'s read API is frozen in no contract, so the tracks
+  that produce and consume it cannot fork.
+- **M1-23** — the cold-start gate was a *required* status check with a
+  path-filtered trigger, so it never reported on PRs outside the filter and
+  blocked them permanently. Found by the ADR's own PR being unable to merge.
+- **M1-24** — the ADR's path-ownership rule is stated and unenforced, which the
+  ADR itself lists as a cost. #81 is the argument for closing it: a CI gate nobody
+  had watched work did not work.
+
+**M1-01 and M1-21 are prerequisites, not parallel tracks.** M1-21 blocks M1-16 —
+`web` renders what `plan-gateway` serves, and with no contract between them those
+two tracks cannot fork without inventing incompatible interpretations of the same
+boundary. M1-01 blocks tracks A and C, which both build against that schema.
+M1-24 should also land before the fan-out; retrofitting an ownership rule onto
+work that already violated it is the expensive order.
 
 ---
 
