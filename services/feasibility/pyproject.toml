@@ -11,7 +11,9 @@ requires-python = ">=3.12"
 # connection reuse, which is exactly the code nobody reviews carefully.
 dependencies = [
     "httpx>=0.28,<0.29",
+    "pyproj>=3.7,<4",
     "sgp4>=2.27,<3",
+    "shapely>=2.0,<3",
     "skyfield>=1.54,<2",
 ]
 
@@ -64,5 +66,5 @@ addopts = "-q --strict-markers --strict-config"
 # wrappers in feasibility.orbit annotate every value that crosses out of these
 # libraries, so an untyped return does not leak past propagation.py.
 [[tool.mypy.overrides]]
-module = ["skyfield.*", "sgp4.*"]
+module = ["skyfield.*", "sgp4.*", "shapely.*"]
 ignore_missing_imports = true
