@@ -822,12 +822,12 @@ A bucket can be planned more than once, because rounds fire on a cadence timer o
 - Version guards on the consumer side, because message ordering is not assumed anywhere in this system.
 - A request that loses its slot to a re-plan must return to contention rather than silently disappearing. Silently losing a won slot is the worst possible customer experience and the easiest bug to write.'
 
-issue "M2-11 — ADR-0012: plan supersession semantics" "$M2" "type/adr,risk/low" \
+issue "M2-11 — ADR-0014: planner-side re-planning semantics" "$M2" "type/adr,risk/low" \
 '## Context
 Supersession is a consequence of the round-trigger design and needs to be written down as a decision, not discovered as behaviour.
 
 ## Acceptance criteria
-- [ ] `docs/decisions/0012-plan-supersession.md`
+- [ ] `docs/decisions/0014-planner-side-re-planning-semantics.md`
 - [ ] Rejected alternatives: cadence only (simpler, deader demo), immutable plans with append-only deltas, debounce as round identity
 - [ ] Documents the cost: a re-plan state machine, version guards on every consumer, and requests that can lose a slot they had already won
 - [ ] Names what would falsify it
