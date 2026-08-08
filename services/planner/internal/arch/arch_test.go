@@ -25,7 +25,15 @@ const modulePath = "github.com/mhayk/overpass/services/planner"
 var allowed = map[string][]string{
 	"internal/domain": {},
 	"internal/port":   {"internal/domain"},
-	"internal/app":    {"internal/domain", "internal/port"},
+	"internal/app":    {"internal/domain", "internal/port", "internal/allocation"},
+	// allocation holds the AllocationPolicy implementations. It touches no
+	// database, no broker and no HTTP, so it is not an adapter — it sits beside
+	// app, importing only the domain it is a strategy over.
+	//
+	// It may NOT import port. A policy that could see a port could be handed
+	// something that reads, and Allocate being a pure function is what makes
+	// M2-12's property tests and M2-13's identical-inputs comparison possible.
+	"internal/allocation": {"internal/domain"},
 	// adapter may import anything inward; that is what an adapter is for.
 	//
 	// It includes internal/app because natsmsg binds against app.Streams — the
@@ -36,7 +44,7 @@ var allowed = map[string][]string{
 	// plan-gateway also lists internal/render here. The planner has no render
 	// layer: it publishes events and commits plans, and turning either into
 	// CZML is the gateway's job.
-	"internal/adapter": {"internal/domain", "internal/port", "internal/app"},
+	"internal/adapter": {"internal/domain", "internal/port", "internal/app", "internal/allocation"},
 }
 
 func TestLayeringIsRespected(t *testing.T) {
@@ -85,6 +93,15 @@ func TestTheRuleWouldCatchAViolation(t *testing.T) {
 	}
 	if !isPermitted(modulePath+"/internal/app", allowed["internal/adapter"]) {
 		t.Fatal("adapter importing app was rejected; natsmsg could not read app.Streams")
+	}
+	// A policy that could reach a port could be handed something that reads,
+	// and Allocate being pure is what the property tests and the benchmark
+	// both rest on.
+	if isPermitted(modulePath+"/internal/port", allowed["internal/allocation"]) {
+		t.Fatal("allocation importing port was accepted; a policy could then read something that differs between runs")
+	}
+	if isPermitted(violation, allowed["internal/allocation"]) {
+		t.Fatal("allocation importing an adapter was accepted; the check proves nothing")
 	}
 }
 
