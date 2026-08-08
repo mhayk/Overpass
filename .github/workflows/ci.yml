@@ -328,6 +328,21 @@ jobs:
           docker build -q -t overpass-ci-goose ./deploy/migrate
           docker run --rm --network host -v "$PWD/db/migrations:/migrations:ro"             overpass-ci-goose             -dir /migrations postgres "$OVERPASS_TEST_DSN?sslmode=disable" up
 
+      # Migrated is not enough. The ephemeris sweep reads reference.tle_sets and
+      # reference.satellites, so its tests need the CONSTELLATION, not just the
+      # tables it lives in — and an empty reference schema makes them fail with
+      # "the constellation is not seeded" rather than skip, which is how this
+      # step came to exist. The go job needs none of this; its tests build the
+      # rows they read.
+      #
+      # Offline, from the frozen snapshot, per ADR-0011 — the same seeder the
+      # compose stack runs, so CI and a laptop see the same twelve satellites.
+      - name: Seed the constellation
+        if: steps.exists.outputs.ready == 'true'
+        run: |
+          set -euo pipefail
+          DATABASE_URL="$OVERPASS_TEST_DSN" scripts/seed.sh
+
       # A step, not a service container, for the reason the go job records:
       # JetStream needs --jetstream on the command line and a service container
       # has no way to pass one.
