@@ -43,6 +43,10 @@ if TYPE_CHECKING:
     from feasibility.messaging.idempotency import Delivery
 
 FAILURE_SUBJECT = "feasibility.failed.v1"
+
+# Frozen, like every derived-id namespace here. Changing it renames every
+# refusal ever published.
+_NAMESPACE = uuid.UUID("5d4c3b2a-1e0f-4a9b-8c7d-6e5f4a3b2c1d")
 SCHEMA_VERSION = "1.0.0"
 PRODUCER = "feasibility-service"
 
@@ -128,7 +132,12 @@ def build_refusal(
     if tle_references is not None:
         data["tle_references"] = list(tle_references)
 
-    event_id = str(uuid.uuid4())
+    # Derived, not random. The envelope requires that a retried publish of the
+    # same logical event reuse its id, and a refusal for one request with one
+    # reason IS one logical event. It also stops the recorded fixture churning a
+    # fresh uuid into every `git status` the moment anybody runs the tests —
+    # which is how this was noticed.
+    event_id = str(uuid.uuid5(_NAMESPACE, f"{delivery.event_id}|{reason_code}"))
     payload = {
         "event_id": event_id,
         "event_type": FAILURE_SUBJECT,

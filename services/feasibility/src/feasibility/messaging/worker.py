@@ -32,7 +32,7 @@ from nats.aio.client import Client as NatsClient
 from nats.js.errors import NotFoundError
 from opentelemetry.trace import Status, StatusCode
 
-from feasibility.failures import build_refusal
+from feasibility import failures
 from feasibility.messaging.idempotency import (
     Delivery,
     NonRetryableError,
@@ -117,7 +117,7 @@ def _publish_refusal(
     def handler(cursor: psycopg.Cursor[Any]) -> None:
         enqueue(
             cursor,
-            build_refusal(
+            failures.build_refusal(
                 delivery,
                 failure.reason_code,
                 # Terminal by construction: this path is reached only from a
