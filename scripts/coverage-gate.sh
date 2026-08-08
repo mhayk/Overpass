@@ -42,7 +42,11 @@ note() { printf '  %s\n' "$*"; }
 # by the drift gate — both stronger evidence than a percentage. Including it
 # would also drag the overall figure down with thousands of generated lines and
 # make the number meaningless for the code that matters.
-profiles=$(find . -name coverage.out -not -path './.tools/*' -not -path './gen/*' 2>/dev/null || true)
+# tests/ is excluded for the same reason gen/ is, from the other direction.
+# gen/ is code nobody wrote; tests/integration is code that is ALL test — the
+# module contains no production statements at all, so its coverage is 0.0% by
+# construction and reporting it as a failure says nothing about anything.
+profiles=$(find . -name coverage.out -not -path './.tools/*' -not -path './gen/*' -not -path './tests/*' 2>/dev/null || true)
 if [[ -z "$profiles" ]]; then
   # This used to exit 0, with a note that the gate applied "from M1 (issue #14
   # onward)". #14 is the issue that landed the first hand-written Go package, so

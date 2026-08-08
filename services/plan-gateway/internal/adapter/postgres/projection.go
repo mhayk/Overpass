@@ -32,7 +32,13 @@ func NewProjection(pool *pgxpool.Pool) *Projection { return &Projection{pool: po
 
 // ProjectRequestReceived materialises a request view.
 func (p *Projection) ProjectRequestReceived(ctx context.Context, e port.RequestReceived) error {
-	_, err := p.pool.Exec(ctx, `
+	return pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
+		return p.projectRequestReceived(ctx, tx, e)
+	})
+}
+
+func (p *Projection) projectRequestReceived(ctx context.Context, tx pgx.Tx, e port.RequestReceived) error {
+	_, err := tx.Exec(ctx, `
 		INSERT INTO readmodel.request_views
 			(request_id, customer_id, target_name, state, request_window, target, last_event_at)
 		VALUES ($1, $2, $3, 'RECEIVED', tstzrange($4, $5, '[)'),
@@ -49,6 +55,104 @@ func (p *Projection) ProjectRequestReceived(ctx context.Context, e port.RequestR
 		geometryOrNull(e.TargetGeoJSON), e.EventAt)
 	if err != nil {
 		return fmt.Errorf("projecting request %s: %w", e.RequestID, err)
+	}
+
+	// The request can arrive AFTER the events that depend on it. JetStream
+	// orders per subject and nothing orders across streams, so a plan committed
+	// for a request whose own event has not landed yet is ordinary, not
+	// exceptional. Reconciling here is what makes the request event's late
+	// arrival converge to the same state as its early one — the integration
+	// test that reverses the whole sequence found this by reporting
+	// state=RECEIVED opportunities=0 against state=PLANNED opportunities=2.
+	return reconcileRequest(ctx, tx, e.RequestID, e.EventAt)
+}
+
+// reconcileRequest recomputes everything about a request that is DERIVED.
+//
+// From the rows that exist, never from the event that happens to be in hand.
+// A count incremented on arrival and a state set by whichever event came last
+// are both functions of the network; recomputing makes them functions of the
+// facts, which is the only way the fold converges under reordering.
+//
+// last_event_at is a high-water mark. Guarding it would let an old event that
+// legitimately updates identity fields drag staleness backwards.
+// reconcileSQL recomputes the derived columns for whichever requests the
+// caller selects. The selection is the only thing that varies, so the
+// derivation itself is written once — two copies of this drifting apart is
+// exactly how the count and the state ended up with different guards.
+//
+// State precedence:
+//
+//	a live acquisition exists  -> PLANNED
+//	any opportunity exists     -> AWAITING_PLANNING
+//	otherwise                  -> RECEIVED
+//
+// This subsumes unfulfilment rather than special-casing it. There is no
+// UNFULFILLED state and there must not be: a request that lost ages, gains
+// fairness weight, and competes again. Note the consequence — an unfulfilment
+// alongside a still-live acquisition does NOT demote the request, and should
+// not, because until the displacing plan lands the request genuinely is still
+// planned.
+//
+// The terminal states (EXPIRED, CANCELLED, INFEASIBLE, ACQUIRED) are not
+// derivable from the four events this gateway folds and are not projected yet.
+// When their events land they must win over this derivation, because they are
+// decisions rather than consequences.
+//
+// last_event_at is a high-water mark. Guarding it would let an old event that
+// legitimately updates identity fields drag staleness backwards.
+const reconcileSQL = `
+	UPDATE readmodel.request_views r
+	SET opportunity_count = (
+	        SELECT count(*) FROM readmodel.opportunity_views o
+	        WHERE o.request_id = r.request_id
+	    ),
+	    state = CASE
+	        WHEN EXISTS (
+	            SELECT 1 FROM readmodel.acquisition_views a
+	            WHERE a.request_id = r.request_id AND a.status <> 'SUPERSEDED'
+	        ) THEN 'PLANNED'
+	        WHEN EXISTS (
+	            SELECT 1 FROM readmodel.opportunity_views o
+	            WHERE o.request_id = r.request_id
+	        ) THEN 'AWAITING_PLANNING'
+	        ELSE 'RECEIVED'
+	    END,
+	    last_event_at = GREATEST(r.last_event_at, $2),
+	    updated_at    = now()
+`
+
+// reconcileRequest recomputes everything DERIVED about one request.
+//
+// From the rows that exist, never from the event in hand. A count incremented
+// on arrival and a state set by whichever event came last are both functions of
+// the network; recomputing makes them functions of the facts, which is the only
+// way the fold converges under reordering.
+func reconcileRequest(ctx context.Context, tx pgx.Tx, requestID string, eventAt time.Time) error {
+	if _, err := tx.Exec(ctx, reconcileSQL+` WHERE r.request_id = $1`, requestID, eventAt); err != nil {
+		return fmt.Errorf("reconciling request %s: %w", requestID, err)
+	}
+	return nil
+}
+
+// reconcileBucket recomputes every request with an acquisition in a bucket.
+//
+// Every request, not just the ones the arriving plan names. A new plan version
+// DISPLACES requests, and a displaced request appears nowhere in the event that
+// displaced it — its acquisition is quietly marked SUPERSEDED and, if only the
+// arriving plan's requests were reconciled, its state would stay PLANNED
+// forever with no acquisition to back it up. Found by an integration test that
+// awarded version 2 to a rival.
+func reconcileBucket(ctx context.Context, tx pgx.Tx, e port.PlanCommitted) error {
+	if _, err := tx.Exec(ctx, reconcileSQL+`
+		WHERE r.request_id IN (
+		    SELECT a.request_id
+		    FROM readmodel.acquisition_views a
+		    JOIN readmodel.plan_views p ON p.plan_id = a.plan_id
+		    WHERE p.satellite_id = $1 AND p.bucket = tstzrange($3, $4, '[)')
+		)
+	`, e.SatelliteID, e.EventAt, e.BucketStart, e.BucketEnd); err != nil {
+		return fmt.Errorf("reconciling bucket for plan %s: %w", e.PlanID, err)
 	}
 	return nil
 }
@@ -71,40 +175,11 @@ func (p *Projection) ProjectOpportunities(ctx context.Context, e port.Opportunit
 			}
 		}
 
-		// The count is recomputed from the table and is NOT guarded on
-		// last_event_at.
-		//
-		// It is a derived aggregate over rows that are themselves idempotent,
-		// so it is order-independent by construction and needs no guard. It
-		// HAD one, and the convergence test caught what that cost: when a plan
-		// event arrived first and pushed last_event_at forward, the guard
-		// blocked the recount and the request reported zero opportunities
-		// forever. Same events, two different answers, depending only on
-		// arrival order.
-		//
-		// The guard belongs on the STATE, which is a decision, not on a count,
-		// which is a fact about other rows.
-		if _, err := tx.Exec(ctx, `
-			UPDATE readmodel.request_views
-			SET opportunity_count = (
-			        SELECT count(*) FROM readmodel.opportunity_views WHERE request_id = $1
-			    ),
-			    updated_at = now()
-			WHERE request_id = $1
-		`, e.RequestID); err != nil {
-			return fmt.Errorf("recounting opportunities for %s: %w", e.RequestID, err)
-		}
-
-		if _, err := tx.Exec(ctx, `
-			UPDATE readmodel.request_views
-			SET state         = CASE WHEN state = 'RECEIVED' THEN 'AWAITING_PLANNING' ELSE state END,
-			    last_event_at = GREATEST(last_event_at, $2),
-			    updated_at    = now()
-			WHERE request_id = $1 AND last_event_at <= $2
-		`, e.RequestID, e.EventAt); err != nil {
-			return fmt.Errorf("updating request %s: %w", e.RequestID, err)
-		}
-		return nil
+		// Everything derived goes through one function. The count used to be
+		// recomputed here and the state set with a CASE, and keeping the two
+		// in step across four folds was never going to hold — the count lost
+		// its last_event_at guard for good reasons the state still had.
+		return reconcileRequest(ctx, tx, e.RequestID, e.EventAt)
 	})
 }
 
@@ -175,15 +250,6 @@ func (p *Projection) ProjectPlanCommitted(ctx context.Context, e port.PlanCommit
 				}
 			}
 
-			if decision == domain.ApplyAsCurrent {
-				if _, err := tx.Exec(ctx, `
-					UPDATE readmodel.request_views
-					SET state = 'PLANNED', last_event_at = GREATEST(last_event_at, $2), updated_at = now()
-					WHERE request_id = $1 AND last_event_at <= $2
-				`, a.RequestID, e.EventAt); err != nil {
-					return fmt.Errorf("updating request state: %w", err)
-				}
-			}
 		}
 
 		// An acquisition's status is DERIVED from its plan's, every time,
@@ -205,24 +271,31 @@ func (p *Projection) ProjectPlanCommitted(ctx context.Context, e port.PlanCommit
 		`, e.SatelliteID, e.BucketStart, e.BucketEnd); err != nil {
 			return fmt.Errorf("deriving acquisition status: %w", err)
 		}
-		return nil
+		return reconcileBucket(ctx, tx, e)
 	})
 }
 
 // ProjectUnfulfilled records why a request lost.
 func (p *Projection) ProjectUnfulfilled(ctx context.Context, e port.RequestUnfulfilled) error {
-	_, err := p.pool.Exec(ctx, `
-		UPDATE readmodel.request_views
-		SET unfulfilment  = $2,
-		    state         = CASE WHEN state = 'PLANNED' THEN 'AWAITING_PLANNING' ELSE state END,
-		    last_event_at = GREATEST(last_event_at, $3),
-		    updated_at    = now()
-		WHERE request_id = $1 AND last_event_at <= $3
-	`, e.RequestID, e.ReasonJSON, e.EventAt)
-	if err != nil {
-		return fmt.Errorf("projecting unfulfilment for %s: %w", e.RequestID, err)
-	}
-	return nil
+	return pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
+		// The explanation is stored; the state is not touched here. Losing a
+		// round supersedes the acquisition, and the derivation in
+		// reconcileRequest reads that and drops the request back to
+		// AWAITING_PLANNING on its own. Writing the state here as well would
+		// be a second opinion on the same question.
+		//
+		// The guard stays on unfulfilment because it is a DECISION — the newest
+		// explanation is the true one, and an old one redelivered must not
+		// overwrite it.
+		if _, err := tx.Exec(ctx, `
+			UPDATE readmodel.request_views
+			SET unfulfilment = $2, updated_at = now()
+			WHERE request_id = $1 AND last_event_at <= $3
+		`, e.RequestID, e.ReasonJSON, e.EventAt); err != nil {
+			return fmt.Errorf("projecting unfulfilment for %s: %w", e.RequestID, err)
+		}
+		return reconcileRequest(ctx, tx, e.RequestID, e.EventAt)
+	})
 }
 
 // Cursor reports how far a stream has been folded.
