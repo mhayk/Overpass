@@ -33,7 +33,7 @@ func (f *fakeRounds) DirtyBuckets(context.Context, port.BucketQuery) ([]domain.B
 }
 
 func (f *fakeRounds) OpenRound(_ context.Context, key domain.RoundKey, bucketEnd time.Time,
-	open func(port.RoundInputs) (port.Round, []byte, error),
+	open func(port.RoundInputs) (port.RoundOutcome, error),
 ) (bool, error) {
 	if f.openErr != nil {
 		return false, f.openErr
@@ -45,7 +45,7 @@ func (f *fakeRounds) OpenRound(_ context.Context, key domain.RoundKey, bucketEnd
 	inputs.Key = key
 	inputs.BucketEnd = bucketEnd
 
-	round, payload, err := open(inputs)
+	outcome, err := open(inputs)
 	if errors.Is(err, port.ErrSkipRound) {
 		return false, nil
 	}
@@ -53,8 +53,8 @@ func (f *fakeRounds) OpenRound(_ context.Context, key domain.RoundKey, bucketEnd
 		return false, err
 	}
 	f.openedKeys = append(f.openedKeys, key)
-	f.rounds = append(f.rounds, round)
-	f.payloads = append(f.payloads, payload)
+	f.rounds = append(f.rounds, outcome.Round)
+	f.payloads = append(f.payloads, outcome.RoundPayload)
 	return true, nil
 }
 

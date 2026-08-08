@@ -96,7 +96,7 @@ func TestSameKeySerialisesAndDifferentKeysOverlap(t *testing.T) {
 		defer wg.Done()
 		key := domain.RoundKey{SatelliteID: satellite, BucketStart: bucketStart}
 		_, err := rounds.OpenRound(ctx, key, bucketEnd,
-			func(port.RoundInputs) (port.Round, []byte, error) {
+			func(port.RoundInputs) (port.RoundOutcome, error) {
 				start := time.Now()
 				time.Sleep(hold)
 				mu.Lock()
@@ -105,7 +105,7 @@ func TestSameKeySerialisesAndDifferentKeysOverlap(t *testing.T) {
 				// Skip: this test is about the lock, not about what gets
 				// written. Rolling back also releases the lock through the same
 				// path every error takes.
-				return port.Round{}, nil, port.ErrSkipRound
+				return port.RoundOutcome{}, port.ErrSkipRound
 			})
 		if err != nil {
 			t.Errorf("OpenRound(%s): %v", satellite, err)
@@ -166,8 +166,8 @@ func TestTheLockIsReleasedAfterAFailedRound(t *testing.T) {
 	key := domain.RoundKey{SatelliteID: satellite, BucketStart: bucketStart}
 
 	if _, err := rounds.OpenRound(ctx, key, bucketEnd,
-		func(port.RoundInputs) (port.Round, []byte, error) {
-			return port.Round{}, nil, fmt.Errorf("the round blew up")
+		func(port.RoundInputs) (port.RoundOutcome, error) {
+			return port.RoundOutcome{}, fmt.Errorf("the round blew up")
 		}); err == nil {
 		t.Fatal("a failing round reported success")
 	}
@@ -178,8 +178,8 @@ func TestTheLockIsReleasedAfterAFailedRound(t *testing.T) {
 	go func() {
 		defer close(done)
 		if _, err := rounds.OpenRound(ctx, key, bucketEnd,
-			func(port.RoundInputs) (port.Round, []byte, error) {
-				return port.Round{}, nil, port.ErrSkipRound
+			func(port.RoundInputs) (port.RoundOutcome, error) {
+				return port.RoundOutcome{}, port.ErrSkipRound
 			}); err != nil {
 			t.Errorf("re-acquiring the lock: %v", err)
 		}
@@ -217,9 +217,9 @@ func TestOpeningARoundRecordsItAndEnqueuesTheEvent(t *testing.T) {
 
 	var seen port.RoundInputs
 	opened, err := rounds.OpenRound(ctx, key, bucketEnd,
-		func(inputs port.RoundInputs) (port.Round, []byte, error) {
+		func(inputs port.RoundInputs) (port.RoundOutcome, error) {
 			seen = inputs
-			return port.Round{
+			return port.RoundOutcome{Round: port.Round{
 				RoundID:                   roundID,
 				EventID:                   eventID,
 				CorrelationID:             uuid.NewString(),
@@ -231,7 +231,7 @@ func TestOpeningARoundRecordsItAndEnqueuesTheEvent(t *testing.T) {
 				CandidateRequestIDs:       inputs.CandidateRequestIDs,
 				DutyCycleBudgetS:          inputs.DutyCycleBudgetS,
 				TriggeredAt:               time.Now().UTC(),
-			}, []byte(`{"event_id":"` + eventID + `"}`), nil
+			}, RoundPayload: []byte(`{"event_id":"` + eventID + `"}`)}, nil
 		})
 	if err != nil {
 		t.Fatalf("opening: %v", err)
@@ -292,8 +292,8 @@ func TestAFailedRoundAnnouncesNothing(t *testing.T) {
 
 	// REPLAN with nothing to supersede: rounds_supersedes_iff_replan rejects it.
 	_, err := rounds.OpenRound(ctx, key, bucketEnd,
-		func(inputs port.RoundInputs) (port.Round, []byte, error) {
-			return port.Round{
+		func(inputs port.RoundInputs) (port.RoundOutcome, error) {
+			return port.RoundOutcome{Round: port.Round{
 				RoundID:                   uuid.NewString(),
 				EventID:                   eventID,
 				CorrelationID:             uuid.NewString(),
@@ -306,7 +306,7 @@ func TestAFailedRoundAnnouncesNothing(t *testing.T) {
 				DutyCycleBudgetS:          inputs.DutyCycleBudgetS,
 				SupersedesPlanID:          nil,
 				TriggeredAt:               time.Now().UTC(),
-			}, []byte(`{}`), nil
+			}, RoundPayload: []byte(`{}`)}, nil
 		})
 	if err == nil {
 		t.Fatal("a REPLAN with nothing to supersede was accepted; the CHECK is not doing its job")
@@ -361,9 +361,9 @@ func TestDirtyBucketsClearsAfterARound(t *testing.T) {
 
 	key := domain.RoundKey{SatelliteID: satellite, BucketStart: bucketStart}
 	if _, openErr := rounds.OpenRound(ctx, key, bucketEnd,
-		func(inputs port.RoundInputs) (port.Round, []byte, error) {
+		func(inputs port.RoundInputs) (port.RoundOutcome, error) {
 			eventID := uuid.NewString()
-			return port.Round{
+			return port.RoundOutcome{Round: port.Round{
 				RoundID: uuid.NewString(), EventID: eventID, CorrelationID: uuid.NewString(),
 				Key: key, BucketEnd: bucketEnd,
 				Trigger: domain.TriggerCadence, Policy: "GREEDY_BY_BID",
@@ -371,7 +371,7 @@ func TestDirtyBucketsClearsAfterARound(t *testing.T) {
 				CandidateRequestIDs:       inputs.CandidateRequestIDs,
 				DutyCycleBudgetS:          inputs.DutyCycleBudgetS,
 				TriggeredAt:               time.Now().UTC(),
-			}, []byte(`{"event_id":"` + eventID + `"}`), nil
+			}, RoundPayload: []byte(`{"event_id":"` + eventID + `"}`)}, nil
 		}); openErr != nil {
 		t.Fatalf("opening: %v", openErr)
 	}
