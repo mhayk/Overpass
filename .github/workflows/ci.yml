@@ -311,12 +311,23 @@ jobs:
           # The default shallow clone does not have it.
           fetch-depth: 0
 
+      # Labels are read from the API at run time, NOT from the event payload.
+      #
+      # The payload is a snapshot taken when the run started, so a label added
+      # after seeing the check fail never takes effect — and `gh run rerun`
+      # replays the same stale payload, so re-running does not help either.
+      # That made the escape hatch unusable in the only workflow anyone would
+      # actually use it in: open the PR, see it fail, label it. Found by trying.
       - name: Deliberate crossing?
         id: hatch
         env:
-          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
         run: |
-          if [[ ",$LABELS," == *",crosses-tracks,"* ]]; then
+          set -euo pipefail
+          labels=$(gh api "repos/${{ github.repository }}/pulls/$PR"             --jq '[.labels[].name] | join(",")')
+          echo "labels: $labels"
+          if [[ ",$labels," == *",crosses-tracks,"* ]]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "::notice::labelled crosses-tracks — ownership rule waived for this pull request"
           else
