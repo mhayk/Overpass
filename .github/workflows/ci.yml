@@ -55,8 +55,24 @@ jobs:
           --health-timeout 5s
           --health-retries 10
 
+      # JetStream, because plan-gateway's broker tests are the only thing that
+      # can catch a consumer whose filter subject does not resolve. Without a
+      # broker they skip, the suite stays green, and the projector ships
+      # binding to nothing.
+      nats:
+        image: nats:2.10-alpine
+        ports:
+          - 4222:4222
+          - 8222:8222
+        options: >-
+          --health-cmd "wget -q -O- http://127.0.0.1:8222/healthz || exit 1"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     env:
       OVERPASS_TEST_DSN: postgres://overpass:overpass@localhost:5432/overpass
+      OVERPASS_TEST_NATS_URL: nats://localhost:4222
 
     steps:
       - uses: actions/checkout@v4
@@ -75,6 +91,21 @@ jobs:
           psql -h localhost -U overpass -d overpass -v ON_ERROR_STOP=1             -f deploy/postgres/init/01-extensions.sql
           go install github.com/pressly/goose/v3/cmd/goose@v3.27.3
           "$(go env GOPATH)/bin/goose" -dir db/migrations postgres "$OVERPASS_TEST_DSN" up
+
+      # The same script the compose stack runs, so the streams and consumers the
+      # tests bind to are the ones declared in deploy/, not a CI-only copy.
+      - name: Apply the NATS topology
+        run: |
+          set -euo pipefail
+          docker run --rm --network host -v "$PWD/deploy/nats:/init" \
+            natsio/nats-box:0.14.3 \
+            sh -c "NATS_URL=nats://127.0.0.1:4222 sh /init/init.sh"
+
+      # The gate for #109. Publishes a real message per consumer/subject pair
+      # and requires it to arrive; reading `consumer info` cannot catch a
+      # filter that resolves to nothing.
+      - name: Verify every consumer receives what it filters on
+        run: scripts/nats-topology-check.sh nats://127.0.0.1:4222
 
       - name: Discover Go modules
         id: modules
