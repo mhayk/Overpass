@@ -181,3 +181,22 @@ type Rounds interface {
 	OpenRound(ctx context.Context, key domain.RoundKey, bucketEnd time.Time,
 		open func(RoundInputs) (Round, []byte, error)) (opened bool, err error)
 }
+
+// Satellites reads the per-satellite parameters the transition model needs.
+//
+// A port of its own rather than a method on Rounds. Agility is read once per
+// satellite per round and then consulted for every pairwise transition, so it
+// belongs to whatever is doing the allocating — which is M2-04, not the round
+// trigger.
+type Satellites interface {
+	// Agility returns one satellite's transition parameters. ErrNotFound when
+	// the satellite is unknown, which is a different fact from a satellite with
+	// default parameters and must not be flattened into one.
+	Agility(ctx context.Context, satelliteID string) (domain.Agility, error)
+}
+
+// ErrNotFound is returned when a read finds nothing.
+//
+// Declared in port so a caller can recognise it without importing the adapter —
+// an import the arch test forbids.
+var ErrNotFound = errors.New("not found")
