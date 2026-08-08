@@ -50,6 +50,10 @@ var decoders = map[string]func(*json.Decoder) error{
 		var v events.TaskingRequestRejected
 		return d.Decode(&v)
 	},
+	"feasibility.opportunities.computed.v1": func(d *json.Decoder) error {
+		var v events.FeasibilityOpportunitiesComputed
+		return d.Decode(&v)
+	},
 	"planning.plan.committed.v1": func(d *json.Decoder) error {
 		var v events.PlanCommitted
 		return d.Decode(&v)

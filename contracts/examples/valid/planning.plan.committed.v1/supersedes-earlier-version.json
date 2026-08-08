@@ -1,0 +1,86 @@
+{
+  "event_id": "41111111-2222-4333-8444-555555555555",
+  "event_type": "planning.plan.committed.v1",
+  "schema_version": "1.0.0",
+  "occurred_at": "2026-08-07T09:05:00Z",
+  "correlation_id": "76666666-7777-4888-8999-aaaaaaaaaaaa",
+  "causation_id": "31111111-2222-4333-8444-555555555555",
+  "producer": "planner-service",
+  "data": {
+    "plan_id": "33333333-4444-4555-8666-777777777777",
+    "round_id": "44444444-5555-4666-8777-888888888888",
+    "satellite_id": "CAPELLA-14",
+    "bucket": {
+      "start": "2026-08-07T09:00:00Z",
+      "end": "2026-08-07T12:00:00Z"
+    },
+    "plan_version": 2,
+    "supersedes_plan_id": "23333333-4444-4555-8666-777777777777",
+    "policy": "GREEDY_BY_BID",
+    "committed_at": "2026-08-07T09:05:00Z",
+    "acquisitions": [
+      {
+        "acquisition_id": "66666666-7777-4888-8999-000000000000",
+        "request_id": "cbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+        "opportunity_id": "55555555-6666-4777-8888-999999999999",
+        "customer_id": "port-authority-nl",
+        "mode": "STRIPMAP",
+        "window": {
+          "start": "2026-08-07T10:14:00Z",
+          "end": "2026-08-07T10:14:18.5Z"
+        },
+        "geometry": {
+          "incidence_angle_deg": 32.4,
+          "look_side": "RIGHT",
+          "squint_angle_deg": 0.8,
+          "elevation_angle_deg": 57.6,
+          "slant_range_km": 712.3,
+          "roll_angle_deg": 22.1
+        },
+        "footprint": {
+          "type": "Polygon",
+          "coordinates": [
+            [
+              [
+                4.01,
+                51.9
+              ],
+              [
+                4.19,
+                51.9
+              ],
+              [
+                4.19,
+                52.0
+              ],
+              [
+                4.01,
+                52.0
+              ],
+              [
+                4.01,
+                51.9
+              ]
+            ]
+          ]
+        },
+        "slew_time_from_previous_s": 12.5,
+        "gap_from_previous_s": 41.0,
+        "duty_cycle_cost_s": 18.5,
+        "awarded_value_credits": 12000,
+        "clearing_price_credits": 9500
+      }
+    ],
+    "metrics": {
+      "total_plan_value_credits": 12000,
+      "requests_fulfilled": 1,
+      "requests_unfulfilled": 2,
+      "candidate_opportunity_count": 7,
+      "satellite_utilisation_ratio": 0.031,
+      "duty_cycle_used_s": 18.5,
+      "duty_cycle_budget_s": 600,
+      "total_slew_time_s": 12.5,
+      "allocation_duration_ms": 84
+    }
+  }
+}
