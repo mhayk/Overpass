@@ -26,6 +26,37 @@ GOLANGCI_LINT_VERSION := v2.12.2
 GOOSE_VERSION         := v3.27.3
 
 ROOT        := $(shell git rev-parse --show-toplevel 2>/dev/null || pwd)
+
+# Read .env the way docker compose does, so the two cannot disagree about where
+# Postgres is listening.
+#
+# This is not convenience. compose publishes "$${POSTGRES_PORT:-5433}:5432" and
+# loads .env automatically; make loads nothing. So a developer who set
+# POSTGRES_PORT — the knob .env.example documents, usually because 5433 was
+# already taken — got a stack on one port and a DATABASE_URL pointing at
+# another. `make migrate` then connected to whatever else was on 5433, which on
+# the machine where this was found was a different project's Postgres. Only a
+# password mismatch stopped goose applying this repo's migrations to it.
+#
+# CI cannot catch this class of bug: it has no .env, so POSTGRES_PORT is unset,
+# compose falls back to 5433, and everything agrees. It is invisible until it
+# happens on exactly the machine the 5433 default was chosen to help.
+#
+# `-include`, not `include`: a fresh clone has no .env and must still build.
+# This treats .env as makefile syntax, which is fine for the KEY=VALUE lines
+# .env.example specifies and would not be for values carrying spaces or `#`.
+#
+# One asymmetry this does NOT fix, measured rather than assumed. A value in .env
+# arrives as a makefile assignment, and makefile assignments beat the
+# environment while losing to the command line:
+#
+#   make migrate POSTGRES_PORT=6000     uses 6000
+#   POSTGRES_PORT=6000 make migrate     uses .env, ignoring you, silently
+#
+# compose gives the environment precedence over .env, so the two still disagree
+# about overrides even though they now agree about defaults. DATABASE_URL is the
+# escape hatch that always works, because it is `?=` and never set in .env.
+-include $(ROOT)/.env
 TOOLS_BIN   := $(ROOT)/.tools/bin
 CONTRACTS   := $(ROOT)/contracts
 GEN         := $(ROOT)/gen
@@ -39,9 +70,13 @@ MIGRATIONS  := $(ROOT)/db/migrations
 #
 # DATABASE_URL is overridable so this points at a test database as easily as at
 # the compose stack.
-# Port 5433, matching the compose mapping — a developer machine very often has
-# a local Postgres already holding 5432.
-DATABASE_URL ?= postgres://overpass:overpass@localhost:5433/overpass?sslmode=disable
+#
+# The port is derived, never written twice. 5433 is the default for the reason
+# docker-compose.yml gives — a developer machine very often already has a local
+# Postgres on 5432 — but the default lives in exactly one place per consumer and
+# .env overrides all of them together.
+POSTGRES_PORT ?= 5433
+DATABASE_URL  ?= postgres://overpass:overpass@localhost:$(POSTGRES_PORT)/overpass?sslmode=disable
 GOOSE        := $(TOOLS_BIN)/goose -dir $(MIGRATIONS) postgres "$(DATABASE_URL)"
 
 export PATH := $(TOOLS_BIN):$(PATH)
