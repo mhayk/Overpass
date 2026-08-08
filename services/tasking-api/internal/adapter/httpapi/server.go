@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/mhayk/overpass/gen/go/taskingapi"
 	"github.com/mhayk/overpass/services/tasking-api/internal/app"
@@ -26,6 +27,17 @@ func New(health *app.HealthService, submitter *app.SubmitService, log *slog.Logg
 }
 
 // Routes returns the fully wired handler.
+//
+// otelhttp wraps the whole router rather than being a chi middleware, so the
+// server span is the OUTERMOST thing in the request: it extracts the caller's
+// traceparent, starts a child, and every middleware inside it — including the
+// correlation logger — runs within that span's context. A span started inside
+// chi's chain would exclude the routing and the middleware from its own
+// duration, which is exactly where a slow request often is.
+//
+// Health probes are excluded. A liveness check every five seconds is the
+// highest-volume operation this service performs and the least interesting, and
+// leaving it in buries real traffic in the trace list.
 func (s *Server) Routes() http.Handler {
 	r := chi.NewRouter()
 	r.Use(Correlate(s.log))
@@ -33,7 +45,22 @@ func (s *Server) Routes() http.Handler {
 	r.Get("/healthz", s.liveness)
 	r.Get("/readyz", s.readiness)
 	r.Post("/v1/tasking-requests", s.submit)
-	return r
+
+	return otelhttp.NewHandler(r, "tasking-api",
+		otelhttp.WithFilter(func(req *http.Request) bool {
+			return req.URL.Path != "/healthz" && req.URL.Path != "/readyz"
+		}),
+		// The chi route pattern, not the raw path. Without this every request
+		// is its own span name and the trace list is unaggregatable — though
+		// this service has no path parameters today, so it costs nothing now
+		// and prevents a surprise the first time one is added.
+		otelhttp.WithSpanNameFormatter(func(_ string, req *http.Request) string {
+			if route := chi.RouteContext(req.Context()); route != nil && route.RoutePattern() != "" {
+				return req.Method + " " + route.RoutePattern()
+			}
+			return req.Method + " " + req.URL.Path
+		}),
+	)
 }
 
 // liveness answers /healthz. Never consults a dependency — see app.Live.

@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/mhayk/overpass/services/tasking-api/internal/telemetry"
 )
 
 type contextKey string
@@ -65,7 +67,24 @@ func Correlate(base *slog.Logger) func(http.Handler) http.Handler {
 			started := time.Now()
 			next.ServeHTTP(recorder, r.WithContext(ctx))
 
-			LoggerFrom(ctx, base).Info("http request",
+			// trace_id and span_id on the request line, so a log entry and a
+			// span are joinable in both directions: Grafana links a trace to
+			// its logs, and an operator reading a log can paste the id into
+			// Tempo. A correlation id alone only works if every tool in the
+			// chain happens to carry it; the trace id is carried by the
+			// protocol.
+			//
+			// Read AFTER the handler ran, not before: the middleware that
+			// starts the server span wraps this one, and reading the ids too
+			// early would log the empty parent context.
+			entry := LoggerFrom(ctx, base)
+			if traceID, spanID := telemetry.IDs(r.Context()); traceID != "" {
+				entry = entry.With(
+					slog.String("trace_id", traceID),
+					slog.String("span_id", spanID),
+				)
+			}
+			entry.Info("http request",
 				slog.String("method", r.Method),
 				slog.String("path", r.URL.Path),
 				slog.Int("status", recorder.status),
