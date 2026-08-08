@@ -20,6 +20,11 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"go.opentelemetry.io/otel/codes"
+	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/mhayk/overpass/services/tasking-api/internal/telemetry"
 	"github.com/nats-io/nats.go"
 )
 
@@ -165,6 +170,31 @@ func (r *Relay) DrainOnce(ctx context.Context) (published, failed int, err error
 		}
 
 		for _, row := range rows {
+			// The producing span, resumed from the row.
+			//
+			// This is the join that makes an outbox traceable at all. The
+			// traceparent was captured at ENQUEUE time, inside the transaction
+			// that persisted the request, so it names the ingress span of the
+			// HTTP call that caused this event. Resuming it here and starting a
+			// child means the publish appears under the request that produced
+			// it — even though the publish happens later, on a different
+			// goroutine, possibly after a restart, possibly in a different
+			// process.
+			//
+			// Without this the relay's spans would be roots: a trace per
+			// publish, unconnected to anything, which is the shape almost every
+			// outbox implementation ships with.
+			publishCtx, span := telemetry.Tracer().Start(
+				telemetry.Extract(ctx, row.headers),
+				"tasking.outbox publish",
+				trace.WithSpanKind(trace.SpanKindProducer),
+				trace.WithAttributes(
+					semconv.MessagingSystemKey.String("nats"),
+					semconv.MessagingDestinationName(row.subject),
+					semconv.MessagingMessageIDKey.String(row.eventID),
+				),
+			)
+
 			// The stable event_id doubles as the broker's dedup key. Ours is
 			// the outbox row; this is a second line of defence, and it expires
 			// where ours does not.
@@ -172,6 +202,12 @@ func (r *Relay) DrainOnce(ctx context.Context) (published, failed int, err error
 			for k, v := range row.headers {
 				headers[k] = v
 			}
+			// Overwrites the stored traceparent with THIS span's, deliberately.
+			// The consumer should hang off the publish, not off the ingress: the
+			// publish is what actually delivered the message, and a consumer
+			// parented directly to the ingress would show the broker hop as
+			// taking no time at all.
+			telemetry.Inject(publishCtx, headers)
 
 			if perr := r.publisher.Publish(row.subject, row.payload, headers); perr != nil {
 				r.log.Warn("publish failed",
@@ -179,12 +215,16 @@ func (r *Relay) DrainOnce(ctx context.Context) (published, failed int, err error
 					slog.String("subject", row.subject),
 					slog.Any("error", perr),
 				)
+				span.RecordError(perr)
+				span.SetStatus(codes.Error, "publish failed")
+				span.End()
 				if merr := markFailed(ctx, tx, row.id, perr.Error()); merr != nil {
 					return merr
 				}
 				failed++
 				continue
 			}
+			span.End()
 			if merr := markPublished(ctx, tx, row.id); merr != nil {
 				return merr
 			}

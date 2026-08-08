@@ -12,6 +12,7 @@ import (
 	"github.com/mhayk/overpass/services/tasking-api/internal/app"
 	"github.com/mhayk/overpass/services/tasking-api/internal/domain"
 	"github.com/mhayk/overpass/services/tasking-api/internal/port"
+	"github.com/mhayk/overpass/services/tasking-api/internal/telemetry"
 )
 
 // maxBodyBytes caps an inbound submission.
@@ -267,19 +268,21 @@ func decodeTarget(g geoJSONGeometry) (domain.Target, error) {
 
 // traceHeaders collects what must travel with the event.
 //
-// W3C traceparent and tracestate if the caller supplied them, plus the
-// correlation id this service assigned. A consumer three hops away can then tie
-// its work back to the original HTTP request without anyone having planned for
-// that specific question.
+// The traceparent written here is THIS SERVICE'S ingress span, not the one the
+// caller sent. That distinction is the whole mechanism: the ingress span is
+// already a child of the caller's, so injecting ours keeps the chain intact and
+// makes the consumer a descendant of the request that caused it. Copying the
+// caller's header verbatim instead would make the consumer a SIBLING of this
+// service's work — same trace, but the outbox hop would not appear as the thing
+// that caused it.
+//
+// If tracing is disabled the propagator writes nothing and the map is just the
+// correlation id, which is why that is carried separately rather than derived
+// from the trace: correlation has to survive a service with no exporter.
 func traceHeaders(r *http.Request) map[string]string {
-	out := map[string]string{}
-	for _, name := range []string{"traceparent", "tracestate"} {
-		if v := r.Header.Get(name); v != "" {
-			out[name] = v
-		}
-	}
+	out := telemetry.Inject(r.Context(), map[string]string{})
 	if id := CorrelationID(r.Context()); id != "" {
-		out["X-Correlation-Id"] = id
+		out[CorrelationHeader] = id
 	}
 	return out
 }

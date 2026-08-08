@@ -26,6 +26,7 @@ import (
 	"github.com/mhayk/overpass/services/tasking-api/internal/adapter/postgres"
 	"github.com/mhayk/overpass/services/tasking-api/internal/app"
 	"github.com/mhayk/overpass/services/tasking-api/internal/domain"
+	"github.com/mhayk/overpass/services/tasking-api/internal/telemetry"
 )
 
 // systemClock is the real clock. Everything that needs the time takes a
@@ -66,6 +67,41 @@ func run(ctx context.Context) error {
 		slog.String("env", cfg.Environment),
 		slog.String("addr", cfg.HTTPAddr),
 	)
+
+	// Tracing before anything that might produce a span, and shut down last.
+	//
+	// A failure here does NOT stop the service. Tracing is observability, not
+	// function; refusing to serve traffic because a telemetry backend is
+	// unreachable would make the observability stack an availability
+	// dependency, which is exactly backwards.
+	shutdownTracing, err := telemetry.Setup(ctx, telemetry.Config{
+		ServiceName:    "tasking-api",
+		ServiceVersion: cfg.Version,
+		Environment:    cfg.Environment,
+		Endpoint:       cfg.OTLPEndpoint,
+		SampleRatio:    cfg.TraceSampleRatio,
+	})
+	if err != nil {
+		log.Warn("tracing not started; spans will be dropped",
+			slog.String("endpoint", cfg.OTLPEndpoint), slog.Any("error", err))
+		shutdownTracing = func(context.Context) error { return nil }
+	} else {
+		log.Info("tracing started",
+			slog.String("endpoint", cfg.OTLPEndpoint),
+			slog.Float64("sample_ratio", cfg.TraceSampleRatio))
+	}
+	//nolint:contextcheck // Not inheriting is the point; see the comment below.
+	defer func() {
+		// A FRESH context with its own deadline. ctx is already cancelled by
+		// the time this runs, and Shutdown on a cancelled context drops the
+		// batch instead of flushing it — losing precisely the spans around
+		// whatever made the process stop.
+		flushCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if flushErr := shutdownTracing(flushCtx); flushErr != nil {
+			log.Warn("flushing traces failed", slog.Any("error", flushErr))
+		}
+	}()
 
 	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
 	if err != nil {

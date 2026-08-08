@@ -26,8 +26,20 @@ var allowed = map[string][]string{
 	"internal/domain": {},
 	"internal/port":   {"internal/domain"},
 	"internal/app":    {"internal/domain", "internal/port"},
+	// telemetry is cross-cutting infrastructure, not a port implementation.
+	//
+	// It was written under internal/adapter/telemetry and this test objected
+	// immediately, correctly: an adapter importing a sibling adapter is the
+	// coupling the rule exists to prevent, and httpapi, outbox and main all
+	// need tracing. Widening the rule to let adapters import each other would
+	// have bought this one case at the price of the rule meaning anything.
+	//
+	// It imports nothing internal at all — it is closer to log/slog than to a
+	// database adapter, and that is why it can sit outside the layering rather
+	// than inside it.
+	"internal/telemetry": {},
 	// adapter may import anything inward; that is what an adapter is for.
-	"internal/adapter": {"internal/domain", "internal/port", "internal/app"},
+	"internal/adapter": {"internal/domain", "internal/port", "internal/app", "internal/telemetry"},
 }
 
 func TestLayeringIsRespected(t *testing.T) {
@@ -68,6 +80,15 @@ func TestTheRuleWouldCatchAViolation(t *testing.T) {
 	}
 	if !isPermitted(modulePath+"/internal/domain", allowed["internal/app"]) {
 		t.Fatal("app importing domain was rejected; the check is too strict to be useful")
+	}
+	// telemetry must stay dependency-free in both directions: nothing internal
+	// in, and reachable from adapter. A tracing package that imports the domain
+	// is a domain that cannot be tested without an exporter.
+	if isPermitted(modulePath+"/internal/domain", allowed["internal/telemetry"]) {
+		t.Fatal("telemetry importing the domain was accepted; the check proves nothing")
+	}
+	if !isPermitted(modulePath+"/internal/telemetry", allowed["internal/adapter"]) {
+		t.Fatal("adapter importing telemetry was rejected; tracing would be unreachable")
 	}
 }
 

@@ -26,6 +26,9 @@ type Config struct {
 	LogLevel         string
 	ShutdownTimeout  time.Duration
 	ReadinessTimeout time.Duration
+
+	OTLPEndpoint     string
+	TraceSampleRatio float64
 }
 
 // Load reads and validates the environment.
@@ -39,6 +42,11 @@ func Load() (Config, error) {
 		DatabaseURL: os.Getenv("DATABASE_URL"),
 		NATSURL:     env("NATS_URL", "nats://localhost:4222"),
 		LogLevel:    env("LOG_LEVEL", "info"),
+		// Empty disables tracing entirely, which is what a unit test wants and
+		// what a deployment without a collector needs. There IS a default,
+		// unlike DATABASE_URL, because guessing wrong here loses telemetry
+		// rather than corrupting data.
+		OTLPEndpoint: env("OTEL_EXPORTER_OTLP_ENDPOINT", "otel-collector:4317"),
 	}
 
 	// No default. A database URL is not something to guess at: a wrong guess
@@ -56,6 +64,13 @@ func Load() (Config, error) {
 		problems = append(problems, err.Error())
 	}
 
+	// Everything, by default. This is a demo stack where a missing trace is a
+	// broken demo, and the traffic is a handful of requests. M3 lowers it when
+	// there is load worth sampling.
+	if cfg.TraceSampleRatio, err = ratio("TRACE_SAMPLE_RATIO", 1.0); err != nil {
+		problems = append(problems, err.Error())
+	}
+
 	switch cfg.LogLevel {
 	case "debug", "info", "warn", "error":
 	default:
@@ -66,6 +81,26 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("invalid configuration:\n  - %s", strings.Join(problems, "\n  - "))
 	}
 	return cfg, nil
+}
+
+// ratio parses a sampling fraction and refuses anything outside [0,1].
+//
+// Out of range is rejected rather than clamped. "2.0" means the author believed
+// something about this knob that is not true, and silently treating it as 1.0
+// leaves that belief in place.
+func ratio(key string, fallback float64) (float64, error) {
+	raw, ok := os.LookupEnv(key)
+	if !ok || raw == "" {
+		return fallback, nil
+	}
+	v, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s is not a number: %q", key, raw)
+	}
+	if v < 0 || v > 1 {
+		return 0, fmt.Errorf("%s must be between 0 and 1, got %q", key, raw)
+	}
+	return v, nil
 }
 
 func env(key, fallback string) string {
