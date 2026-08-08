@@ -56,7 +56,14 @@ type RequestReceived struct {
 	TargetName  string
 	WindowStart time.Time
 	WindowEnd   time.Time
-	TargetWKT   string
+
+	// GeoJSON as it arrived on the wire, handed to PostGIS unchanged.
+	//
+	// Not WKT. The contracts publish GeoJSON, so converting here would mean
+	// hand-rolling a serialiser for a format PostGIS already parses —
+	// ST_GeomFromGeoJSON — and hand-rolled WKT is exactly where ring closure
+	// and coordinate order go quietly wrong.
+	TargetGeoJSON []byte
 }
 
 // OpportunitiesComputed mirrors feasibility.opportunities.computed.v1.
@@ -76,7 +83,7 @@ type Opportunity struct {
 	AcquisitionDurationS float64
 	OrbitNumber          *int
 	QualityScore         float64
-	FootprintWKT         string
+	FootprintGeoJSON     []byte
 }
 
 // PlanCommitted mirrors planning.plan.committed.v1.
@@ -103,7 +110,7 @@ type Acquisition struct {
 	Mode                  string
 	WindowStart           time.Time
 	WindowEnd             time.Time
-	FootprintWKT          string
+	FootprintGeoJSON      []byte
 	SlewTimeFromPreviousS *float64
 	GapFromPreviousS      *float64
 	AwardedValueCredits   int64
@@ -114,6 +121,23 @@ type RequestUnfulfilled struct {
 	EventAt    time.Time
 	RequestID  string
 	ReasonJSON []byte
+}
+
+// Decoder turns a wire payload into the projector's own event types.
+//
+// A port, so the application layer never learns the wire format. The first
+// version had the projector call json.Unmarshal on its own structs directly,
+// which decoded every real contract payload — snake_case, and wrapped in an
+// envelope — into an all-zero struct WITHOUT ERROR. See #112.
+//
+// One method per event rather than a generic Decode(any), for the same reason
+// Projection has one method per event: the compiler should know which shape it
+// is looking at.
+type Decoder interface {
+	RequestReceived(payload []byte) (RequestReceived, error)
+	Opportunities(payload []byte) (OpportunitiesComputed, error)
+	PlanCommitted(payload []byte) (PlanCommitted, error)
+	Unfulfilled(payload []byte) (RequestUnfulfilled, error)
 }
 
 // Message is one delivery from the broker, already unwrapped from transport.

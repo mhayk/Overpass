@@ -4,10 +4,9 @@ package app
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/mhayk/overpass/services/plan-gateway/internal/port"
 )
@@ -16,12 +15,18 @@ import (
 type Projector struct {
 	source     port.MessageSource
 	projection port.Projection
+	decode     port.Decoder
 	log        *slog.Logger
 }
 
 // NewProjector wires the loop.
-func NewProjector(source port.MessageSource, projection port.Projection, log *slog.Logger) *Projector {
-	return &Projector{source: source, projection: projection, log: log}
+func NewProjector(
+	source port.MessageSource,
+	projection port.Projection,
+	decoder port.Decoder,
+	log *slog.Logger,
+) *Projector {
+	return &Projector{source: source, projection: projection, decode: decoder, log: log}
 }
 
 // Run folds until the context is cancelled.
@@ -84,55 +89,74 @@ func (p *Projector) Apply(ctx context.Context, m port.Message) error {
 		return nil
 	}
 
-	if err := p.route(ctx, m); err != nil {
+	// The cursor is stamped with the EVENT's occurred_at, returned by route,
+	// not with m.EventAt. The broker's store time is when the message was
+	// persisted, which is later than when the thing happened and drifts further
+	// the longer a producer's outbox backs up — so staleness computed from it
+	// would report the projection as fresher than it is.
+	eventAt, err := p.route(ctx, m)
+	if err != nil {
 		return err
 	}
-	return p.projection.Advance(ctx, m.Stream, m.Sequence, m.EventAt)
+	return p.projection.Advance(ctx, m.Stream, m.Sequence, eventAt)
 }
 
 // route decodes and dispatches.
 //
-// EventAt is taken from the envelope in every case, overwriting whatever the
-// payload carried. The envelope's occurred_at is the one the outbox stamped and
-// the one the cursor is compared against; letting a payload field disagree with
-// it would make staleness a function of two different clocks.
-func (p *Projector) route(ctx context.Context, m port.Message) error {
+// EventAt comes from the DECODED event's occurred_at, which is the envelope
+// field the outbox stamped, not from the broker's store time. The message's own
+// EventAt is only a fallback for a payload that somehow carries no timestamp.
+func (p *Projector) route(ctx context.Context, m port.Message) (time.Time, error) {
 	switch m.Subject {
 	case SubjectRequestReceived:
-		var e port.RequestReceived
-		if err := decode(m, &e); err != nil {
-			return err
+		e, err := p.decode.RequestReceived(m.Payload)
+		if err != nil {
+			return time.Time{}, err
 		}
-		e.EventAt = m.EventAt
-		return p.projection.ProjectRequestReceived(ctx, e)
+		e.EventAt = pick(e.EventAt, m.EventAt)
+		return e.EventAt, p.projection.ProjectRequestReceived(ctx, e)
 	case SubjectOpportunitiesComputed:
-		var e port.OpportunitiesComputed
-		if err := decode(m, &e); err != nil {
-			return err
+		e, err := p.decode.Opportunities(m.Payload)
+		if err != nil {
+			return time.Time{}, err
 		}
-		e.EventAt = m.EventAt
-		return p.projection.ProjectOpportunities(ctx, e)
+		e.EventAt = pick(e.EventAt, m.EventAt)
+		return e.EventAt, p.projection.ProjectOpportunities(ctx, e)
 	case SubjectPlanCommitted:
-		var e port.PlanCommitted
-		if err := decode(m, &e); err != nil {
-			return err
+		e, err := p.decode.PlanCommitted(m.Payload)
+		if err != nil {
+			return time.Time{}, err
 		}
-		e.EventAt = m.EventAt
-		return p.projection.ProjectPlanCommitted(ctx, e)
+		e.EventAt = pick(e.EventAt, m.EventAt)
+		return e.EventAt, p.projection.ProjectPlanCommitted(ctx, e)
 	case SubjectRequestUnfulfilled:
-		var e port.RequestUnfulfilled
-		if err := decode(m, &e); err != nil {
-			return err
+		e, err := p.decode.Unfulfilled(m.Payload)
+		if err != nil {
+			return time.Time{}, err
 		}
-		e.EventAt = m.EventAt
-		return p.projection.ProjectUnfulfilled(ctx, e)
+		e.EventAt = pick(e.EventAt, m.EventAt)
+		return e.EventAt, p.projection.ProjectUnfulfilled(ctx, e)
 	default:
 		// Not an error. A gateway that fails on a subject it was not built for
 		// would block the whole stream the day another service starts
 		// publishing something new.
 		p.log.Debug("ignoring unrecognised subject", slog.String("subject", m.Subject))
-		return nil
+		// The broker's timestamp, because there is no decoded event to take one
+		// from. The cursor still advances: leaving it behind on a subject this
+		// service will never handle would stall the stream forever.
+		return m.EventAt, nil
 	}
+}
+
+// pick prefers the envelope's occurred_at and falls back to the broker's.
+//
+// A zero timestamp would make staleness report decades and would sort ahead of
+// every real event, so it is never allowed through.
+func pick(fromPayload, fromBroker time.Time) time.Time {
+	if fromPayload.IsZero() {
+		return fromBroker
+	}
+	return fromPayload
 }
 
 // Subjects this projector folds.
@@ -142,13 +166,3 @@ const (
 	SubjectPlanCommitted         = "planning.plan.committed.v1"
 	SubjectRequestUnfulfilled    = "planning.request.unfulfilled.v1"
 )
-
-// ErrMalformed marks a payload that will never parse.
-var ErrMalformed = errors.New("malformed payload")
-
-func decode(m port.Message, into any) error {
-	if err := json.Unmarshal(m.Payload, into); err != nil {
-		return fmt.Errorf("%w: %s: %w", ErrMalformed, m.Subject, err)
-	}
-	return nil
-}

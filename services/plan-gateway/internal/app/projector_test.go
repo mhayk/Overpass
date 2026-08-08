@@ -2,17 +2,155 @@ package app_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
 	"testing"
 	"time"
 
+	"github.com/mhayk/overpass/services/plan-gateway/internal/adapter/wire"
 	"github.com/mhayk/overpass/services/plan-gateway/internal/app"
 	"github.com/mhayk/overpass/services/plan-gateway/internal/port"
 )
 
 var eventAt = time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC)
+
+// Real contract envelopes, not hand-shaped fragments.
+//
+// Every payload below is one the schemas would accept. That is not fussiness:
+// the tests these replace passed `{"request_id":"r1"}` and `{}`, which decode to
+// nothing under the real contracts, and the suite could not tell the difference.
+
+const (
+	sampleRequestID = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"
+	sampleEventID   = "11111111-2222-4333-8444-555555555555"
+	sampleCorrID    = "66666666-7777-4888-8999-aaaaaaaaaaaa"
+	samplePlanID    = "33333333-4444-4555-8666-777777777777"
+	sampleRoundID   = "44444444-5555-4666-8777-888888888888"
+	sampleOppID     = "55555555-6666-4777-8888-999999999999"
+	sampleAcqID     = "66666666-7777-4888-8999-000000000000"
+)
+
+func stamp(at time.Time) string { return at.UTC().Format(time.RFC3339Nano) }
+
+func envelopeFor(t *testing.T, subject string, at time.Time) string {
+	t.Helper()
+	when := stamp(at)
+	base := map[string]any{
+		"event_id":       sampleEventID,
+		"event_type":     subject,
+		"schema_version": "1.0.0",
+		"occurred_at":    when,
+		"correlation_id": sampleCorrID,
+		"causation_id":   nil,
+	}
+
+	switch subject {
+	case app.SubjectRequestReceived:
+		base["producer"] = "tasking-api"
+		base["data"] = map[string]any{
+			"request_id":      sampleRequestID,
+			"customer_id":     "acme-imaging",
+			"target":          map[string]any{"type": "Point", "coordinates": []float64{0, 0}},
+			"window":          map[string]any{"start": when, "end": stamp(at.Add(24 * time.Hour))},
+			"priority_tier":   "BEST_EFFORT",
+			"bid_credits":     0,
+			"requested_modes": []string{"SCAN"},
+			"submitted_at":    when,
+		}
+	case app.SubjectOpportunitiesComputed:
+		base["producer"] = "feasibility-service"
+		base["data"] = map[string]any{
+			"request_id":           sampleRequestID,
+			"computed_at":          when,
+			"horizon":              map[string]any{"start": when, "end": stamp(at.Add(24 * time.Hour))},
+			"tle_references":       []any{},
+			"satellites_evaluated": 1,
+			"opportunity_count":    1,
+			"truncated":            false,
+			"compute_duration_ms":  12,
+			"opportunities": []any{map[string]any{
+				"opportunity_id":         sampleOppID,
+				"satellite_id":           "CAPELLA-14",
+				"mode":                   "STRIPMAP",
+				"access_window":          map[string]any{"start": when, "end": stamp(at.Add(10 * time.Minute))},
+				"acquisition_duration_s": 8,
+				"geometry":               accessGeometry(),
+				"footprint":              polygon(),
+				"duty_cycle_cost_s":      8,
+				"quality_score":          0.9,
+			}},
+		}
+	case app.SubjectPlanCommitted:
+		base["producer"] = "planner-service"
+		base["data"] = map[string]any{
+			"plan_id":      samplePlanID,
+			"round_id":     sampleRoundID,
+			"satellite_id": "CAPELLA-14",
+			"bucket":       map[string]any{"start": when, "end": stamp(at.Add(3 * time.Hour))},
+			"plan_version": 1,
+			"policy":       "GreedyByBid",
+			"committed_at": when,
+			"acquisitions": []any{map[string]any{
+				"acquisition_id":        sampleAcqID,
+				"request_id":            sampleRequestID,
+				"opportunity_id":        sampleOppID,
+				"mode":                  "STRIPMAP",
+				"window":                map[string]any{"start": when, "end": stamp(at.Add(8 * time.Second))},
+				"geometry":              accessGeometry(),
+				"awarded_value_credits": 500,
+			}},
+			"metrics": map[string]any{
+				"total_plan_value_credits":    500,
+				"requests_fulfilled":          1,
+				"requests_unfulfilled":        0,
+				"candidate_opportunity_count": 1,
+				"satellite_utilisation_ratio": 0.1,
+				"duty_cycle_used_s":           8,
+				"duty_cycle_budget_s":         600,
+				"total_slew_time_s":           0,
+				"allocation_duration_ms":      5,
+			},
+		}
+	case app.SubjectRequestUnfulfilled:
+		base["producer"] = "planner-service"
+		base["data"] = map[string]any{
+			"request_id":         sampleRequestID,
+			"round_id":           sampleRoundID,
+			"reason_code":        "OUTBID",
+			"decided_at":         when,
+			"eligible_for_retry": true,
+		}
+	default:
+		t.Fatalf("no envelope builder for %s", subject)
+	}
+
+	out, err := json.Marshal(base)
+	if err != nil {
+		t.Fatalf("building %s: %v", subject, err)
+	}
+	return string(out)
+}
+
+func accessGeometry() map[string]any {
+	return map[string]any{
+		"incidence_angle_deg": 30.0,
+		"look_side":           "RIGHT",
+		"squint_angle_deg":    0.0,
+		"elevation_angle_deg": 60.0,
+		"slant_range_km":      700.0,
+	}
+}
+
+func polygon() map[string]any {
+	return map[string]any{
+		"type": "Polygon",
+		"coordinates": [][][]float64{{
+			{4, 51}, {4, 52}, {5, 52}, {5, 51}, {4, 51},
+		}},
+	}
+}
 
 // recordingProjection notes what it was asked to fold and can be told to fail.
 type recordingProjection struct {
@@ -114,8 +252,13 @@ func msg(stream, subject string, seq uint64, payload string) port.Message {
 	}
 }
 
+// newProjector uses the REAL decoder, not a stub.
+//
+// A stub decoder here would accept whatever these tests hand it and recreate
+// exactly the blind spot that let #112 through: every input built from the
+// same shape it decodes into.
 func newProjector(source port.MessageSource, projection port.Projection) *app.Projector {
-	return app.NewProjector(source, projection, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	return app.NewProjector(source, projection, wire.New(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
 // TestEachSubjectReachesItsFold catches a routing table that compiles and is
@@ -124,18 +267,18 @@ func newProjector(source port.MessageSource, projection port.Projection) *app.Pr
 func TestEachSubjectReachesItsFold(t *testing.T) {
 	for _, tc := range []struct {
 		subject string
-		payload string
 		want    string
 	}{
-		{app.SubjectRequestReceived, `{"request_id":"r1"}`, "request"},
-		{app.SubjectOpportunitiesComputed, `{"request_id":"r1"}`, "opportunities"},
-		{app.SubjectPlanCommitted, `{"plan_id":"p1"}`, "plan"},
-		{app.SubjectRequestUnfulfilled, `{"request_id":"r1"}`, "unfulfilled"},
+		{app.SubjectRequestReceived, "request"},
+		{app.SubjectOpportunitiesComputed, "opportunities"},
+		{app.SubjectPlanCommitted, "plan"},
+		{app.SubjectRequestUnfulfilled, "unfulfilled"},
 	} {
 		t.Run(tc.subject, func(t *testing.T) {
 			projection := newRecording()
 			p := newProjector(&countingSource{}, projection)
-			if err := p.Apply(t.Context(), msg("S", tc.subject, 1, tc.payload)); err != nil {
+			payload := envelopeFor(t, tc.subject, eventAt)
+			if err := p.Apply(t.Context(), msg("S", tc.subject, 1, payload)); err != nil {
 				t.Fatalf("apply: %v", err)
 			}
 			if len(projection.folded) != 1 || projection.folded[0] != tc.want {
@@ -153,7 +296,7 @@ func TestEachSubjectReachesItsFold(t *testing.T) {
 func TestAReplayedSequenceIsIgnored(t *testing.T) {
 	projection := newRecording()
 	p := newProjector(&countingSource{}, projection)
-	m := msg("TASKING", app.SubjectRequestReceived, 7, `{"request_id":"r1"}`)
+	m := msg("TASKING", app.SubjectRequestReceived, 7, envelopeFor(t, app.SubjectRequestReceived, eventAt))
 
 	for i := range 3 {
 		if err := p.Apply(t.Context(), m); err != nil {
@@ -174,10 +317,10 @@ func TestTheGuardIsPerStream(t *testing.T) {
 	projection := newRecording()
 	p := newProjector(&countingSource{}, projection)
 
-	if err := p.Apply(t.Context(), msg("TASKING", app.SubjectRequestReceived, 5, `{}`)); err != nil {
+	if err := p.Apply(t.Context(), msg("TASKING", app.SubjectRequestReceived, 5, envelopeFor(t, app.SubjectRequestReceived, eventAt))); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.Apply(t.Context(), msg("PLANNING", app.SubjectPlanCommitted, 5, `{}`)); err != nil {
+	if err := p.Apply(t.Context(), msg("PLANNING", app.SubjectPlanCommitted, 5, envelopeFor(t, app.SubjectPlanCommitted, eventAt))); err != nil {
 		t.Fatal(err)
 	}
 	if len(projection.folded) != 2 {
@@ -195,7 +338,7 @@ func TestAFailedFoldDoesNotAdvanceTheCursor(t *testing.T) {
 	projection.failOn = "plan"
 	p := newProjector(&countingSource{}, projection)
 
-	err := p.Apply(t.Context(), msg("PLANNING", app.SubjectPlanCommitted, 3, `{}`))
+	err := p.Apply(t.Context(), msg("PLANNING", app.SubjectPlanCommitted, 3, envelopeFor(t, app.SubjectPlanCommitted, eventAt)))
 	if err == nil {
 		t.Fatal("a failing fold reported success")
 	}
@@ -210,7 +353,7 @@ func TestAnUnknownSubjectIsSkippedNotFailed(t *testing.T) {
 	projection := newRecording()
 	p := newProjector(&countingSource{}, projection)
 
-	if err := p.Apply(t.Context(), msg("TASKING", "tasking.something.new.v1", 1, `{}`)); err != nil {
+	if err := p.Apply(t.Context(), msg("TASKING", "tasking.something.new.v1", 1, `{"anything":true}`)); err != nil {
 		t.Fatalf("an unrecognised subject failed the fold: %v", err)
 	}
 	if len(projection.folded) != 0 {
@@ -223,19 +366,39 @@ func TestAnUnknownSubjectIsSkippedNotFailed(t *testing.T) {
 	}
 }
 
-// TestAMalformedPayloadFailsRatherThanFoldingAnEmptyEvent guards against the
-// worst outcome: json.Unmarshal on garbage leaving a zero-valued struct that
-// folds cleanly and writes an empty row.
-func TestAMalformedPayloadFailsRatherThanFoldingAnEmptyEvent(t *testing.T) {
-	projection := newRecording()
-	p := newProjector(&countingSource{}, projection)
+// TestAPayloadThatDoesNotMatchTheContractIsRefused is the #112 regression at
+// the projector level.
+//
+// The original version of this test passed `not json` and was satisfied. That
+// left the far more dangerous case wide open: VALID json whose field names the
+// contract does not know decodes to a zero struct, returns no error, and folds
+// an empty row. Both shapes are covered here now, and the second one is the
+// one that actually shipped.
+func TestAPayloadThatDoesNotMatchTheContractIsRefused(t *testing.T) {
+	for _, tc := range []struct{ name, payload string }{
+		{"not json at all", `not json`},
+		{"valid json, wrong shape", `{"request_id":"r1","customer_id":"acme"}`},
+		{"the envelope with no data", `{"event_id":"x"}`},
+		{"an empty object", `{}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			projection := newRecording()
+			p := newProjector(&countingSource{}, projection)
 
-	err := p.Apply(t.Context(), msg("TASKING", app.SubjectRequestReceived, 1, `not json`))
-	if !errors.Is(err, app.ErrMalformed) {
-		t.Fatalf("want ErrMalformed, got %v", err)
-	}
-	if len(projection.folded) != 0 {
-		t.Fatalf("a malformed payload was folded: %v", projection.folded)
+			err := p.Apply(t.Context(), msg("TASKING", app.SubjectRequestReceived, 1, tc.payload))
+			if err == nil {
+				t.Fatal("accepted a payload the contract would reject")
+			}
+			if !errors.Is(err, wire.ErrMalformed) {
+				t.Fatalf("want ErrMalformed, got %v", err)
+			}
+			if len(projection.folded) != 0 {
+				t.Fatalf("it was folded anyway: %v", projection.folded)
+			}
+			if len(projection.advance) != 0 {
+				t.Fatal("the cursor advanced past a payload that never folded")
+			}
+		})
 	}
 }
 
@@ -248,8 +411,8 @@ func TestAnEventIsAckedOnlyAfterItIsFolded(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	source := &countingSource{
 		batches: [][]port.Message{{
-			msg("TASKING", app.SubjectRequestReceived, 1, `{}`),
-			msg("TASKING", app.SubjectRequestReceived, 2, `{}`),
+			msg("TASKING", app.SubjectRequestReceived, 1, envelopeFor(t, app.SubjectRequestReceived, eventAt)),
+			msg("TASKING", app.SubjectRequestReceived, 2, envelopeFor(t, app.SubjectRequestReceived, eventAt)),
 		}},
 		cancel: cancel,
 	}
@@ -274,7 +437,7 @@ func TestAnEventIsAckedOnlyAfterItIsFolded(t *testing.T) {
 func TestAFailedFoldIsNakedAndNotAcked(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	source := &countingSource{
-		batches: [][]port.Message{{msg("PLANNING", app.SubjectPlanCommitted, 9, `{}`)}},
+		batches: [][]port.Message{{msg("PLANNING", app.SubjectPlanCommitted, 9, envelopeFor(t, app.SubjectPlanCommitted, eventAt))}},
 		cancel:  cancel,
 	}
 	projection := newRecording()
@@ -298,7 +461,7 @@ func TestAFetchFailureDoesNotStopTheLoop(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	source := &countingSource{
 		failNth: 1,
-		batches: [][]port.Message{{msg("TASKING", app.SubjectRequestReceived, 1, `{}`)}},
+		batches: [][]port.Message{{msg("TASKING", app.SubjectRequestReceived, 1, envelopeFor(t, app.SubjectRequestReceived, eventAt))}},
 		cancel:  cancel,
 	}
 	projection := newRecording()
@@ -330,19 +493,25 @@ func TestRunReturnsOnCancellation(t *testing.T) {
 	}
 }
 
-// TestEventAtComesFromTheEnvelope pins which clock staleness is measured
-// against. A payload field disagreeing with the envelope would make lag a
-// function of two different clocks.
-func TestEventAtComesFromTheEnvelope(t *testing.T) {
+// TestEventAtComesFromTheEnvelopesOccurredAt pins which clock staleness is
+// measured against.
+//
+// The event's own occurred_at, stamped by the producing outbox — not the
+// broker's store time, which is later and drifts further the longer the outbox
+// backs up. Here the two are deliberately an hour apart.
+func TestEventAtComesFromTheEnvelopesOccurredAt(t *testing.T) {
 	projection := newRecording()
 	p := newProjector(&countingSource{}, projection)
 
-	// The payload claims an hour earlier than the envelope.
-	payload := `{"request_id":"r1","event_at":"2026-03-01T11:00:00Z"}`
-	if err := p.Apply(t.Context(), msg("TASKING", app.SubjectRequestReceived, 1, payload)); err != nil {
+	occurred := eventAt.Add(-time.Hour)
+	m := msg("TASKING", app.SubjectRequestReceived, 1,
+		envelopeFor(t, app.SubjectRequestReceived, occurred))
+	m.EventAt = eventAt // what the broker would report
+
+	if err := p.Apply(t.Context(), m); err != nil {
 		t.Fatal(err)
 	}
-	if got := projection.advance[0].LastEventAt; !got.Equal(eventAt) {
-		t.Fatalf("cursor stamped %s, want the envelope's %s", got, eventAt)
+	if got := projection.advance[0].LastEventAt; !got.Equal(occurred) {
+		t.Fatalf("cursor stamped %s, want the envelope's occurred_at %s", got, occurred)
 	}
 }

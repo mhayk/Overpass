@@ -46,6 +46,13 @@ func pool(t *testing.T) *pgxpool.Pool {
 	return p
 }
 
+// GeoJSON, because that is what the contracts publish and what the projection
+// now hands straight to ST_GeomFromGeoJSON. Longitude first.
+var (
+	pointGeoJSON   = []byte(`{"type":"Point","coordinates":[4.4,51.9]}`)
+	polygonGeoJSON = []byte(`{"type":"Polygon","coordinates":[[[4,51],[4,52],[5,52],[5,51],[4,51]]]}`)
+)
+
 var (
 	epoch  = time.Date(2026, 8, 8, 9, 0, 0, 0, time.UTC).UTC()
 	bucket = time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC).UTC()
@@ -77,7 +84,7 @@ func (f fixture) received() port.RequestReceived {
 		EventAt: epoch, RequestID: f.requestID, CustomerID: "replay-customer",
 		TargetName:  "replay target",
 		WindowStart: bucket, WindowEnd: bucket.Add(6 * time.Hour),
-		TargetWKT: "POINT(4.4 51.9)",
+		TargetGeoJSON: pointGeoJSON,
 	}
 }
 
@@ -88,7 +95,7 @@ func (f fixture) opportunities() port.OpportunitiesComputed {
 			OpportunityID: f.opportunityID, SatelliteID: f.satelliteID, Mode: "STRIPMAP",
 			AccessStart: bucket, AccessEnd: bucket.Add(10 * time.Minute),
 			AcquisitionDurationS: 8, QualityScore: 0.87,
-			FootprintWKT: "POLYGON((4 51,4 52,5 52,5 51,4 51))",
+			FootprintGeoJSON: polygonGeoJSON,
 		}},
 	}
 }
@@ -108,7 +115,7 @@ func (f fixture) plan(version int) port.PlanCommitted {
 			RequestID:     f.requestID, OpportunityID: &opp, CustomerID: "replay-customer",
 			Mode:        "STRIPMAP",
 			WindowStart: bucket, WindowEnd: bucket.Add(8 * time.Second),
-			FootprintWKT:        "POLYGON((4 51,4 52,5 52,5 51,4 51))",
+			FootprintGeoJSON:    polygonGeoJSON,
 			AwardedValueCredits: 500,
 		}},
 	}

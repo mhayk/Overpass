@@ -11,9 +11,10 @@ go 1.25.0
 replace github.com/mhayk/overpass/gen/go => ../../gen/go
 
 require (
-	github.com/go-chi/chi/v5 v5.2.3
+	github.com/go-chi/chi/v5 v5.3.1
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.10.0
+	github.com/mhayk/overpass/gen/go v0.0.0-20260808081418-1c8e3ce25b01
 	github.com/nats-io/nats.go v1.52.0
 )
 
