@@ -85,18 +85,38 @@ add_stream DLQ_PLANNING    "dlq.planning.>,dlq.acquisition.>"  720h
 # which matters because an SGP4 sweep and a planner round have completely
 # different cost profiles per message.
 
+# A comma in `filter` means MULTIPLE filter subjects, and each one needs its own
+# --filter flag.
+#
+# This is not cosmetic. `--filter "planning.>,acquisition.>"` is accepted without
+# complaint and creates a consumer whose single filter subject is the literal
+# string "planning.>,acquisition.>" — which matches nothing, ever. Measured
+# against a live broker: the PLANNING stream held two messages and the consumer
+# reported "Unprocessed Messages: 0" and delivered none of them. The gateway
+# projector would have sat there healthy and empty.
+#
+# `--subjects` on a stream DOES take a comma-separated list, which is exactly why
+# this is easy to get wrong.
 add_consumer() {
   stream="$1"; name="$2"; filter="$3"; wait="$4"; max_deliver="$5"; max_pending="$6"
   if nats consumer info "$stream" "$name" >/dev/null 2>&1; then
     ok "consumer $stream/$name (exists)"
     return
   fi
+
+  filter_args=""
+  old_ifs="$IFS"; IFS=','
+  for one in $filter; do
+    filter_args="$filter_args --filter $one"
+  done
+  IFS="$old_ifs"
+
   # shellcheck disable=SC2086
   nats consumer add "$stream" "$name" \
     --pull \
     --deliver all \
     --ack explicit \
-    --filter "$filter" \
+    $filter_args \
     --wait "$wait" \
     --max-deliver "$max_deliver" \
     --max-pending "$max_pending" \

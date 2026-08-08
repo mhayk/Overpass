@@ -57,6 +57,7 @@ jobs:
 
     env:
       OVERPASS_TEST_DSN: postgres://overpass:overpass@localhost:5432/overpass
+      OVERPASS_TEST_NATS_URL: nats://localhost:4222
 
     steps:
       - uses: actions/checkout@v4
@@ -75,6 +76,45 @@ jobs:
           psql -h localhost -U overpass -d overpass -v ON_ERROR_STOP=1             -f deploy/postgres/init/01-extensions.sql
           go install github.com/pressly/goose/v3/cmd/goose@v3.27.3
           "$(go env GOPATH)/bin/goose" -dir db/migrations postgres "$OVERPASS_TEST_DSN" up
+
+      # A step, not a service container. JetStream needs --jetstream on the
+      # command line and a service container has no way to pass one — measured
+      # on the first run of this job: the broker came up healthy and every
+      # stream creation failed with "no responders available for request".
+      #
+      # The flags mirror docker-compose.yml so CI and a laptop cannot drift.
+      # No --store_dir: a CI broker is thrown away, and file storage here would
+      # only add a volume to clean up.
+      - name: Start NATS with JetStream
+        run: |
+          set -euo pipefail
+          docker run -d --name overpass-ci-nats --network host \
+            nats:2.10-alpine --jetstream --http_port=8222 --name=overpass-ci-nats
+          for _ in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8222/healthz >/dev/null; then
+              echo "broker healthy"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "the broker never became healthy"
+          docker logs overpass-ci-nats
+          exit 1
+
+      # The same script the compose stack runs, so the streams and consumers the
+      # tests bind to are the ones declared in deploy/, not a CI-only copy.
+      - name: Apply the NATS topology
+        run: |
+          set -euo pipefail
+          docker run --rm --network host -v "$PWD/deploy/nats:/init" \
+            natsio/nats-box:0.14.3 \
+            sh -c "NATS_URL=nats://127.0.0.1:4222 sh /init/init.sh"
+
+      # The gate for #109. Publishes a real message per consumer/subject pair
+      # and requires it to arrive; reading `consumer info` cannot catch a
+      # filter that resolves to nothing.
+      - name: Verify every consumer receives what it filters on
+        run: scripts/nats-topology-check.sh nats://127.0.0.1:4222
 
       - name: Discover Go modules
         id: modules
