@@ -271,3 +271,26 @@ export async function fetchFootprints(window: TimeRange): Promise<{
     staleness: toStaleness(body.staleness),
   };
 }
+
+/**
+ * The constellation's orbit tracks, as a CZML document.
+ *
+ * Returned as an opaque array rather than parsed. CZML is Cesium's format and
+ * Cesium's loader is the only thing that should interpret it — re-modelling a
+ * packet stream in TypeScript would be a second implementation of a format the
+ * server already renders from one read model, which is the exact duplication
+ * ADR-0009 exists to prevent.
+ *
+ * Independent of any plan. The per-plan document draws the orbit of the
+ * satellite that plan belongs to; the constellation exists before the first
+ * plan is committed, and a globe that only shows satellites once something has
+ * been scheduled tells the viewer something false.
+ */
+export async function fetchConstellationCZML(window: TimeRange): Promise<unknown[]> {
+  const query = new URLSearchParams({
+    window_start: window.start,
+    window_end: window.end,
+  });
+  const body = await getJson<unknown[]>(`/v1/geo/satellites/czml?${query.toString()}`);
+  return Array.isArray(body) ? body : [];
+}

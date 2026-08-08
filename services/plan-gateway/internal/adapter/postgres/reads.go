@@ -304,6 +304,44 @@ func (r *Reads) RequestOpportunities(
 	return out, cursor, err
 }
 
+// Constellation returns every satellite's samples over `[from, to)`.
+//
+// One query for the whole constellation rather than one per satellite. The
+// globe asks for all of them at once, and readmodel.ephemeris takes about
+// eighty thousand rows a day — a query per satellite would be nine round trips
+// where the primary key already serves this as one ordered scan.
+func (r *Reads) Constellation(
+	ctx context.Context, satelliteID string, from, to time.Time,
+) (map[string][]port.EphemerisSample, port.Cursor, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT satellite_id, sample_at, longitude_deg, latitude_deg, altitude_m
+		FROM readmodel.ephemeris
+		WHERE ($1 = '' OR satellite_id = $1)
+		  AND sample_at >= $2 AND sample_at < $3
+		ORDER BY satellite_id, sample_at
+	`, satelliteID, from, to)
+	if err != nil {
+		return nil, port.Cursor{}, fmt.Errorf("reading the constellation: %w", err)
+	}
+	defer rows.Close()
+
+	out := map[string][]port.EphemerisSample{}
+	for rows.Next() {
+		var id string
+		var s port.EphemerisSample
+		if scanErr := rows.Scan(&id, &s.At, &s.LongitudeDeg, &s.LatitudeDeg, &s.AltitudeM); scanErr != nil {
+			return nil, port.Cursor{}, fmt.Errorf("scanning constellation sample: %w", scanErr)
+		}
+		out[id] = append(out[id], s)
+	}
+	if rowsErr := rows.Err(); rowsErr != nil {
+		return nil, port.Cursor{}, fmt.Errorf("reading the constellation: %w", rowsErr)
+	}
+
+	cursor, err := r.cursor(ctx)
+	return out, cursor, err
+}
+
 // cursor reports the newest event folded across all streams.
 //
 // The MAXIMUM rather than the minimum. Staleness is "how old is the newest

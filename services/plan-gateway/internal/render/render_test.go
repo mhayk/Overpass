@@ -539,3 +539,121 @@ func TestPlanCZMLWithATrackGolden(t *testing.T) {
 	}
 	golden(t, "plan-with-track.czml.json", got)
 }
+
+// ---------------------------------------------------------------------------
+// The constellation document (#28)
+// ---------------------------------------------------------------------------
+//
+// The per-plan CZML draws the orbit of the satellite that plan belongs to,
+// which is right when a plan is what you are looking at and wrong for a globe:
+// the constellation exists before the first plan is committed. This document is
+// the constellation itself.
+
+func TestTheConstellationDocumentCarriesOnePacketPerSatellite(t *testing.T) {
+	tracks := map[string][]port.EphemerisSample{
+		"CAPELLA-14":  sampleTrack(4),
+		"SENTINEL-1A": sampleTrack(3),
+	}
+	got, err := render.ConstellationCZML(tracks, bucketStart, bucketEnd,
+		port.Cursor{LastEventAt: committedAt}, renderedAt)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+
+	packets := packetsOf(t, got)
+	if len(packets) != 3 {
+		t.Fatalf("got %d packets, want a document and two satellites", len(packets))
+	}
+	if packets[0]["id"] != "document" {
+		t.Fatalf("first packet is %v", packets[0]["id"])
+	}
+
+	// Sorted by satellite id, not by map iteration. Go randomises the latter per
+	// run, which would make the ETag differ on every request and the validator
+	// never match — the same reason both renderers marshal through ordered
+	// structs.
+	if packets[1]["id"] != "satellite/CAPELLA-14" || packets[2]["id"] != "satellite/SENTINEL-1A" {
+		t.Errorf("packets are not in satellite order: %v, %v", packets[1]["id"], packets[2]["id"])
+	}
+	for _, packet := range packets[1:] {
+		if _, present := packet["path"]; !present {
+			t.Errorf("%v carries no path", packet["id"])
+		}
+	}
+}
+
+func TestTheConstellationDocumentIsByteStable(t *testing.T) {
+	// The assertion that makes the ETag mean anything, and the one a map-keyed
+	// renderer fails: Go randomises map iteration per run.
+	tracks := map[string][]port.EphemerisSample{
+		"CAPELLA-14": sampleTrack(3), "SENTINEL-1A": sampleTrack(3),
+		"ICEYE-X31": sampleTrack(3), "UMBRA-07": sampleTrack(3),
+	}
+	first, err := render.ConstellationCZML(tracks, bucketStart, bucketEnd,
+		port.Cursor{LastEventAt: committedAt}, renderedAt)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	for i := range 20 {
+		again, err := render.ConstellationCZML(tracks, bucketStart, bucketEnd,
+			port.Cursor{LastEventAt: committedAt}, renderedAt)
+		if err != nil {
+			t.Fatalf("render %d: %v", i, err)
+		}
+		if !bytes.Equal(first, again) {
+			t.Fatalf("render %d differed; the ETag would never match", i)
+		}
+	}
+}
+
+func TestAConstellationWithNoEphemerisStillRendersAClock(t *testing.T) {
+	// The sweep runs on its own timer, so a window it has not reached has no
+	// samples. A document with a clock and no satellites is the honest
+	// rendering of that; an error would take the whole globe down for a missing
+	// optional layer.
+	got, err := render.ConstellationCZML(nil, bucketStart, bucketEnd,
+		port.Cursor{LastEventAt: committedAt}, renderedAt)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	packets := packetsOf(t, got)
+	if len(packets) != 1 || packets[0]["id"] != "document" {
+		t.Fatalf("got %d packets, want the document packet alone", len(packets))
+	}
+	if _, present := packets[0]["clock"]; !present {
+		t.Error("the document packet has no clock; the timeline would have no span")
+	}
+}
+
+func TestASatelliteWithOneSampleIsOmittedRatherThanFrozen(t *testing.T) {
+	// Cesium given a single sample holds the satellite there for the whole
+	// interval — a stationary satellite, rendered confidently.
+	tracks := map[string][]port.EphemerisSample{
+		"CAPELLA-14":  sampleTrack(1),
+		"SENTINEL-1A": sampleTrack(4),
+	}
+	got, err := render.ConstellationCZML(tracks, bucketStart, bucketEnd,
+		port.Cursor{LastEventAt: committedAt}, renderedAt)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	packets := packetsOf(t, got)
+	if len(packets) != 2 {
+		t.Fatalf("got %d packets, want the document and one drawable satellite", len(packets))
+	}
+	if packets[1]["id"] != "satellite/SENTINEL-1A" {
+		t.Errorf("the wrong satellite survived: %v", packets[1]["id"])
+	}
+}
+
+func TestConstellationCZMLGolden(t *testing.T) {
+	tracks := map[string][]port.EphemerisSample{
+		"CAPELLA-14": sampleTrack(5), "SENTINEL-1A": sampleTrack(4),
+	}
+	got, err := render.ConstellationCZML(tracks, bucketStart, bucketEnd,
+		port.Cursor{LastEventAt: committedAt}, renderedAt)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	golden(t, "constellation.czml.json", got)
+}

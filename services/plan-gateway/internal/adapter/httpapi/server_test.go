@@ -30,7 +30,10 @@ type fakeReads struct {
 	request       port.RequestView
 	opportunities []port.OpportunityView
 	ephemeris     []port.EphemerisSample
+	constellation map[string][]port.EphemerisSample
 	err           error
+
+	lastSatelliteFilter string
 
 	lastPlanQuery port.PlanQuery
 	lastAcqQuery  port.AcquisitionQuery
@@ -69,6 +72,13 @@ func (f *fakeReads) Ephemeris(
 	_ context.Context, _ string, _, _ time.Time,
 ) ([]port.EphemerisSample, error) {
 	return f.ephemeris, f.err
+}
+
+func (f *fakeReads) Constellation(
+	_ context.Context, satelliteID string, _, _ time.Time,
+) (map[string][]port.EphemerisSample, port.Cursor, error) {
+	f.lastSatelliteFilter = satelliteID
+	return f.constellation, port.Cursor{LastEventAt: lastEvent}, f.err
 }
 
 func serve(t *testing.T, reads port.Reads, health func() error) http.Handler {

@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 
-import type { Acquisition } from '@/lib/gateway';
+import type { Acquisition, Opportunity } from '@/lib/gateway';
 
 /**
  * The globe.
@@ -17,22 +17,40 @@ import type { Acquisition } from '@/lib/gateway';
  * import would block the whole route on several megabytes for a view the user
  * may never scroll to.
  *
- * What it draws today: acquisition footprints on a real WGS84 ellipsoid, with
- * the clock spanning the requested window. What it does NOT draw is the
- * satellites — not because the positions are missing any more (#128 landed the
- * ephemeris projection, and the CZML endpoint now serves a `position` and a
- * `path` per satellite) but because this component builds its entities from
- * `/v1/geo/footprints` rather than from that document. Consuming it is the rest
- * of #28; see web/README.md for the choice it involves.
+ * TWO SOURCES, ON PURPOSE, and the split is the decision worth knowing.
  *
- * What remains off the table either way: interpolating a path through footprint
- * centroids. It renders something that looks like an orbit and is not one.
+ * The ORBIT TRACKS come from the server's CZML, loaded straight into
+ * CzmlDataSource. Cesium's own loader is the only thing that should interpret a
+ * CZML packet stream, and the server already renders it from the one read model
+ * — re-modelling it here would be the second implementation of the geometry
+ * that ADR-0009 exists to prevent, and the two would disagree eventually.
+ *
+ * The FOOTPRINTS stay hand-built entities. They need per-request selection
+ * highlighting, which means mutating material and outline alpha on entities
+ * this component owns; CzmlDataSource owns everything it loads, so driving
+ * selection through it would mean rewriting packets and reloading the document
+ * on every click.
+ *
+ * What remains off the table: interpolating a path through footprint centroids.
+ * It renders something that looks like an orbit and is not one, which is worse
+ * than an absent layer because a viewer would believe it.
  */
 
 export interface CesiumGlobeProps {
   acquisitions: Acquisition[];
   /** Highlighted request, if any. Its footprints render opaque; the rest recede. */
   selectedRequestId?: string | undefined;
+  /**
+   * The constellation's orbit tracks, as the server rendered them.
+   *
+   * Opaque: this component hands the document to Cesium and does not read it.
+   * Undefined and empty are the same thing here — a window the ephemeris sweep
+   * has not reached yet is a globe with no satellites on it, which is the
+   * honest rendering rather than an error.
+   */
+  constellation?: unknown[] | undefined;
+  /** Candidate footprints for the selected request, drawn as ghosts. */
+  opportunities?: Opportunity[] | undefined;
 }
 
 type LoadState = 'loading' | 'ready' | 'failed';
@@ -63,6 +81,8 @@ function isPolygon(value: unknown): value is PolygonGeometry {
 export default function CesiumGlobe({
   acquisitions,
   selectedRequestId,
+  constellation,
+  opportunities,
 }: CesiumGlobeProps): React.JSX.Element {
   const container = useRef<HTMLDivElement>(null);
   const [state, setState] = useState<LoadState>('loading');
@@ -152,7 +172,50 @@ export default function CesiumGlobe({
           });
         }
 
-        if (acquisitions.length > 0) {
+        // The orbit tracks, straight into Cesium's own loader.
+        //
+        // Loaded BEFORE the zoom, so the camera frames the scene that will
+        // actually be there. Its clock also drives the timeline: the document
+        // carries the window the samples cover, which is what makes scrubbing
+        // move satellites rather than merely move a cursor.
+        if (constellation && constellation.length > 0) {
+          const source = await Cesium.CzmlDataSource.load(constellation);
+          if (cancelled) {
+            return;
+          }
+          await created.dataSources.add(source);
+          created.clock.shouldAnimate = false;
+        }
+
+        // Candidate footprints, as ghosts. The losers are the point: a winner
+        // shown alone explains nothing about why it won.
+        for (const opportunity of opportunities ?? []) {
+          if (!isPolygon(opportunity.footprint)) {
+            continue;
+          }
+          const ring = opportunity.footprint.coordinates[0];
+          if (!ring || ring.length === 0) {
+            continue;
+          }
+          created.entities.add({
+            id: `opportunity/${opportunity.opportunityId}`,
+            name: `${opportunity.satelliteId} ${opportunity.mode} (candidate)`,
+            description: opportunity.won ? 'scheduled' : 'not scheduled',
+            polygon: {
+              hierarchy: new Cesium.PolygonHierarchy(
+                ring.map(([lon, lat]) => Cesium.Cartesian3.fromDegrees(lon ?? 0, lat ?? 0)),
+              ),
+              // Unfilled and thin. A candidate is not a commitment, and forty
+              // filled polygons over one target is an unreadable smear.
+              material: Cesium.Color.fromBytes(255, 190, 90, opportunity.won ? 60 : 12),
+              outline: true,
+              outlineColor: Cesium.Color.fromBytes(255, 190, 90, opportunity.won ? 200 : 90),
+              arcType: Cesium.ArcType.GEODESIC,
+            },
+          });
+        }
+
+        if (acquisitions.length > 0 || (opportunities?.length ?? 0) > 0) {
           await created.zoomTo(created.entities);
         }
         setState('ready');
@@ -173,7 +236,7 @@ export default function CesiumGlobe({
         viewer.destroy();
       }
     };
-  }, [acquisitions, selectedRequestId]);
+  }, [acquisitions, selectedRequestId, constellation, opportunities]);
 
   return (
     <div className="relative h-full w-full">
