@@ -1,0 +1,10 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Cesium's widget CSS is imported by the globe component itself rather than
+   here, so a route without a globe does not pay for it. */
+html,
+body {
+  height: 100%;
+}
