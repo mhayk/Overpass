@@ -92,3 +92,29 @@ type OutboxEvent struct {
 // a request the customer believes they submitted, and they find out when the
 // image never arrives.
 var ErrIdempotencyConflict = errors.New("idempotency key reused with a different body")
+
+// RequestStates applies lifecycle transitions.
+type RequestStates interface {
+	// Apply moves one request, guarded by its current state and the instant the
+	// event happened. Returns what it moved from and to.
+	//
+	// The guard is in the STORE rather than in a read-then-write, because two
+	// consumers can be applying different events to the same request at the
+	// same moment. Reading the state, deciding, and writing it back is a race
+	// that loses one of the two transitions.
+	Apply(ctx context.Context, requestID string, trigger string, eventAt time.Time) (Applied, error)
+}
+
+// Applied describes what a transition did.
+type Applied struct {
+	From    string
+	To      string
+	Changed bool
+}
+
+// ErrRequestNotFound means the id does not exist.
+//
+// A real case, not a bug: events can arrive for a request that was purged, or
+// before the outbox relay published its creation to a service that is rebuilding
+// a read model. The caller acks rather than retrying forever.
+var ErrRequestNotFound = errors.New("tasking request not found")
