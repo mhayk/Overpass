@@ -325,7 +325,7 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
-          labels=$(gh api "repos/${{ github.repository }}/pulls/$PR"             --jq '[.labels[].name] | join(",")')
+          labels=$(gh api "repos/${{ github.repository }}/pulls/$PR" --jq '[.labels[].name] | join(",")')
           echo "labels: $labels"
           if [[ ",$labels," == *",crosses-tracks,"* ]]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
