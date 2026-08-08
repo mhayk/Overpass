@@ -26,8 +26,17 @@ var allowed = map[string][]string{
 	"internal/domain": {},
 	"internal/port":   {"internal/domain"},
 	"internal/app":    {"internal/domain", "internal/port"},
+	// render turns port types into CZML and GeoJSON. It touches no database, no
+	// broker and no HTTP, so it is not an adapter — it sits beside app rather
+	// than inside adapter, and this test is what established that.
+	//
+	// It was written as internal/adapter/geo first and the layering check
+	// objected immediately: an adapter importing a sibling adapter is exactly
+	// the coupling the rule exists to prevent. The honest fix was to admit the
+	// package had never been an adapter, not to widen the rule to let it stay.
+	"internal/render": {"internal/domain", "internal/port"},
 	// adapter may import anything inward; that is what an adapter is for.
-	"internal/adapter": {"internal/domain", "internal/port", "internal/app"},
+	"internal/adapter": {"internal/domain", "internal/port", "internal/app", "internal/render"},
 }
 
 func TestLayeringIsRespected(t *testing.T) {
@@ -68,6 +77,15 @@ func TestTheRuleWouldCatchAViolation(t *testing.T) {
 	}
 	if !isPermitted(modulePath+"/internal/domain", allowed["internal/app"]) {
 		t.Fatal("app importing domain was rejected; the check is too strict to be useful")
+	}
+	// render is allowed FROM adapter and must not reach back. Renderers that
+	// know about Postgres stop being testable without one, which is the whole
+	// reason the golden files are cheap to run.
+	if isPermitted(violation, allowed["internal/render"]) {
+		t.Fatal("render importing an adapter was accepted; the check proves nothing")
+	}
+	if !isPermitted(modulePath+"/internal/render", allowed["internal/adapter"]) {
+		t.Fatal("adapter importing render was rejected; the rendering layer would be unreachable")
 	}
 }
 

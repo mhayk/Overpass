@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -379,6 +380,54 @@ func TestARequestWhoseAcquisitionIsSupersededGoesBackToCompeting(t *testing.T) {
 	}
 	if len(lost.UnfulfilmentJSON) == 0 {
 		t.Error("the explanation was lost when the state changed")
+	}
+}
+
+// TestCoordinatesAreEmittedAtSixDecimalPlaces pins the payload budget's other
+// lever, at the layer that actually controls it.
+//
+// PostGIS defaults to nine — roughly 0.1 mm, about a third of every geo
+// response, for precision no SAR footprint edge has and no propagator can
+// justify. Six is ~0.1 m at the equator.
+//
+// Worth its own test because the first attempt silently did nothing: the
+// precision was a Go constant pasted into a backtick SQL string, where Go
+// interpolates nothing, and Postgres would have read it as a column name. The
+// `unused` linter caught the orphaned constant; without that, the first
+// evidence would have been a runtime error on the first geo request.
+func TestCoordinatesAreEmittedAtSixDecimalPlaces(t *testing.T) {
+	reads, f := seeded(t, 1)
+
+	plan, err := reads.Plan(t.Context(), f.satelliteID, bucket, nil)
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if len(plan.Acquisitions) == 0 {
+		t.Fatal("no acquisitions to inspect")
+	}
+
+	var geometry struct {
+		Coordinates [][][]json.Number `json:"coordinates"`
+	}
+	if err := json.Unmarshal(plan.Acquisitions[0].FootprintGeoJSON, &geometry); err != nil {
+		t.Fatalf("footprint is not GeoJSON: %v", err)
+	}
+	if len(geometry.Coordinates) == 0 || len(geometry.Coordinates[0]) == 0 {
+		t.Fatal("footprint has no positions")
+	}
+
+	for _, position := range geometry.Coordinates[0] {
+		for _, value := range position {
+			text := value.String()
+			dot := strings.IndexByte(text, '.')
+			if dot < 0 {
+				continue // a whole number carries no decimals to count
+			}
+			if decimals := len(text) - dot - 1; decimals > 6 {
+				t.Fatalf("coordinate %s has %d decimal places, want at most 6 — "+
+					"the precision argument is not reaching ST_AsGeoJSON", text, decimals)
+			}
+		}
 	}
 }
 

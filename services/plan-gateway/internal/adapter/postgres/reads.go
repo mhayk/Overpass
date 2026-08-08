@@ -12,6 +12,26 @@ import (
 	"github.com/mhayk/overpass/services/plan-gateway/internal/port"
 )
 
+// Coordinate precision is the literal 6 in every ST_AsGeoJSON call below, and
+// deliberately not a Go constant.
+//
+// It was a constant first, written as ST_AsGeoJSON(footprint, geoJSONPrecision)
+// — inside a backtick string, where Go does not interpolate anything. Postgres
+// would have read it as a column name and every geo query would have failed at
+// runtime. `unused` caught the orphaned constant; nothing else would have, until
+// the first request. A value that has to be pasted into SQL by hand is better
+// written where it is read.
+//
+// Why 6: PostGIS defaults to 9 decimal places, roughly 0.1 mm, which is about a
+// third of the payload for no information — no SAR footprint edge is known to a
+// millimetre, and the number comes from a propagator whose own error is metres.
+// Six places is ~0.1 m at the equator and takes about 30% off every response.
+//
+// Measured, not assumed:
+//
+//	ST_AsGeoJSON(POINT(4.123456789012 51.987654321098))  -> [4.123456789,51.987654321]
+//	ST_AsGeoJSON(..., 6)                                 -> [4.123457,51.987654]
+
 // Reads serves the REST endpoints from readmodel.*.
 type Reads struct {
 	pool *pgxpool.Pool
@@ -101,7 +121,7 @@ func (r *Reads) acquisitionsForPlan(ctx context.Context, planID string) ([]port.
 	rows, err := r.pool.Query(ctx, `
 		SELECT acquisition_id::text, plan_id::text, request_id::text, customer_id,
 		       satellite_id, mode, lower(acq_window), upper(acq_window), status,
-		       ST_AsGeoJSON(footprint), slew_time_from_previous_s,
+		       ST_AsGeoJSON(footprint, 6), slew_time_from_previous_s,
 		       gap_from_previous_s, awarded_value_credits
 		FROM readmodel.acquisition_views
 		WHERE plan_id = $1
@@ -126,7 +146,7 @@ func (r *Reads) Acquisitions(ctx context.Context, q port.AcquisitionQuery) ([]po
 	rows, err := r.pool.Query(ctx, `
 		SELECT acquisition_id::text, plan_id::text, request_id::text, customer_id,
 		       satellite_id, mode, lower(acq_window), upper(acq_window), status,
-		       ST_AsGeoJSON(footprint), slew_time_from_previous_s,
+		       ST_AsGeoJSON(footprint, 6), slew_time_from_previous_s,
 		       gap_from_previous_s, awarded_value_credits
 		FROM readmodel.acquisition_views
 		WHERE ($1 = '' OR satellite_id = $1)
@@ -202,7 +222,7 @@ func (r *Reads) RequestOpportunities(
 	rows, err := r.pool.Query(ctx, `
 		SELECT opportunity_id::text, satellite_id, mode,
 		       lower(access_window), upper(access_window), acquisition_duration_s,
-		       orbit_number, quality_score, ST_AsGeoJSON(footprint), won
+		       orbit_number, quality_score, ST_AsGeoJSON(footprint, 6), won
 		FROM readmodel.opportunity_views
 		WHERE request_id = $1
 		ORDER BY lower(access_window)
