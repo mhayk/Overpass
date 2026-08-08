@@ -287,11 +287,19 @@ func TestLosingARoundKeepsTheReasonAndKeepsCompeting(t *testing.T) {
 	}
 }
 
-// TestAPlannedRequestThatLosesGoesBackToCompeting is the supersede path from
-// ADR-0012, seen from the request's side: the acquisition is retained as
-// history, and the request re-enters the queue rather than being stranded in
-// PLANNED with no acquisition.
-func TestAPlannedRequestThatLosesGoesBackToCompeting(t *testing.T) {
+// TestARequestWhoseAcquisitionIsSupersededGoesBackToCompeting is the
+// supersession path from ADR-0012, seen from the request's side.
+//
+// The state is DERIVED from whether a live acquisition exists, not written by
+// whichever event arrived last. That distinction is the whole reason the
+// projection converges under reordering, and it has one consequence worth
+// stating plainly: an unfulfilment event on its own does NOT demote the state.
+//
+// It should not. "You lost this round" alongside a still-live acquisition is a
+// contradiction that the next plan resolves — until that plan lands, the
+// request genuinely is still planned, and saying otherwise would be reporting
+// an intention rather than a fact.
+func TestARequestWhoseAcquisitionIsSupersededGoesBackToCompeting(t *testing.T) {
 	p := pool(t)
 	pr := postgres.NewProjection(p)
 	f := newFixture()
@@ -323,6 +331,7 @@ func TestAPlannedRequestThatLosesGoesBackToCompeting(t *testing.T) {
 		t.Fatalf("state = %q after a plan committed, want PLANNED", planned.State)
 	}
 
+	// The planner tells the request it lost. The explanation must be kept.
 	if lostErr := pr.ProjectUnfulfilled(t.Context(), port.RequestUnfulfilled{
 		EventAt:    epoch.Add(10 * time.Minute),
 		RequestID:  f.requestID,
@@ -331,12 +340,45 @@ func TestAPlannedRequestThatLosesGoesBackToCompeting(t *testing.T) {
 		t.Fatalf("unfulfilled: %v", lostErr)
 	}
 
+	stillPlanned, err := reads.Request(t.Context(), f.requestID)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	if stillPlanned.State != "PLANNED" {
+		t.Errorf("state = %q; the acquisition is still live, so the request is still planned",
+			stillPlanned.State)
+	}
+	if len(stillPlanned.UnfulfilmentJSON) == 0 {
+		t.Error("the explanation was not recorded")
+	}
+
+	// Now the round that actually displaced it: version 2 of the same bucket,
+	// awarded to somebody else. Version 1's acquisition becomes SUPERSEDED, and
+	// the derivation drops this request back into the queue on its own.
+	winner := f.plan(2)
+	winner.Acquisitions[0].RequestID = "99999999-9999-4999-8999-999999999999"
+	if rivalErr := pr.ProjectRequestReceived(t.Context(), port.RequestReceived{
+		EventAt: epoch.Add(11 * time.Minute), RequestID: winner.Acquisitions[0].RequestID,
+		CustomerID: "rival-imaging", TargetName: "rival target",
+		WindowStart: bucket, WindowEnd: bucket.Add(6 * time.Hour),
+		TargetGeoJSON: pointGeoJSON,
+	}); rivalErr != nil {
+		t.Fatalf("rival request: %v", rivalErr)
+	}
+	if planErr := pr.ProjectPlanCommitted(t.Context(), winner); planErr != nil {
+		t.Fatalf("plan v2: %v", planErr)
+	}
+
 	lost, err := reads.Request(t.Context(), f.requestID)
 	if err != nil {
 		t.Fatalf("request: %v", err)
 	}
 	if lost.State != "AWAITING_PLANNING" {
-		t.Errorf("state = %q, want AWAITING_PLANNING — a superseded request must compete again", lost.State)
+		t.Errorf("state = %q, want AWAITING_PLANNING — a superseded request must compete again",
+			lost.State)
+	}
+	if len(lost.UnfulfilmentJSON) == 0 {
+		t.Error("the explanation was lost when the state changed")
 	}
 }
 

@@ -194,6 +194,13 @@ lint-web: ## Lint and type-check the frontend
 .PHONY: test
 test: test-go test-python test-web ## Run every unit test suite
 
+.PHONY: test-integration
+test-integration: ## Integration tests against real Postgres and real NATS (needs Docker)
+	@# Not part of `make test`. These start containers and build both service
+	@# binaries, so they take a minute rather than a second — and a suite that
+	@# slow in the inner loop is a suite people start skipping.
+	@cd tests/integration && go test -timeout 20m ./...
+
 .PHONY: test-go
 test-go: ## Go unit tests, always with -race
 	@for s in $(GO_SERVICES); do \

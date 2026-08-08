@@ -26,6 +26,40 @@ permissions:
 
 jobs:
   # ---------------------------------------------------------------------------
+  # Integration
+  # ---------------------------------------------------------------------------
+  # Real Postgres+PostGIS and real NATS JetStream, started by Testcontainers,
+  # with both service binaries running as real processes. Its own job rather
+  # than part of `go`, because it is the slow one and there is no reason for a
+  # unit-test failure to wait behind a container pull.
+  integration:
+    name: integration — real Postgres and NATS
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache-dependency-path: '**/go.sum'
+
+      # Pulled up front so the pull time is visible as its own step rather than
+      # hidden inside a test timeout.
+      - name: Pull the images
+        run: |
+          docker pull postgis/postgis:16-3.4
+          docker pull nats:2.10-alpine
+
+      # -count=1 defeats the test cache unconditionally. A cached pass here
+      # would mean the containers never started, and the job would be fastest
+      # exactly when it was doing the least.
+      - name: Integration tests
+        working-directory: tests/integration
+        run: go test -count=1 -timeout 15m ./...
+
+  # ---------------------------------------------------------------------------
   # Go
   # ---------------------------------------------------------------------------
   go:
@@ -116,10 +150,16 @@ jobs:
       - name: Verify every consumer receives what it filters on
         run: scripts/nats-topology-check.sh nats://127.0.0.1:4222
 
+      # tests/ is excluded and belongs to the integration job.
+      #
+      # Not just to save time. This job ran it too, and because actions/setup-go
+      # shares the build cache between jobs, the integration job then reported
+      # `ok (cached)` in 32 seconds having executed nothing — a dedicated job
+      # that was a green tick for work it never did.
       - name: Discover Go modules
         id: modules
         run: |
-          modules=$(find . -name go.mod -not -path './.tools/*' -exec dirname {} \; | sort)
+          modules=$(find . -name go.mod -not -path './.tools/*' -not -path './tests/*' -exec dirname {} \; | sort)
           echo "found:"; echo "$modules" | sed 's/^/  /'
           {
             echo 'list<<EOF'
