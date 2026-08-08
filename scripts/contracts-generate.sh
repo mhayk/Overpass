@@ -175,6 +175,12 @@ mkdir -p "$OUT/go/taskingapi"
   contracts/openapi/tasking-api.v1.yaml
 green "$(wc -l < "$OUT/go/taskingapi/taskingapi.gen.go" | tr -d ' ') lines"
 
+blue "oapi-codegen -> $OUT/go/plangateway"
+rm -rf "$OUT/go/plangateway"
+mkdir -p "$OUT/go/plangateway"
+"$TOOLS/oapi-codegen"   --config contracts/codegen/oapi-codegen.plan-gateway.yaml   -o "$OUT/go/plangateway/plangateway.gen.go"   contracts/openapi/plan-gateway.v1.yaml
+green "$(wc -l < "$OUT/go/plangateway/plangateway.gen.go" | tr -d ' ') lines"
+
 # ---------------------------------------------------------------------------
 # Python — Pydantic v2 models from the same schemas
 # ---------------------------------------------------------------------------
