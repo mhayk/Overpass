@@ -21,6 +21,7 @@ Two things this closes that earlier issues left open:
 from __future__ import annotations
 
 import math
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
@@ -51,6 +52,29 @@ if TYPE_CHECKING:
 # against passes of several minutes gives tens of samples inside the usable
 # part, which is enough to find its edges without another bisection.
 _GEOMETRY_SAMPLE_S = 5.0
+
+# The namespace for derived opportunity ids. Arbitrary but FROZEN: changing it
+# renames every opportunity ever computed, so a replayed request would produce a
+# set the planner cannot reconcile with the one it already allocated over.
+_OPPORTUNITY_NAMESPACE = uuid.UUID("8c1d5e2f-4a3b-4c6d-9e7f-0a1b2c3d4e5f")
+
+
+def opportunity_id(request_id: str, index: int, mode: str) -> str:
+    """The stable identity of one opportunity.
+
+    A UUID because the contract says `format: uuid` and
+    `feasibility.opportunities.opportunity_id` is a `uuid` column. The first
+    version of this was `f"{request_id}:{index}:{mode}"`, which satisfied
+    neither — so a sweep that found an opportunity could not have published it
+    and could not have stored it. Nothing noticed, because nothing had ever
+    tried: the worker never ran the sweep (#131).
+
+    Derived rather than random, because a replay from the stream is a supported
+    operation. Random ids would fan one request out into two disjoint sets of
+    opportunities on the second pass, and the planner would have allocated over
+    the first.
+    """
+    return str(uuid.uuid5(_OPPORTUNITY_NAMESPACE, f"{request_id}|{index}|{mode}"))
 
 
 @dataclass(frozen=True)
@@ -203,7 +227,7 @@ def evaluate(
 
             opportunities.append(
                 Opportunity(
-                    opportunity_id=f"{request_id}:{index}:{mode_name}",
+                    opportunity_id=opportunity_id(request_id, index, mode_name),
                     satellite_id=window.satellite_id,
                     mode=mode_name,
                     access_start=window.start,

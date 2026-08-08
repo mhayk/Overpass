@@ -72,7 +72,14 @@ def newest_element_sets(
         # Parsed from the LINES, not taken from the column. The lines are the
         # record and the column is a decode of them — SGP4 will read the lines
         # whatever the column says.
-        element_set = parse(display_name, line1, line2)
+        # Parsed under the SATELLITE ID, not the display name. `ElementSet.name`
+        # is what `pipeline.evaluate` publishes as `satellite_id` and what
+        # `AcquisitionConstraints.excluded_satellite_ids` is compared against —
+        # and the display name is the Celestrak string, which for
+        # "CAPELLA-11 (ACADIA-1)" joins to nothing in reference.satellites and
+        # silently defeats a customer's exclusion. The display name is kept
+        # beside it for anything that wants to show a human a name.
+        element_set = parse(satellite_id, line1, line2)
         _refuse_disagreeing_epoch(satellite_id, element_set, stored_epoch)
         out.append(
             SatelliteElementSet(

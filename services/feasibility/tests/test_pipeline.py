@@ -7,6 +7,7 @@ design, which is what lets the physics be tested without either.
 from __future__ import annotations
 
 import math
+import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -280,3 +281,81 @@ class TestLookSideConstraint:
 
         assert len(left_only) <= len(unrestricted)
         assert all(o.geometry.look_side is LookSide.LEFT for o in left_only)
+
+
+class TestOpportunityIdentity:
+    """The id has to be a UUID, and it has to be derived rather than random.
+
+    Both halves are load-bearing and neither was true before #131.
+
+    A UUID because the contract says `format: uuid` and
+    `feasibility.opportunities.opportunity_id` is a `uuid` column — the old
+    `f"{request_id}:{index}:{mode}"` satisfied neither, so a sweep that produced
+    an opportunity could not have published it and could not have stored it.
+
+    Derived because a redelivered request must produce the same ids. The
+    consumer's dedup ledger stops the work happening twice in the normal case,
+    but a replay from the stream after a read-model rebuild is a supported
+    operation, and random ids would fan a single request out into two disjoint
+    sets of opportunities nobody can reconcile.
+    """
+
+    @pytest.fixture(scope="class")
+    def outcome(self, constellation: list[Propagator]) -> object:
+        return evaluate(
+            "3c4d5e6f-7a8b-4c9d-8e1f-2a3b4c5d6e7f",
+            LISBON,
+            T0,
+            T0 + timedelta(hours=48),
+            constellation,
+            MODES,
+            AcquisitionConstraints(),
+            now=NOW,
+        )
+
+    def test_every_id_is_a_uuid(self, outcome: object) -> None:
+        for o in outcome.opportunities:  # type: ignore[attr-defined]
+            assert uuid.UUID(o.opportunity_id).version == 5
+
+    def test_the_same_request_derives_the_same_ids(self, constellation: list[Propagator]) -> None:
+        def ids() -> list[str]:
+            return [
+                o.opportunity_id
+                for o in evaluate(
+                    "3c4d5e6f-7a8b-4c9d-8e1f-2a3b4c5d6e7f",
+                    LISBON,
+                    T0,
+                    T0 + timedelta(hours=24),
+                    constellation,
+                    MODES,
+                    AcquisitionConstraints(),
+                    now=NOW,
+                ).opportunities
+            ]
+
+        assert ids() == ids()
+
+    def test_a_different_request_derives_different_ids(
+        self, constellation: list[Propagator]
+    ) -> None:
+        # Same geometry, same window, different request. Two customers asking
+        # for the same target must not collide on a primary key.
+        def ids(request_id: str) -> set[str]:
+            return {
+                o.opportunity_id
+                for o in evaluate(
+                    request_id,
+                    LISBON,
+                    T0,
+                    T0 + timedelta(hours=24),
+                    constellation,
+                    MODES,
+                    AcquisitionConstraints(),
+                    now=NOW,
+                ).opportunities
+            }
+
+        first = ids("3c4d5e6f-7a8b-4c9d-8e1f-2a3b4c5d6e7f")
+        second = ids("4d5e6f7a-8b9c-4d0e-8f2a-3b4c5d6e7f80")
+        assert first
+        assert first.isdisjoint(second)

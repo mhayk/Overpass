@@ -105,12 +105,12 @@ for a demo globe is not necessarily right for a deployment.
 
 **Bad**
 
-- **104,000 rows per day** in `readmodel.ephemeris` for twelve satellites, and
-  about 4 MB of event payload for a full day's horizon. Both are comfortable and
+- **78,000 rows per day** in `readmodel.ephemeris` for the nine seeded
+  satellites, and about 3 MB of event payload for a full day's horizon. Both are comfortable and
   both are new; neither existed before this decision.
 - **36 kB on a cold plan document**, which nearly doubles it. Behind a warm ETag
   this is paid once; a client that revalidates poorly pays it repeatedly.
-- **A tick that uncovers a bucket does real work** — twelve satellites × 1,080
+- **A tick that uncovers a bucket does real work** — nine satellites × 1,080
   instants of SGP4. It runs off the event loop for that reason, and it is a
   visible CPU spike every three hours rather than a smooth load.
 - A stale element set produces a track that is drawn anyway (see below), so the
