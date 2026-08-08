@@ -1,0 +1,30 @@
+{
+  "causation_id": null,
+  "correlation_id": "66666666-7777-4888-8999-aaaaaaaaaaaa",
+  "data": {
+    "bid_credits": 0,
+    "customer_id": "acme-imaging",
+    "priority_tier": "BEST_EFFORT",
+    "request_id": "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+    "requested_modes": [
+      "SCAN"
+    ],
+    "submitted_at": "2026-08-08T09:00:00Z",
+    "target": {
+      "coordinates": [
+        0,
+        0
+      ],
+      "type": "Point"
+    },
+    "window": {
+      "end": "2026-08-09T10:00:00Z",
+      "start": "2026-08-08T10:00:00Z"
+    }
+  },
+  "event_id": "11111111-2222-4333-8444-555555555555",
+  "event_type": "tasking.request.received.v1",
+  "occurred_at": "2026-08-08T09:00:00Z",
+  "producer": "tasking-api",
+  "schema_version": "1.0.0"
+}

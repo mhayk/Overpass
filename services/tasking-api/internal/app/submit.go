@@ -84,7 +84,13 @@ func (s *SubmitService) Submit(
 	}
 
 	requestID := s.newID()
-	payload, err := receivedEventPayload(requestID, req, now)
+	eventID := s.newID()
+
+	// The correlation id travels in BOTH the envelope and the NATS headers, and
+	// that is not redundant: the envelope is what a consumer reads after the
+	// message is stored and replayed, and the header is what it reads while
+	// deciding whether to bother. The schema requires it in the envelope.
+	payload, err := buildReceivedEvent(eventID, requestID, correlationID(traceHeaders), req, now)
 	if err != nil {
 		return SubmitResult{}, domain.ValidationResult{}, err
 	}
@@ -115,9 +121,12 @@ func (s *SubmitService) Submit(
 	}
 
 	event := port.OutboxEvent{
-		EventID:       s.newID(),
+		// The SAME id that is inside the envelope. They were independent before,
+		// so the outbox row and the payload disagreed about the event's identity
+		// — and consumer-side dedup keys on the payload's.
+		EventID:       eventID,
 		EventType:     "tasking.request.received.v1",
-		SchemaVersion: "1.0.0",
+		SchemaVersion: EventSchemaVersion,
 		Subject:       "tasking.request.received.v1",
 		PayloadJSON:   payload,
 		HeadersJSON:   headers,
@@ -161,20 +170,4 @@ func (s *SubmitService) Submit(
 // input is a slow-motion outage.
 func (s *SubmitService) PurgeExpiredKeys(ctx context.Context) (int64, error) {
 	return s.store.PurgeExpiredKeys(ctx, s.clock.Now())
-}
-
-func receivedEventPayload(requestID string, req domain.SubmitRequest, now time.Time) ([]byte, error) {
-	return json.Marshal(map[string]any{
-		"request_id":      requestID,
-		"customer_id":     req.CustomerID,
-		"target_name":     req.TargetName,
-		"priority_tier":   req.PriorityTier,
-		"bid_credits":     req.BidCredits,
-		"requested_modes": req.RequestedModes,
-		"submitted_at":    now.UTC().Format(time.RFC3339Nano),
-		"window": map[string]any{
-			"start": req.WindowStart.UTC().Format(time.RFC3339Nano),
-			"end":   req.WindowEnd.UTC().Format(time.RFC3339Nano),
-		},
-	})
 }
