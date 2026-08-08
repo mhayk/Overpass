@@ -9,6 +9,7 @@ package port
 
 import (
 	"context"
+	"errors"
 	"time"
 )
 
@@ -26,3 +27,94 @@ type DependencyProbe interface {
 type Clock interface {
 	Now() time.Time
 }
+
+// SubmissionStore persists a tasking request, its idempotency claim, and its
+// outbox event — atomically.
+//
+// One method taking all three, because they must commit together. Separate
+// Save and Publish calls would permit the dual-write problem; separate Claim
+// and Save calls would leave a crash window in which the key exists and the
+// request does not, permanently swallowing that submission.
+type SubmissionStore interface {
+	// Save returns Replay when the key has already been used with the SAME
+	// body, and ErrIdempotencyConflict when it was used with a different one.
+	Save(ctx context.Context, claim IdempotencyClaim, req StoredRequest, event OutboxEvent) (Replay, error)
+
+	// PurgeExpiredKeys removes claims past their expiry. Returns how many.
+	PurgeExpiredKeys(ctx context.Context, now time.Time) (int64, error)
+}
+
+// IdempotencyClaim is the client's key and the fingerprint of what it sent.
+type IdempotencyClaim struct {
+	CustomerID  string
+	Key         string
+	Fingerprint string
+	ExpiresAt   time.Time
+}
+
+// Replay describes an earlier response being served again.
+type Replay struct {
+	Replayed    bool
+	RequestID   string
+	State       string
+	SubmittedAt time.Time
+}
+
+// StoredRequest is what the write model needs, already validated.
+type StoredRequest struct {
+	RequestID       string
+	CustomerID      string
+	TargetName      string
+	TargetWKT       string
+	WindowStart     time.Time
+	WindowEnd       time.Time
+	PriorityTier    string
+	BidCredits      int64
+	RequestedModes  []string
+	ConstraintsJSON []byte
+	SubmittedAt     time.Time
+}
+
+// OutboxEvent is the event that must exist if and only if the request does.
+type OutboxEvent struct {
+	EventID       string
+	EventType     string
+	SchemaVersion string
+	Subject       string
+	PayloadJSON   []byte
+	HeadersJSON   []byte
+	OccurredAt    time.Time
+}
+
+// ErrIdempotencyConflict means the key was reused with a different body.
+//
+// A client bug, and it must surface. Silently treating it as a replay discards
+// a request the customer believes they submitted, and they find out when the
+// image never arrives.
+var ErrIdempotencyConflict = errors.New("idempotency key reused with a different body")
+
+// RequestStates applies lifecycle transitions.
+type RequestStates interface {
+	// Apply moves one request, guarded by its current state and the instant the
+	// event happened. Returns what it moved from and to.
+	//
+	// The guard is in the STORE rather than in a read-then-write, because two
+	// consumers can be applying different events to the same request at the
+	// same moment. Reading the state, deciding, and writing it back is a race
+	// that loses one of the two transitions.
+	Apply(ctx context.Context, requestID string, trigger string, eventAt time.Time) (Applied, error)
+}
+
+// Applied describes what a transition did.
+type Applied struct {
+	From    string
+	To      string
+	Changed bool
+}
+
+// ErrRequestNotFound means the id does not exist.
+//
+// A real case, not a bug: events can arrive for a request that was purged, or
+// before the outbox relay published its creation to a service that is rebuilding
+// a read model. The caller acks rather than retrying forever.
+var ErrRequestNotFound = errors.New("tasking request not found")
