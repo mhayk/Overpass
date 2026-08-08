@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Any
 import psycopg
 from nats.aio.client import Client as NatsClient
 from nats.js.errors import NotFoundError
+from opentelemetry.trace import Status, StatusCode
 
 from feasibility.messaging.idempotency import (
     Delivery,
@@ -40,6 +41,7 @@ from feasibility.messaging.idempotency import (
     process_once,
 )
 from feasibility.messaging.outbox import OutboxMessage, enqueue
+from feasibility.telemetry import consumer_span
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -232,10 +234,33 @@ async def run(
                         settled += 1
                         continue
 
-                    outcome = await asyncio.to_thread(
-                        handle_one, connection, delivery, handler_factory(delivery)
-                    )
-                    await _settle(msg, outcome)
+                    # The consumer span wraps the work AND the settle, so the
+                    # ack is inside the trace. An ack that fails after a
+                    # successful commit is exactly the case that produces a
+                    # duplicate delivery, and leaving it outside the span would
+                    # hide the one hop that explains why the message came back.
+                    with consumer_span(
+                        f"{msg.subject} process",
+                        delivery.headers,
+                        {
+                            "messaging.system": "nats",
+                            "messaging.destination.name": msg.subject,
+                            "messaging.message.id": delivery.event_id,
+                            "messaging.consumer.group.name": CONSUMER,
+                            "messaging.nats.delivered_count": delivery.delivered_count,
+                        },
+                    ) as span:
+                        outcome = await asyncio.to_thread(
+                            handle_one, connection, delivery, handler_factory(delivery)
+                        )
+                        span.set_attribute("overpass.outcome", outcome.name)
+                        if outcome is Outcome.FAILED_RETRYABLE:
+                            # An error status, but no exception recorded: the
+                            # exception was logged where it happened, and a
+                            # retryable failure is an expected state of this
+                            # system rather than a fault of this span.
+                            span.set_status(Status(StatusCode.ERROR, "retryable failure"))
+                        await _settle(msg, outcome)
                     settled += 1
     finally:
         await client.drain()
