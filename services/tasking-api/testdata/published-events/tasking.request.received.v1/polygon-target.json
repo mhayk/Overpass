@@ -1,0 +1,57 @@
+{
+  "causation_id": null,
+  "correlation_id": "66666666-7777-4888-8999-aaaaaaaaaaaa",
+  "data": {
+    "bid_credits": 12000,
+    "constraints": {
+      "look_side": "RIGHT",
+      "max_incidence_deg": 40,
+      "min_incidence_deg": 20
+    },
+    "customer_id": "port-authority-nl",
+    "priority_tier": "COMMERCIAL",
+    "request_id": "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+    "requested_modes": [
+      "SCAN",
+      "STRIPMAP"
+    ],
+    "submitted_at": "2026-08-08T09:00:00Z",
+    "target": {
+      "coordinates": [
+        [
+          [
+            4.02,
+            51.92
+          ],
+          [
+            4.18,
+            51.92
+          ],
+          [
+            4.18,
+            51.99
+          ],
+          [
+            4.02,
+            51.99
+          ],
+          [
+            4.02,
+            51.92
+          ]
+        ]
+      ],
+      "type": "Polygon"
+    },
+    "target_name": "Port of Rotterdam",
+    "window": {
+      "end": "2026-08-15T09:00:00Z",
+      "start": "2026-08-08T09:00:00Z"
+    }
+  },
+  "event_id": "11111111-2222-4333-8444-555555555555",
+  "event_type": "tasking.request.received.v1",
+  "occurred_at": "2026-08-08T09:00:00Z",
+  "producer": "tasking-api",
+  "schema_version": "1.0.0"
+}

@@ -141,6 +141,55 @@ def check_examples(registry: Registry) -> None:
                 ok(f"{name} example[{index}]")
 
 
+def check_published_events(registry: Registry) -> None:
+    """Validate the bytes a SERVICE actually publishes.
+
+    Layout: services/<svc>/testdata/published-events/<event-type>/<case>.json,
+    written by that service's own tests from its real event builder.
+
+    This check exists because of #124. tasking-api published a hand-written map
+    with no envelope and no target — nine violations — and it compiled, vetted,
+    linted and passed every Go test, because every test built the payload with
+    the same helper it asserted against. Go's type system cannot enforce a
+    contract; only the schema can, and it had never been shown what the producer
+    emits.
+
+    Fixtures under contracts/examples/ are hand-written illustrations of what a
+    valid event looks like. These are the opposite: machine-written records of
+    what a producer really does.
+    """
+    print(f"\n{YELLOW}Published events (what services actually emit){RESET}")
+
+    validators: dict[str, Draft202012Validator] = {}
+    for path in sorted((CONTRACTS / "events").glob("*.schema.json")):
+        schema = json.loads(path.read_text())
+        validators[path.name.removesuffix(".schema.json")] = validator_for(schema, registry)
+
+    found = False
+    for fixture in sorted(ROOT.glob("services/*/testdata/published-events/*/*.json")):
+        found = True
+        event = fixture.parent.name
+        rel = fixture.relative_to(ROOT)
+        validator = validators.get(event)
+        if validator is None:
+            fail(f"{rel}", f"no schema named {event}.schema.json")
+            continue
+        errors = sorted(
+            validator.iter_errors(json.loads(fixture.read_text())),
+            key=lambda e: (list(map(str, e.path)), e.message),
+        )
+        if errors:
+            detail = "\n".join(f"/{'/'.join(map(str, e.path))}: {e.message}" for e in errors)
+            fail(f"{rel} is not a valid {event}", detail)
+        else:
+            ok(str(rel))
+
+    if not found:
+        # Not a failure yet: only tasking-api emits events today. It becomes one
+        # the moment a service ships a producer without this evidence.
+        print(f"  {DIM}none found — no service records what it publishes yet{RESET}")
+
+
 def check_fixtures(registry: Registry) -> None:
     """Positive fixtures must validate; negative fixtures must not.
 
@@ -230,6 +279,7 @@ def main() -> int:
     check_schemas_are_valid(registry)
     check_examples(registry)
     check_fixtures(registry)
+    check_published_events(registry)
     check_openapi()
 
     print()
