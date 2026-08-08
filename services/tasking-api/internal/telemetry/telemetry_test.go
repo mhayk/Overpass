@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -202,5 +203,48 @@ func TestSetupRejectsNothingAndDisablesCleanly(t *testing.T) {
 	}
 	if err := shutdown(t.Context()); err != nil {
 		t.Errorf("shutdown of a disabled provider failed: %v", err)
+	}
+}
+
+// TestSetupSucceedsWithAnEndpoint is the test that was missing.
+//
+// Every other test here calls Setup with no endpoint, which returns before the
+// resource is built — so a genuine failure in that path went unnoticed:
+//
+//	building the resource: conflicting Schema URL:
+//	https://opentelemetry.io/schemas/1.43.0 and .../1.26.0
+//
+// resource.Merge refuses to merge two resources whose schema URLs differ, and
+// resource.Default() carries whichever version the SDK ships. Setup treats the
+// error as non-fatal — correctly — so the service started, logged one warning,
+// and exported nothing at all. It compiled, it linted, and every unit test
+// passed.
+//
+// No collector is needed: the OTLP gRPC exporter connects lazily, so this
+// exercises the whole construction path without a network.
+func TestSetupSucceedsWithAnEndpoint(t *testing.T) {
+	shutdown, err := telemetry.Setup(t.Context(), telemetry.Config{
+		ServiceName:    "tasking-api",
+		ServiceVersion: "test",
+		Environment:    "test",
+		Endpoint:       "127.0.0.1:4317",
+		SampleRatio:    1,
+	})
+	if err != nil {
+		t.Fatalf("tracing would have been silently disabled in production: %v", err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if shutdownErr := shutdown(ctx); shutdownErr != nil {
+			t.Logf("shutdown: %v", shutdownErr)
+		}
+	})
+
+	// And it really installed a provider, rather than leaving the noop in place.
+	ctx, span := telemetry.Tracer().Start(t.Context(), "probe")
+	defer span.End()
+	if traceID, _ := telemetry.IDs(ctx); traceID == "" {
+		t.Fatal("no span context after a successful Setup; the provider is a noop")
 	}
 }

@@ -75,8 +75,25 @@ func Setup(ctx context.Context, cfg Config) (func(context.Context) error, error)
 		return nil, fmt.Errorf("creating the OTLP exporter: %w", err)
 	}
 
-	res, err := resource.Merge(resource.Default(), resource.NewWithAttributes(
-		semconv.SchemaURL,
+	// NewSchemaless, not NewWithAttributes(semconv.SchemaURL, ...).
+	//
+	// resource.Merge REFUSES to merge two resources with different schema URLs,
+	// and resource.Default() carries whichever version the SDK ships. Pinning
+	// our own semconv version here produced:
+	//
+	//   building the resource: conflicting Schema URL:
+	//   https://opentelemetry.io/schemas/1.43.0 and .../1.26.0
+	//
+	// Setup treats that as non-fatal — correctly, tracing must not stop the
+	// service — so the service started, logged one warning, and exported
+	// nothing. It compiled, linted, and passed every unit test, because those
+	// call Setup with no endpoint and return before this line. Only running it
+	// against a real collector showed the feature was off.
+	//
+	// Schemaless attributes merge with anything. The alternative is chasing the
+	// SDK's semconv version on every upgrade, and getting that wrong silently
+	// disables tracing again.
+	res, err := resource.Merge(resource.Default(), resource.NewSchemaless(
 		semconv.ServiceName(cfg.ServiceName),
 		semconv.ServiceVersion(cfg.ServiceVersion),
 		attribute.String("deployment.environment", cfg.Environment),
