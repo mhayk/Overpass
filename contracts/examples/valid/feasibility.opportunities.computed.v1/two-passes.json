@@ -1,0 +1,128 @@
+{
+  "event_id": "31111111-2222-4333-8444-555555555555",
+  "event_type": "feasibility.opportunities.computed.v1",
+  "schema_version": "1.0.0",
+  "occurred_at": "2026-08-07T09:02:00Z",
+  "correlation_id": "76666666-7777-4888-8999-aaaaaaaaaaaa",
+  "causation_id": "21111111-2222-4333-8444-555555555555",
+  "producer": "feasibility-service",
+  "data": {
+    "request_id": "cbbbbbbb-cccc-4ddd-8eee-ffffffffffff",
+    "computed_at": "2026-08-07T09:02:00Z",
+    "horizon": {
+      "start": "2026-08-07T00:00:00Z",
+      "end": "2026-08-14T00:00:00Z"
+    },
+    "tle_references": [
+      {
+        "satellite_id": "CAPELLA-14",
+        "norad_id": 55555,
+        "tle_epoch": "2026-08-06T12:00:00Z",
+        "tle_age_hours": 21.0,
+        "staleness": "FRESH"
+      }
+    ],
+    "satellites_evaluated": 1,
+    "opportunity_count": 2,
+    "truncated": false,
+    "compute_duration_ms": 412,
+    "opportunities": [
+      {
+        "opportunity_id": "55555555-6666-4777-8888-999999999999",
+        "satellite_id": "CAPELLA-14",
+        "mode": "STRIPMAP",
+        "access_window": {
+          "start": "2026-08-07T10:14:00Z",
+          "end": "2026-08-07T10:16:30Z"
+        },
+        "acquisition_duration_s": 18.5,
+        "orbit_number": 47110,
+        "geometry": {
+          "incidence_angle_deg": 32.4,
+          "look_side": "RIGHT",
+          "squint_angle_deg": 0.8,
+          "elevation_angle_deg": 57.6,
+          "slant_range_km": 712.3,
+          "roll_angle_deg": 22.1,
+          "ground_azimuth_deg": 191.4
+        },
+        "footprint": {
+          "type": "Polygon",
+          "coordinates": [
+            [
+              [
+                4.01,
+                51.9
+              ],
+              [
+                4.19,
+                51.9
+              ],
+              [
+                4.19,
+                52.0
+              ],
+              [
+                4.01,
+                52.0
+              ],
+              [
+                4.01,
+                51.9
+              ]
+            ]
+          ]
+        },
+        "duty_cycle_cost_s": 18.5,
+        "quality_score": 0.87
+      },
+      {
+        "opportunity_id": "65555555-6666-4777-8888-999999999999",
+        "satellite_id": "CAPELLA-14",
+        "mode": "SCAN",
+        "access_window": {
+          "start": "2026-08-08T22:41:00Z",
+          "end": "2026-08-08T22:44:00Z"
+        },
+        "acquisition_duration_s": 31.0,
+        "orbit_number": 47133,
+        "geometry": {
+          "incidence_angle_deg": 41.9,
+          "look_side": "LEFT",
+          "squint_angle_deg": -1.2,
+          "elevation_angle_deg": 48.1,
+          "slant_range_km": 803.7
+        },
+        "footprint": {
+          "type": "Polygon",
+          "coordinates": [
+            [
+              [
+                3.95,
+                51.85
+              ],
+              [
+                4.25,
+                51.85
+              ],
+              [
+                4.25,
+                52.05
+              ],
+              [
+                3.95,
+                52.05
+              ],
+              [
+                3.95,
+                51.85
+              ]
+            ]
+          ]
+        },
+        "duty_cycle_cost_s": 31.0,
+        "quality_score": 0.61
+      }
+    ]
+  }
+}
