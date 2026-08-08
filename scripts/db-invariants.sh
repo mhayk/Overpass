@@ -1,26 +1,36 @@
 #!/usr/bin/env bash
 #
-# The non-overlap invariant, asserted against a real database.
+# The planning schema's structural claims, asserted against a real database.
 #
-# This is the load-bearing test of the whole repository. ADR-0003 and ADR-0004
-# both rest on the claim that no code path, migration, or manual INSERT can
-# produce two overlapping acquisitions on one satellite. Everything here goes in
-# through raw SQL, deliberately bypassing every line of application code,
-# because a guarantee that only holds when the application is well-behaved is
-# not a guarantee.
+# Two claims, and they pull in opposite directions. The first is a prohibition:
+# no code path, migration, or manual INSERT may produce two overlapping
+# acquisitions on one satellite — ADR-0003 and ADR-0004 both rest on it. The
+# second is a permission: a candidate opportunity whose request snapshot has not
+# arrived yet MUST be storable, because the two events race and ADR-0015 chose to
+# hold such a candidate rather than reject it.
 #
-# TWO PHASES, and the first one is the point.
+# Everything here goes in through raw SQL, deliberately bypassing every line of
+# application code, because a guarantee that only holds when the application is
+# well-behaved is not a guarantee.
 #
-#   Phase 1 — mutants. Build deliberately WRONG versions of the table and
-#   require the assertions to catch each one. An M0 defect came from a drift
-#   gate that compared a directory against itself and passed unconditionally; a
-#   check never seen failing is not known to work. So this script breaks the
-#   schema on purpose, three ways, and fails if any mutant survives.
+# THREE PHASES, and the mutants are the point.
+#
+#   Phase 1 — mutants for the prohibition. Build deliberately WRONG versions of
+#   planning.acquisitions and require the assertions to catch each one. An M0
+#   defect came from a drift gate that compared a directory against itself and
+#   passed unconditionally; a check never seen failing is not known to work. So
+#   this script breaks the schema on purpose and fails if any mutant survives.
 #
 #   Phase 2 — the real planning.acquisitions table, which must pass everything.
 #
-# A green run therefore means both "the invariant holds" and "these assertions
-# would have noticed if it did not".
+#   Phase 3 — the planner's inputs, where the mutant is the schema someone would
+#   write by reflex: a foreign key from candidate_opportunities to
+#   request_snapshots. It must be shown to reject an out-of-order arrival, which
+#   is what proves the real schema's missing FK is a decision and not an
+#   oversight.
+#
+# A green run therefore means both "the claims hold" and "these assertions would
+# have noticed if they did not".
 #
 # Usage:
 #   scripts/db-invariants.sh              # against the compose stack
@@ -62,6 +72,20 @@ expect_mutant_caught() {
   fi
 }
 
+# expect_mutant_blocks <description> <sql> — the mirror image, for claims that
+# are permissions rather than prohibitions. Here the mutant is caught when a
+# statement that SHOULD be accepted is rejected by the broken schema; that
+# rejection is the cost the real schema deliberately does not pay.
+expect_mutant_blocks() {
+  local desc="$1" stmt="$2"
+  if sql "$stmt"; then
+    red   "  FAIL  mutant SURVIVED — $desc was accepted anyway, so the assertion proves nothing"
+    fail=$((fail + 1))
+  else
+    green "  ok    mutant caught — $desc"; pass=$((pass + 1))
+  fi
+}
+
 W1="tstzrange('2031-03-01 10:00:00+00','2031-03-01 10:05:00+00')"
 W2="tstzrange('2031-03-01 10:03:00+00','2031-03-01 10:08:00+00')"   # overlaps W1
 POLY="ST_GeomFromText('POLYGON((0 0,0 1,1 1,1 0,0 0))',4326)"
@@ -70,6 +94,10 @@ cleanup() {
   sql "DROP TABLE IF EXISTS planning._mutant" || true
   sql "DELETE FROM planning.acquisitions   WHERE request_id = '00000000-0000-0000-0000-0000000000ff'" || true
   sql "DELETE FROM planning.collection_plans WHERE round_id = '00000000-0000-0000-0000-0000000000ff'" || true
+  sql "DELETE FROM planning.candidate_opportunities WHERE request_id IN
+         ('00000000-0000-0000-0000-0000000000fe','00000000-0000-0000-0000-0000000000ff')" || true
+  sql "DELETE FROM planning.request_snapshots      WHERE request_id IN
+         ('00000000-0000-0000-0000-0000000000fe','00000000-0000-0000-0000-0000000000ff')" || true
   sql "DELETE FROM reference.satellites    WHERE satellite_id IN ('DBTEST-A','DBTEST-B')" || true
   sql "DELETE FROM reference.customers     WHERE customer_id = 'dbtest-customer'" || true
 }
@@ -194,7 +222,99 @@ expect rejects "a genuinely conflicting plan is still rejected at COMMIT" \
      $(acq 10000008-0000-0000-0000-0000000000ff DBTEST-A $PA ACTIVE "$W1");
    COMMIT;"
 
+# ---------------------------------------------------------------------------
+# Phase 3 — the planner's inputs (ADR-0015)
+# ---------------------------------------------------------------------------
+# The claim under test is a permission, not a prohibition: opportunities and
+# their request arrive on different streams, so a candidate can land before the
+# snapshot that gives it a value and a deadline. That candidate must be HELD.
+cyan "Phase 3 — planning.candidate_opportunities, where out-of-order arrival must be storable"
+
+HELD=00000000-0000-0000-0000-0000000000fe
+
+echo "  mutant D: a foreign key from candidate_opportunities to request_snapshots"
+sql "DROP TABLE IF EXISTS planning._mutant"
+sql "CREATE TABLE planning._mutant (
+       opportunity_id uuid PRIMARY KEY,
+       request_id     uuid NOT NULL REFERENCES planning.request_snapshots (request_id)
+     )"
+expect_mutant_blocks "a candidate arriving before its request snapshot" \
+  "INSERT INTO planning._mutant (opportunity_id, request_id)
+   VALUES (gen_random_uuid(),'$HELD')"
+sql "DROP TABLE IF EXISTS planning._mutant"
+
+# cand <opportunity_id> <request_id> <orbit_number or NULL>
+cand() {
+  echo "INSERT INTO planning.candidate_opportunities
+          (opportunity_id, request_id, satellite_id, mode, access_window,
+           acquisition_duration_s, orbit_number, geometry, footprint,
+           duty_cycle_cost_s, quality_score, computed_at, source_event_id)
+        VALUES ('$1','$2','DBTEST-A','SPOTLIGHT',$W1,12.5,$3,'{}'::jsonb,$POLY,
+                18.5,0.91,now(),gen_random_uuid())"
+}
+
+C1=20000000-0000-0000-0000-0000000000fe
+
+expect accepts "a candidate whose request snapshot has not arrived yet" \
+  "$(cand $C1 $HELD NULL)"
+
+expect accepts "orbit_number absent — the contract does not require it, so M2-03 must cope" \
+  "$(cand 20000001-0000-0000-0000-0000000000fe $HELD NULL)"
+
+expect rejects "a candidate for a satellite that is not in the constellation" \
+  "INSERT INTO planning.candidate_opportunities
+     (opportunity_id, request_id, satellite_id, mode, access_window,
+      acquisition_duration_s, geometry, footprint, duty_cycle_cost_s,
+      quality_score, computed_at, source_event_id)
+   VALUES (gen_random_uuid(),'$HELD','NO-SUCH-SAT','SPOTLIGHT',$W1,12.5,'{}'::jsonb,$POLY,
+           18.5,0.91,now(),gen_random_uuid())"
+
+# Redelivery. JetStream is at-least-once, so the same batch arrives twice and
+# the second insert must be a no-op rather than a duplicate candidate.
+expect accepts "redelivery of the same opportunity_id is absorbed" \
+  "$(cand $C1 $HELD NULL) ON CONFLICT (opportunity_id) DO NOTHING"
+
+expect accepts "and leaves exactly one row" \
+  "DO \$\$ BEGIN
+     IF (SELECT count(*) FROM planning.candidate_opportunities
+          WHERE opportunity_id = '$C1') <> 1
+     THEN RAISE EXCEPTION 'redelivery duplicated the candidate'; END IF;
+   END \$\$;"
+
+# Held means held: invisible to a round until the value arrives, then visible.
+expect accepts "a held candidate is invisible to the round's join" \
+  "DO \$\$ BEGIN
+     IF EXISTS (SELECT 1 FROM planning.candidate_opportunities c
+                  JOIN planning.request_snapshots s USING (request_id)
+                 WHERE c.opportunity_id = '$C1')
+     THEN RAISE EXCEPTION 'a candidate with no snapshot was visible to allocation'; END IF;
+   END \$\$;"
+
+expect accepts "the request snapshot lands late" \
+  "INSERT INTO planning.request_snapshots
+     (request_id, customer_id, priority_tier, bid_credits, request_window,
+      submitted_at, source_event_id, occurred_at)
+   VALUES ('$HELD','dbtest-customer','COMMERCIAL',5000,
+           tstzrange('2031-03-01 00:00:00+00','2031-03-02 00:00:00+00'),
+           now(), gen_random_uuid(), now())"
+
+expect accepts "and the previously held candidate becomes visible" \
+  "DO \$\$ BEGIN
+     IF NOT EXISTS (SELECT 1 FROM planning.candidate_opportunities c
+                      JOIN planning.request_snapshots s USING (request_id)
+                     WHERE c.opportunity_id = '$C1')
+     THEN RAISE EXCEPTION 'the snapshot arrived and the candidate stayed held'; END IF;
+   END \$\$;"
+
+expect rejects "a snapshot with no deadline — DEADLINE_PASSED would be unreachable" \
+  "INSERT INTO planning.request_snapshots
+     (request_id, customer_id, priority_tier, bid_credits, request_window,
+      submitted_at, source_event_id, occurred_at)
+   VALUES (gen_random_uuid(),'dbtest-customer','COMMERCIAL',5000,
+           tstzrange('2031-03-01 00:00:00+00',NULL),
+           now(), gen_random_uuid(), now())"
+
 cyan "Result"
 printf '  %d passed, %d failed\n\n' "$pass" "$fail"
-[[ "$fail" -eq 0 ]] || { red "the invariant is not holding, or the assertions are not testing it"; exit 1; }
-green "invariant holds, and the assertions were shown to catch three ways of breaking it"
+[[ "$fail" -eq 0 ]] || { red "a claim is not holding, or the assertions are not testing it"; exit 1; }
+green "claims hold, and the assertions were shown to catch four ways of breaking them"

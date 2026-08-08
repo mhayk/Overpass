@@ -121,7 +121,7 @@ migrate-reset: $(TOOLS_BIN)/goose ## Roll every migration back, then re-apply â€
 	@$(GOOSE) up
 
 .PHONY: db-test
-db-test: ## Assert the non-overlap invariant against the running database
+db-test: ## Assert the planning schema's structural claims against the running database
 	@$(ROOT)/scripts/db-invariants.sh
 
 .PHONY: seed

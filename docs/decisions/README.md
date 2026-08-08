@@ -28,6 +28,7 @@ paper trail is the point.
 | [0011](0011-tle-sourcing-live-and-frozen.md) | Fetch TLEs live from Celestrak at seed time, and test orbital math against a frozen snapshot | accepted | M1 |
 | [0012](0012-retain-superseded-acquisitions.md) | Retain superseded acquisitions with a status, and make the non-overlap constraint partial and deferred | accepted | M1 |
 | [0013](0013-parallel-agent-execution-in-worktrees.md) | Run parallel agent work as one git worktree per contract boundary, not as concurrent agents in one checkout | accepted | M1 |
+| [0015](0015-planner-projects-its-own-request-value.md) | Give the planner its own projection of request value, instead of reading the tasking schema | accepted | M2 |
 
 ## Planned
 
@@ -43,9 +44,9 @@ before the constraint is felt is fiction.
 | 0009 | CesiumJS and deck.gl division of labour | M1 |
 | 0014 | Planner-side re-planning semantics: round triggers, debounce, and in-flight requests | M2 |
 
-### Why 0014 exists
+### Why 0014 and 0015 exist
 
-It is not in the original spec's ADR list. It is a consequence of a decision
+Neither is in the original spec's ADR list. Both are consequences of decisions
 taken later, and the kind of thing that would otherwise become an undocumented
 assumption:
 
@@ -56,6 +57,12 @@ assumption:
   happens to a request holding an acquisition in a replaced plan, and whether
   re-planning may be partial are planner decisions, and the constraint will not be
   felt until M2.
+
+- **0015** — forced by starting M2. M1-01 gave the planner every table it writes
+  and none that it reads, and the bid, tier and deadline it allocates by arrive on
+  a different event from the candidates. Where those facts come from at round time
+  is a consistency decision, not a plumbing detail, so it was made before
+  `planner-service` had a line of code rather than discovered inside it.
 
 ### Why the numbers are out of order
 
