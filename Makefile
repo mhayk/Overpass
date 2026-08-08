@@ -161,11 +161,11 @@ db-test: ## Assert the planning schema's structural claims against the running d
 
 .PHONY: seed
 seed: ## Seed the database with the constellation and sample customers
-	@echo "not yet implemented — issue #31 (M1-19)"
+	@$(ROOT)/scripts/seed.sh
 
 .PHONY: demo
 demo: ## Submit a scripted set of contested requests and watch the plan change
-	@echo "not yet implemented — issue #31 (M1-19)"
+	@$(ROOT)/scripts/demo.sh
 
 ## Quality
 
