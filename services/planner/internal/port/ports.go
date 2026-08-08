@@ -3,6 +3,7 @@ package port
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/mhayk/overpass/services/planner/internal/domain"
@@ -96,4 +97,87 @@ type Decoder interface {
 type Projections interface {
 	ProjectSnapshot(ctx context.Context, consumer string, e RequestReceived) (applied bool, err error)
 	ProjectCandidates(ctx context.Context, consumer string, e OpportunitiesComputed) (applied bool, err error)
+}
+
+// ---------------------------------------------------------------------------
+// Rounds — M2-01
+// ---------------------------------------------------------------------------
+
+// ErrSkipRound tells OpenRound to roll back without opening.
+//
+// A sentinel rather than a (Round, bool) return, because the decision is made
+// INSIDE the locked transaction and the honest way to say "never mind" from in
+// there is to abort it. Returning a zero Round and a false would leave the
+// adapter deciding whether a zero value means anything.
+var ErrSkipRound = errors.New("round not opened")
+
+// BucketQuery bounds the search for dirty buckets.
+type BucketQuery struct {
+	// BucketDuration must divide 24h evenly — see domain.ValidBucketDuration.
+	BucketDuration time.Duration
+	// HorizonStart and HorizonEnd bound which buckets are considered. A round
+	// over a bucket that has already elapsed cannot be flown, and one far in
+	// the future is planning against candidates that will be superseded many
+	// times before they matter.
+	HorizonStart time.Time
+	HorizonEnd   time.Time
+	// Limit caps one sweep. The planner holds a lock per round, so an unbounded
+	// sweep is an unbounded series of locks taken in one pass.
+	Limit int
+}
+
+// RoundInputs is the candidate set as it stood UNDER THE LOCK.
+//
+// Re-read inside the locked transaction rather than carried in from the sweep.
+// The sweep is unlocked and its answer is already stale by the time the lock is
+// acquired: candidates arrive continuously, and a round that announced a count
+// it did not actually read would break the contract's conservation property
+// before allocation had even begun.
+type RoundInputs struct {
+	Key                       domain.RoundKey
+	BucketEnd                 time.Time
+	CandidateOpportunityCount int
+	// CandidateRequestIDs excludes HELD candidates, per ADR-0014: a candidate
+	// whose request snapshot has not landed can become neither an acquisition
+	// nor an unfulfilment, so listing it would fail the contract's conservation
+	// test.
+	CandidateRequestIDs []string
+	DutyCycleBudgetS    float64
+	LivePlanID          *string
+}
+
+// Round is one opened allocation round, ready to record and announce.
+type Round struct {
+	RoundID       string
+	EventID       string
+	CorrelationID string
+	CausationID   *string
+
+	Key       domain.RoundKey
+	BucketEnd time.Time
+
+	Trigger                   string
+	Policy                    string
+	CandidateOpportunityCount int
+	CandidateRequestIDs       []string
+	DutyCycleBudgetS          float64
+	SupersedesPlanID          *string
+	TriggeredAt               time.Time
+}
+
+// Rounds is the planner's round ledger and its lock.
+type Rounds interface {
+	// DirtyBuckets finds buckets with candidates that arrived after the most
+	// recent round over them. Dirtiness is DERIVED — there is no is_dirty
+	// column and no timer state on disk, so a planner restart loses nothing.
+	DirtyBuckets(ctx context.Context, q BucketQuery) ([]domain.BucketState, error)
+
+	// OpenRound takes the advisory lock for key, re-reads the candidate set
+	// under it, and calls open. If open returns a Round and its payload, both
+	// the round row and the outbox row are written in the same transaction that
+	// holds the lock; the lock releases at commit.
+	//
+	// Returns false when open returned ErrSkipRound.
+	OpenRound(ctx context.Context, key domain.RoundKey, bucketEnd time.Time,
+		open func(RoundInputs) (Round, []byte, error)) (opened bool, err error)
 }
