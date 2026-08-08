@@ -15,7 +15,12 @@ falsify is a preference wearing a decision's clothes.
 Superseded ADRs are kept, not deleted. Changing your mind in public with a
 paper trail is the point.
 
-## Accepted
+## Written
+
+The status column carries the real state. An ADR appears here once the file
+exists, which is not the same as the decision being final — 0007 is `proposed`
+because its last section is a placeholder until the benchmark that completes it
+has run.
 
 | # | Title | Status | Milestone |
 | --- | --- | --- | --- |
@@ -25,6 +30,7 @@ paper trail is the point.
 | [0004](0004-postgresql-jsonb-over-document-store.md) | PostgreSQL with JSONB for semi-structured data, instead of adding a document store | accepted | M0 |
 | [0005](0005-docker-compose-over-kubernetes.md) | Docker Compose as the deployment target, not Kubernetes | accepted | M0 |
 | [0006](0006-transactional-outbox.md) | Publish through a transactional outbox, not directly from the handler | accepted | M1 |
+| [0007](0007-allocation-strategy.md) | Choose the allocation algorithm by measurement behind a policy interface, rather than committing to one algorithm | proposed | M2 |
 | [0008](0008-idempotency.md) | Idempotency in two places: a required HTTP key at ingress, and a dedup ledger in every consumer | accepted | M1 |
 | [0009](0009-cesium-deckgl-division.md) | Split the frontend by question: Cesium answers where and when, deck.gl answers how much and where things collide | accepted | M1 |
 | [0010](0010-test-strategy-and-coverage.md) | Treat the test suite as the verification harness for generated code, and gate coverage at 80/95 | accepted | M0 |
@@ -42,8 +48,6 @@ before the constraint is felt is fiction.
 
 | # | Title | Milestone |
 | --- | --- | --- |
-| 0007 | Allocation strategy, and the heuristic-versus-optimal tradeoff | M2 |
-| 0009 | CesiumJS and deck.gl division of labour | M1 |
 | 0014 | Planner-side re-planning semantics: round triggers, debounce, and in-flight requests | M2 |
 
 ### Why 0014 and 0015 exist
