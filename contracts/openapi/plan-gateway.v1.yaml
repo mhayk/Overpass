@@ -304,6 +304,67 @@ paths:
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
 
+  /v1/geo/satellites/czml:
+    get:
+      operationId: getConstellationCZML
+      tags: [geo]
+      summary: CZML rendering of the constellation's orbit tracks
+      description: |
+        A CZML document carrying a `position` and a `path` per satellite over a
+        window, from the sampled ephemeris projected out of
+        `feasibility.ephemeris.computed.v1`.
+
+        **Independent of any plan, deliberately.** The per-plan CZML at
+        `/v1/geo/plans/{satellite_id}/{bucket_start}/czml` renders the orbit of
+        the one satellite that plan belongs to, which is the right answer when a
+        plan is what you are looking at. It is the wrong answer for a globe:
+        the constellation exists before the first plan is committed and after
+        the last one is superseded, and a viewer who sees satellites appear only
+        once something has been scheduled learns something false about the
+        system.
+
+        Empty is a legitimate answer, not an error. The ephemeris sweep runs on
+        its own timer, so a window it has not reached yet has no samples — and a
+        document with a clock and no satellites is the honest rendering of that.
+
+        **CZML is not specified here beyond its media type**, for the same
+        reason the per-plan document is not: it is a Cesium format with its own
+        structure outside JSON Schema, and a partial schema would be a contract
+        that looks binding and is not. The shape is pinned by golden files.
+      parameters:
+        - $ref: '#/components/parameters/SatelliteId'
+        - name: window_start
+          in: query
+          required: true
+          schema: { type: string, format: date-time }
+        - name: window_end
+          in: query
+          required: true
+          schema: { type: string, format: date-time }
+        - $ref: '#/components/parameters/IfNoneMatch'
+      responses:
+        '200':
+          description: A CZML packet stream, one satellite entity per satellite.
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                type: array
+                description: |
+                  A CZML packet stream. The first packet is the document packet;
+                  the rest are satellites.
+                items:
+                  type: object
+                  additionalProperties: true
+        '304':
+          $ref: '#/components/responses/NotModified'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
   /v1/geo/footprints:
     get:
       operationId: getFootprints

@@ -87,6 +87,62 @@ func (s *Server) planCZML(w http.ResponseWriter, r *http.Request) {
 	s.writeConditional(w, r, "application/json", document)
 }
 
+// constellationCZML serves the orbit tracks, independent of any plan.
+//
+// The globe's satellites. `planCZML` renders the orbit of the one satellite its
+// plan belongs to; this renders the constellation, which exists whether or not
+// anything has been scheduled. A viewer who sees satellites appear only once a
+// plan is committed has been told something false about the system.
+func (s *Server) constellationCZML(w http.ResponseWriter, r *http.Request) {
+	start, err := timeParam(r, "window_start")
+	if err != nil || start == nil {
+		s.problem(w, r, badRequest("window_start is required and must be RFC 3339"))
+		return
+	}
+	end, err := timeParam(r, "window_end")
+	if err != nil || end == nil {
+		s.problem(w, r, badRequest("window_end is required and must be RFC 3339"))
+		return
+	}
+	if !end.After(*start) {
+		s.problem(w, r, badRequest("window_end must be after window_start"))
+		return
+	}
+	// An unbounded window over a table that grows by eighty thousand rows a day
+	// is a denial of service waiting for a client to ask for a year. Bounded
+	// rather than truncated: a track silently cut in half draws an orbit that
+	// stops in mid-air, which is worse than being told to narrow the window.
+	if end.Sub(*start) > maxConstellationWindow {
+		s.problem(w, r, badRequest(
+			"window is longer than "+maxConstellationWindow.String()+
+				"; ask for a narrower one rather than receiving a truncated orbit"))
+		return
+	}
+
+	tracks, cursor, err := s.reads.Constellation(
+		r.Context(), r.URL.Query().Get("satellite_id"), *start, *end)
+	if err != nil {
+		s.unavailable(w, r, err)
+		return
+	}
+
+	document, err := render.ConstellationCZML(tracks, *start, *end, cursor, s.now())
+	if err != nil {
+		s.log.Error("rendering the constellation", slog.Any("error", err))
+		s.unavailable(w, r, err)
+		return
+	}
+
+	s.writeConditional(w, r, "application/json", document)
+}
+
+// maxConstellationWindow bounds the orbit query.
+//
+// Two days. The ephemeris sweep publishes a rolling day ahead (ADR-0016), so a
+// window wider than that is asking for samples that do not exist yet — and the
+// globe scrubs a plan bucket, which is three hours.
+const maxConstellationWindow = 48 * time.Hour
+
 func (s *Server) footprintsGeoJSON(w http.ResponseWriter, r *http.Request) {
 	start, err := timeParam(r, "window_start")
 	if err != nil || start == nil {

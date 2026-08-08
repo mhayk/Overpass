@@ -203,6 +203,14 @@ type Reads interface {
 	// order. An empty result is not an error: the sweep may not have reached
 	// this horizon.
 	Ephemeris(ctx context.Context, satelliteID string, from, to time.Time) ([]EphemerisSample, error)
+
+	// Constellation returns every satellite's samples over `[from, to)`, keyed
+	// by satellite id. `satelliteID` narrows it to one; empty means all.
+	//
+	// Separate from Ephemeris rather than a loop over it: the globe asks for
+	// the whole constellation at once, and one query beats one per satellite
+	// against a table with a hundred thousand rows a day.
+	Constellation(ctx context.Context, satelliteID string, from, to time.Time) (map[string][]EphemerisSample, Cursor, error)
 }
 
 // PlanQuery filters a plan list.

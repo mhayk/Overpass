@@ -1,0 +1,118 @@
+[
+  {
+    "id": "document",
+    "name": "Overpass constellation",
+    "version": "1.0",
+    "clock": {
+      "interval": "2026-08-07T09:00:00Z/2026-08-07T12:00:00Z",
+      "currentTime": "2026-08-07T09:00:00Z",
+      "multiplier": 60,
+      "range": "LOOP_STOP",
+      "step": "SYSTEM_CLOCK_MULTIPLIER"
+    },
+    "freshness": {
+      "as_of": "2026-08-07T09:05:00Z",
+      "lag_seconds": 300
+    }
+  },
+  {
+    "id": "satellite/CAPELLA-14",
+    "name": "CAPELLA-14",
+    "description": "5 sampled positions",
+    "availability": "2026-08-07T09:00:00Z/2026-08-07T09:00:40Z",
+    "position": {
+      "epoch": "2026-08-07T09:00:00Z",
+      "cartographicDegrees": [
+        0,
+        4,
+        51.9,
+        693413,
+        10,
+        4.041234,
+        52.563211,
+        693413,
+        20,
+        4.082468,
+        53.226422,
+        693413,
+        30,
+        4.123702,
+        53.889633,
+        693413,
+        40,
+        4.164936,
+        54.552844,
+        693413
+      ],
+      "interpolationAlgorithm": "LAGRANGE",
+      "interpolationDegree": 5,
+      "referenceFrame": "FIXED"
+    },
+    "path": {
+      "material": {
+        "solidColor": {
+          "color": {
+            "rgba": [
+              255,
+              190,
+              90,
+              220
+            ]
+          }
+        }
+      },
+      "width": 2,
+      "leadTime": 0,
+      "trailTime": 2700,
+      "resolution": 60
+    }
+  },
+  {
+    "id": "satellite/SENTINEL-1A",
+    "name": "SENTINEL-1A",
+    "description": "4 sampled positions",
+    "availability": "2026-08-07T09:00:00Z/2026-08-07T09:00:30Z",
+    "position": {
+      "epoch": "2026-08-07T09:00:00Z",
+      "cartographicDegrees": [
+        0,
+        4,
+        51.9,
+        693413,
+        10,
+        4.041234,
+        52.563211,
+        693413,
+        20,
+        4.082468,
+        53.226422,
+        693413,
+        30,
+        4.123702,
+        53.889633,
+        693413
+      ],
+      "interpolationAlgorithm": "LAGRANGE",
+      "interpolationDegree": 5,
+      "referenceFrame": "FIXED"
+    },
+    "path": {
+      "material": {
+        "solidColor": {
+          "color": {
+            "rgba": [
+              255,
+              190,
+              90,
+              220
+            ]
+          }
+        }
+      },
+      "width": 2,
+      "leadTime": 0,
+      "trailTime": 2700,
+      "resolution": 60
+    }
+  }
+]

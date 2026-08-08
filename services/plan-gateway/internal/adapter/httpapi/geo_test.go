@@ -374,3 +374,108 @@ func TestTheETagChangesWhenTheTrackDoes(t *testing.T) {
 		t.Error("the ETag did not change when the orbit track appeared")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// The constellation endpoint (#28)
+// ---------------------------------------------------------------------------
+
+const constellationPath = "/v1/geo/satellites/czml" +
+	"?window_start=2026-03-01T00:00:00Z&window_end=2026-03-01T03:00:00Z"
+
+func constellationTrack(n int) []port.EphemerisSample {
+	base := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	out := make([]port.EphemerisSample, 0, n)
+	for i := range n {
+		out = append(out, port.EphemerisSample{
+			At:           base.Add(time.Duration(i*10) * time.Second),
+			LongitudeDeg: 4 + float64(i)*0.04,
+			LatitudeDeg:  51.9 + float64(i)*0.66,
+			AltitudeM:    693412,
+		})
+	}
+	return out
+}
+
+func TestTheConstellationEndpointServesOrbitTracksWithNoPlan(t *testing.T) {
+	// The whole point of the endpoint. The per-plan CZML needs a committed
+	// plan; the constellation exists before the first one and must be drawable.
+	reads := &fakeReads{constellation: map[string][]port.EphemerisSample{
+		"SAT-1": constellationTrack(4),
+		"SAT-2": constellationTrack(4),
+	}}
+	rec := getWith(t, serve(t, reads, nil), constellationPath, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+
+	var packets []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &packets); err != nil {
+		t.Fatalf("not JSON: %v", err)
+	}
+	if len(packets) != 3 {
+		t.Fatalf("got %d packets, want a document and two satellites", len(packets))
+	}
+	if _, present := packets[1]["path"]; !present {
+		t.Error("the satellite packet carries no path")
+	}
+}
+
+func TestAnEmptyConstellationIsStillADocument(t *testing.T) {
+	// The sweep runs on its own timer. A window it has not reached yet is an
+	// empty globe, not a 404 and not a 503.
+	rec := getWith(t, serve(t, &fakeReads{}, nil), constellationPath, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte(`"clock"`)) {
+		t.Error("no clock; the timeline would have no span to scrub")
+	}
+}
+
+func TestTheConstellationCanBeNarrowedToOneSatellite(t *testing.T) {
+	reads := &fakeReads{constellation: map[string][]port.EphemerisSample{"SAT-1": constellationTrack(3)}}
+	rec := getWith(t, serve(t, reads, nil), constellationPath+"&satellite_id=SAT-1", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+	if reads.lastSatelliteFilter != "SAT-1" {
+		t.Errorf("the filter did not reach the read layer: %q", reads.lastSatelliteFilter)
+	}
+}
+
+func TestTheConstellationWindowIsRequiredAndBounded(t *testing.T) {
+	for _, tc := range []struct{ name, query string }{
+		{"no window", "/v1/geo/satellites/czml"},
+		{"no end", "/v1/geo/satellites/czml?window_start=2026-03-01T00:00:00Z"},
+		{"end before start", "/v1/geo/satellites/czml?window_start=2026-03-02T00:00:00Z&window_end=2026-03-01T00:00:00Z"},
+		// An unbounded window over a table growing by ~80k rows a day is a
+		// denial of service waiting for somebody to ask for a year. Refused
+		// rather than truncated: a track cut in half draws an orbit that stops
+		// in mid-air, which is worse than being told to narrow the window.
+		{"a year", "/v1/geo/satellites/czml?window_start=2026-03-01T00:00:00Z&window_end=2027-03-01T00:00:00Z"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := getWith(t, serve(t, &fakeReads{}, nil), tc.query, "")
+			if rec.Code != http.StatusBadRequest {
+				t.Errorf("got %d, want 400: %s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestTheConstellationRevalidatesLikeEveryOtherGeoDocument(t *testing.T) {
+	// A globe polls this every few seconds and the answer only changes when the
+	// sweep publishes. Without a validator every poll re-sends the whole thing.
+	h := serve(t, &fakeReads{constellation: map[string][]port.EphemerisSample{
+		"SAT-1": constellationTrack(4),
+	}}, nil)
+
+	first := getWith(t, h, constellationPath, "")
+	tag := first.Header().Get("ETag")
+	if tag == "" {
+		t.Fatal("no ETag")
+	}
+	if second := getWith(t, h, constellationPath, tag); second.Code != http.StatusNotModified {
+		t.Errorf("revalidation returned %d, want 304", second.Code)
+	}
+}

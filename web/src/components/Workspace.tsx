@@ -3,7 +3,15 @@
 import dynamic from 'next/dynamic';
 import { useCallback, useEffect, useState } from 'react';
 
-import { GatewayError, fetchAcquisitions, type Acquisition, type Staleness } from '@/lib/gateway';
+import {
+  GatewayError,
+  fetchAcquisitions,
+  fetchConstellationCZML,
+  fetchOpportunities,
+  type Acquisition,
+  type Opportunity,
+  type Staleness,
+} from '@/lib/gateway';
 import { SubmitRejected, submitRequest, type FieldError } from '@/lib/tasking';
 
 /**
@@ -22,6 +30,23 @@ const CesiumGlobe = dynamic(() => import('@/components/CesiumGlobe'), {
     </div>
   ),
 });
+
+/**
+ * The window the orbit tracks are asked for.
+ *
+ * Narrower than the acquisition window on purpose. The gateway bounds this at
+ * 48 hours, and a track is roughly a sample every ten seconds per satellite —
+ * asking for the full 48-hour span of `defaultWindow` would be several times the
+ * payload for orbit a viewer scrubs a few hours of. Six hours around now is what
+ * the timeline actually moves through.
+ */
+function orbitWindow(): { start: string; end: string } {
+  const now = new Date();
+  return {
+    start: new Date(now.getTime() - 1 * 3600_000).toISOString(),
+    end: new Date(now.getTime() + 5 * 3600_000).toISOString(),
+  };
+}
 
 function defaultWindow(): { start: string; end: string } {
   const now = new Date();
@@ -51,6 +76,8 @@ function StalenessBadge({ staleness }: { staleness: Staleness }): React.JSX.Elem
 
 export default function Workspace(): React.JSX.Element {
   const [acquisitions, setAcquisitions] = useState<Acquisition[]>([]);
+  const [constellation, setConstellation] = useState<unknown[]>([]);
+  const [opportunities, setOpportunities] = useState<Opportunity[]>([]);
   const [staleness, setStaleness] = useState<Staleness>({ asOf: '', lagSeconds: Number.NaN });
   const [selectedRequestId, setSelectedRequestId] = useState<string | undefined>(undefined);
   const [error, setError] = useState<string | undefined>(undefined);
@@ -64,6 +91,16 @@ export default function Workspace(): React.JSX.Element {
       setAcquisitions(result.items);
       setStaleness(result.staleness);
       setError(undefined);
+
+      // The orbit tracks, separately and tolerantly. An empty constellation is
+      // a window the ephemeris sweep has not reached yet — a globe without
+      // satellites, not a broken page — so a failure here must not blank the
+      // acquisitions that did load.
+      try {
+        setConstellation(await fetchConstellationCZML(orbitWindow()));
+      } catch {
+        setConstellation([]);
+      }
     } catch (cause) {
       // A failed read and an empty result are different answers and are shown
       // differently: this is a banner, an empty list is just an empty list.
@@ -78,6 +115,38 @@ export default function Workspace(): React.JSX.Element {
   useEffect(() => {
     void load();
   }, [load]);
+
+  // The selected request's candidates, won and lost.
+  //
+  // Fetched on selection rather than up front: opportunities are per request and
+  // a sweep produces hundreds, so loading every request's candidates to draw one
+  // request's would be most of the payload budget for something nobody asked to
+  // see.
+  useEffect(() => {
+    if (selectedRequestId === undefined) {
+      setOpportunities([]);
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const result = await fetchOpportunities(selectedRequestId);
+        if (!cancelled) {
+          setOpportunities(result.items);
+        }
+      } catch {
+        // A request with no candidates yet is ordinary — the sweep is
+        // asynchronous. Showing nothing is the right answer; a banner would
+        // cry wolf on every fresh submission.
+        if (!cancelled) {
+          setOpportunities([]);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedRequestId]);
 
   async function onSubmit(event: React.FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
@@ -242,7 +311,12 @@ export default function Workspace(): React.JSX.Element {
       </aside>
 
       <div className="h-full">
-        <CesiumGlobe acquisitions={acquisitions} selectedRequestId={selectedRequestId} />
+        <CesiumGlobe
+          acquisitions={acquisitions}
+          selectedRequestId={selectedRequestId}
+          constellation={constellation}
+          opportunities={opportunities}
+        />
       </div>
     </main>
   );

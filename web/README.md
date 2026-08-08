@@ -26,25 +26,42 @@ It is imported dynamically with `ssr: false` and a visible loading state, for
 two reasons: it touches `window` at import time, and it is the largest asset in
 the frontend by a wide margin. The page is interactive before it arrives.
 
-## What the globe does not draw yet
+## What the globe draws, and where each layer comes from
 
-Satellites. The positions now exist — #128 landed the ephemeris projection, so
-`readmodel.ephemeris` holds sampled positions and
-`/v1/geo/plans/{satellite}/{bucket}/czml` serves them as a `position` and a
-`path` per satellite. What has not happened is here: this component builds its
-entities from `/v1/geo/footprints`, not from the CZML document, so it draws
-footprints and nothing else.
+Three layers, two sources, and the split is deliberate.
 
-Wiring it is the remaining half of #28, and it is a real choice rather than a
-copy: either load the CZML document into `CzmlDataSource` and let the server's
-rendering drive the whole scene, or keep building entities by hand and add the
-path from the same samples. The first is less code and makes the server the one
-place geometry is decided; the second keeps the selection-highlighting this
-component already does.
+**Orbit tracks** come from `/v1/geo/satellites/czml` and are handed straight to
+Cesium's `CzmlDataSource`. Cesium's own loader is the only thing that should
+interpret a CZML packet stream, and the server already renders it from the one
+read model — re-modelling it here would be the second implementation of geometry
+that [ADR-0009](../docs/decisions/0009-cesium-deckgl-division.md) exists to
+prevent, and the two would disagree eventually. The document's clock is also what
+makes scrubbing move satellites rather than merely move a cursor.
 
-What is NOT on the table, then or now, is interpolating a path through footprint
-centroids. It would draw something that looks like an orbit and is not one —
-worse than an absent layer, because a viewer would believe it.
+That endpoint is deliberately **independent of any plan**. The per-plan CZML
+draws the orbit of the satellite its plan belongs to, which is right when a plan
+is what you are looking at and wrong for a globe: the constellation exists before
+the first plan is committed, and satellites that appear only once something has
+been scheduled tell the viewer something false.
+
+**Acquisition footprints** stay hand-built entities, because they need
+per-request selection highlighting — mutating material and outline alpha on
+entities this component owns. `CzmlDataSource` owns everything it loads, so
+driving selection through it would mean rewriting packets and reloading the
+document on every click.
+
+**Candidate footprints** are fetched per selected request and drawn as unfilled
+ghosts. The losers are the point: a winner shown alone explains nothing about why
+it won.
+
+An empty constellation is a legitimate state, not an error. The ephemeris sweep
+runs on its own timer, so a window it has not reached is a globe without
+satellites — and a failure fetching it must not blank the acquisitions that did
+load.
+
+What remains off the table: interpolating a path through footprint centroids. It
+renders something that looks like an orbit and is not one, which is worse than an
+absent layer because a viewer would believe it.
 
 ## Tests
 

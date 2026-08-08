@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   GatewayError,
   fetchAcquisitions,
+  fetchConstellationCZML,
   fetchFootprints,
   fetchOpportunities,
 } from '@/lib/gateway';
@@ -149,5 +150,33 @@ describe('footprint truncation', () => {
     respondWith({ features: [], truncated: false });
 
     await expect(fetchFootprints(WINDOW)).resolves.toMatchObject({ truncated: false });
+  });
+});
+
+
+describe('fetchConstellationCZML', () => {
+  // The orbit tracks the globe draws. Returned opaque on purpose: Cesium's
+  // loader is the only thing that should interpret a CZML packet stream, and
+  // re-modelling it here would be a second implementation of geometry the
+  // server already renders from one read model.
+  it('passes the window through and returns the packets untouched', async () => {
+    const packets = [{ id: 'document' }, { id: 'satellite/SAT-1', path: {} }];
+    respondWith(packets);
+
+    const got = await fetchConstellationCZML(WINDOW);
+
+    expect(got).toEqual(packets);
+    const url = String(vi.mocked(globalThis.fetch).mock.calls[0]?.[0]);
+    expect(url).toContain('/v1/geo/satellites/czml');
+    expect(url).toContain('window_start=2026-03-01T00%3A00%3A00Z');
+  });
+
+  it('treats a body that is not a packet stream as an empty constellation', () => {
+    // Defensive rather than paranoid. The endpoint returns an ARRAY; a proxy
+    // that helpfully wrapped it in an object would otherwise reach
+    // CzmlDataSource.load and throw inside Cesium, where the stack says nothing
+    // about which response caused it.
+    respondWith({ items: [] });
+    return expect(fetchConstellationCZML(WINDOW)).resolves.toEqual([]);
   });
 });

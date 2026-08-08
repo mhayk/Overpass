@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"sort"
 	"time"
 
 	"github.com/mhayk/overpass/services/plan-gateway/internal/port"
@@ -29,17 +30,19 @@ const CZMLTimeFormat = "2006-01-02T15:04:05Z"
 // map so the output is byte-stable, which is what makes both the golden files
 // and the ETag meaningful.
 type Packet struct {
-	ID           string       `json:"id"`
-	Name         string       `json:"name,omitempty"`
-	Description  string       `json:"description,omitempty"`
-	Version      string       `json:"version,omitempty"`
-	Clock        *Clock       `json:"clock,omitempty"`
-	Availability string       `json:"availability,omitempty"`
-	Polygon      *PolygonGfx  `json:"polygon,omitempty"`
-	Properties   *PlanProps   `json:"properties,omitempty"`
-	Label        *LabelGfx    `json:"label,omitempty"`
-	Position     *PositionGfx `json:"position,omitempty"`
-	Path         *PathGfx     `json:"path,omitempty"`
+	ID           string      `json:"id"`
+	Name         string      `json:"name,omitempty"`
+	Description  string      `json:"description,omitempty"`
+	Version      string      `json:"version,omitempty"`
+	Clock        *Clock      `json:"clock,omitempty"`
+	Availability string      `json:"availability,omitempty"`
+	Polygon      *PolygonGfx `json:"polygon,omitempty"`
+	Properties   *PlanProps  `json:"properties,omitempty"`
+	// Staleness alone, for a document that has no plan to describe.
+	Freshness *Freshness   `json:"freshness,omitempty"`
+	Label     *LabelGfx    `json:"label,omitempty"`
+	Position  *PositionGfx `json:"position,omitempty"`
+	Path      *PathGfx     `json:"path,omitempty"`
 }
 
 // Clock drives the timeline. Cesium scrubs against this rather than re-querying.
@@ -132,6 +135,17 @@ type PathGfx struct {
 	LeadTime   float64  `json:"leadTime"`
 	TrailTime  float64  `json:"trailTime"`
 	Resolution float64  `json:"resolution"`
+}
+
+// Freshness is how current a document is, with nothing else attached.
+//
+// A separate type from PlanProps rather than PlanProps with empty fields. The
+// constellation document has no plan, and rendering one with plan_id "" and
+// plan_version 0 does not describe the absence of a plan — it describes a plan,
+// wrongly, in a shape a UI would happily read. Caught by the golden file.
+type Freshness struct {
+	AsOf       string  `json:"as_of"`
+	LagSeconds float64 `json:"lag_seconds"`
 }
 
 // PlanProps carries plan metadata Cesium ignores and the UI reads.
@@ -395,4 +409,70 @@ func polygonToCartographicDegrees(geojson []byte) ([]float64, error) {
 		out = append(out, position[0], position[1], 0)
 	}
 	return out, nil
+}
+
+// ConstellationCZML renders every satellite's orbit track over a window.
+//
+// The constellation, not a plan's satellite. PlanCZML draws the orbit of the
+// one satellite its plan belongs to, which is the right answer when a plan is
+// what you are looking at and the wrong one for a globe: the constellation
+// exists before the first plan is committed and after the last is superseded,
+// and a viewer who sees satellites appear only once something has been
+// scheduled has been told something false about the system.
+//
+// An empty result is a document packet and a clock. That is the honest
+// rendering of a window the ephemeris sweep has not reached — the sweep runs on
+// its own timer — and it keeps the timeline's span meaningful when there is
+// nothing to draw on it yet.
+func ConstellationCZML(
+	tracks map[string][]port.EphemerisSample,
+	from, to time.Time,
+	staleness port.Cursor,
+	now time.Time,
+) ([]byte, error) {
+	lag := now.Sub(staleness.LastEventAt).Seconds()
+	if lag < 0 {
+		lag = 0
+	}
+
+	packets := []Packet{{
+		ID:      "document",
+		Name:    "Overpass constellation",
+		Version: "1.0",
+		Clock: &Clock{
+			Interval:    czmlInterval(from, to),
+			CurrentTime: from.UTC().Format(CZMLTimeFormat),
+			Multiplier:  60,
+			Range:       "LOOP_STOP",
+			Step:        "SYSTEM_CLOCK_MULTIPLIER",
+		},
+		Freshness: &Freshness{
+			AsOf:       staleness.LastEventAt.UTC().Format(time.RFC3339Nano),
+			LagSeconds: lag,
+		},
+	}}
+
+	// Sorted, because Go randomises map iteration per run and the ETag is
+	// computed over these exact bytes. A map-ordered document would hash
+	// differently on every request and the validator would never match —
+	// silently, with the endpoint merely appearing to have a very cold cache.
+	for _, satelliteID := range sortedKeys(tracks) {
+		if packet := satellitePacket(port.PlanView{
+			SatelliteID: satelliteID,
+			Track:       tracks[satelliteID],
+		}); packet != nil {
+			packets = append(packets, *packet)
+		}
+	}
+
+	return json.Marshal(packets)
+}
+
+func sortedKeys(tracks map[string][]port.EphemerisSample) []string {
+	out := make([]string, 0, len(tracks))
+	for id := range tracks {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
 }
