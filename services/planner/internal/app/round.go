@@ -148,7 +148,7 @@ func (t *Trigger) open(ctx context.Context, state domain.BucketState, decision d
 	_, bucketEnd := domain.Bucket(state.Key.BucketStart, t.bucketDuration)
 
 	opened, err := t.rounds.OpenRound(ctx, state.Key, bucketEnd,
-		func(inputs port.RoundInputs) (port.Round, []byte, error) {
+		func(inputs port.RoundInputs) (port.RoundOutcome, error) {
 			// Re-decided under the lock, on what the lock actually saw.
 			//
 			// Another planner may have opened a round for this bucket between
@@ -158,7 +158,7 @@ func (t *Trigger) open(ctx context.Context, state domain.BucketState, decision d
 			// over a candidate set that had already been announced, and the
 			// conservation ledger would contain the same requests twice.
 			if inputs.CandidateOpportunityCount == 0 {
-				return port.Round{}, nil, port.ErrSkipRound
+				return port.RoundOutcome{}, port.ErrSkipRound
 			}
 
 			round := port.Round{
@@ -187,9 +187,12 @@ func (t *Trigger) open(ctx context.Context, state domain.BucketState, decision d
 
 			payload, err := buildRoundTriggeredEvent(round)
 			if err != nil {
-				return port.Round{}, nil, err
+				return port.RoundOutcome{}, err
 			}
-			return round, payload, nil
+			// No Plan. M2-01 opens the decision boundary and announces what was
+			// on the table; allocating is M2-05 onward, and the commit path is
+			// already in place for it.
+			return port.RoundOutcome{Round: round, RoundPayload: payload}, nil
 		})
 	if err != nil {
 		return false, err

@@ -111,6 +111,14 @@ type Projections interface {
 // adapter deciding whether a zero value means anything.
 var ErrSkipRound = errors.New("round not opened")
 
+// ErrConcurrentPlan marks a round that lost an optimistic-concurrency check on
+// the plan it was replacing.
+//
+// Distinct from a constraint violation: nothing is malformed, the round simply
+// read a plan that has since moved. It aborts and the bucket stays dirty, so
+// the next round sees the newer state.
+var ErrConcurrentPlan = errors.New("the plan being superseded changed under this round")
+
 // BucketQuery bounds the search for dirty buckets.
 type BucketQuery struct {
 	// BucketDuration must divide 24h evenly — see domain.ValidBucketDuration.
@@ -144,6 +152,14 @@ type RoundInputs struct {
 	CandidateRequestIDs []string
 	DutyCycleBudgetS    float64
 	LivePlanID          *string
+	// LivePlanRowVersion is what the live plan's row_version was when this
+	// round read it, under the lock. The supersession update is guarded on it,
+	// so a plan touched by anybody in between aborts the round rather than
+	// being silently overwritten.
+	LivePlanRowVersion int
+	// NextPlanVersion is the version this round's plan would carry. Dense per
+	// bucket, so a gap means a round committed and was rolled back.
+	NextPlanVersion int
 }
 
 // Round is one opened allocation round, ready to record and announce.
@@ -165,6 +181,65 @@ type Round struct {
 	TriggeredAt               time.Time
 }
 
+// PlanCommit is a plan ready to be written, produced under the lock.
+//
+// Committed in the SAME transaction that opened the round, and that is a
+// correctness requirement rather than an optimisation. Allocating outside the
+// lock and committing afterwards leaves a window in which another planner opens
+// its own round over the same bucket, and both commit plans that were each
+// correct against a state neither of them ended in.
+type PlanCommit struct {
+	PlanID  string
+	RoundID string
+
+	// SupersedesPlanID is the live plan this replaces, and its acquisitions are
+	// demoted to SUPERSEDED in this same transaction. ADR-0012 retains them
+	// rather than deleting: the SUPERSEDED reason code promises the customer an
+	// account of what replaced them, and deleting the evidence in the
+	// transaction that creates the need for it is not an explanation.
+	SupersedesPlanID *string
+	// PlanVersion is dense and unique per bucket. collection_plans_unique_version
+	// is the backstop that speaks up if the advisory lock ever fails.
+	PlanVersion int
+	// SupersededRowVersion is the row_version the round READ from the plan it
+	// is replacing. The update is guarded on it, so a plan touched by anybody
+	// else since then aborts the round instead of being silently overwritten.
+	SupersededRowVersion int
+
+	Policy      string
+	MetricsJSON []byte
+	CommittedAt time.Time
+
+	Acquisitions []domain.ScheduledAcquisition
+	Unfulfilled  []domain.Unfulfilment
+
+	// PlanEventID and the payload for planning.plan.committed.v1, plus one
+	// event per unfulfilled request. Built by the application layer from the
+	// generated contract types, so a field the contract adds is a compile error
+	// rather than a message somebody's consumer terms at 3am.
+	PlanEventID       string
+	PlanPayload       []byte
+	UnfulfilledEvents []OutboxEvent
+}
+
+// OutboxEvent is one event to enqueue alongside the plan.
+type OutboxEvent struct {
+	EventID   string
+	EventType string
+	Subject   string
+	Payload   []byte
+}
+
+// RoundOutcome is what a round decided, under the lock.
+//
+// Plan is nil when the round opened but allocated nothing — which is what M2-01
+// does on its own, and what a round with no joinable candidates does forever.
+type RoundOutcome struct {
+	Round        Round
+	RoundPayload []byte
+	Plan         *PlanCommit
+}
+
 // Rounds is the planner's round ledger and its lock.
 type Rounds interface {
 	// DirtyBuckets finds buckets with candidates that arrived after the most
@@ -173,13 +248,20 @@ type Rounds interface {
 	DirtyBuckets(ctx context.Context, q BucketQuery) ([]domain.BucketState, error)
 
 	// OpenRound takes the advisory lock for key, re-reads the candidate set
-	// under it, and calls open. If open returns a Round and its payload, both
-	// the round row and the outbox row are written in the same transaction that
-	// holds the lock; the lock releases at commit.
+	// under it, and calls open. Everything open returns — the round row, the
+	// plan, its acquisitions, the demotion of any superseded ones, and every
+	// outbox row — is written in the SAME transaction that holds the lock, and
+	// the lock releases at commit.
+	//
+	// A constraint violation from the database therefore aborts the WHOLE
+	// round. That is deliberate: the exclusion constraint is a backstop, not
+	// the primary mechanism, so if it fires the policy has a bug, and
+	// committing the rows that happened to be legal would leave a plan that is
+	// silently missing whatever the policy got wrong.
 	//
 	// Returns false when open returned ErrSkipRound.
 	OpenRound(ctx context.Context, key domain.RoundKey, bucketEnd time.Time,
-		open func(RoundInputs) (Round, []byte, error)) (opened bool, err error)
+		open func(RoundInputs) (RoundOutcome, error)) (opened bool, err error)
 }
 
 // Satellites reads the per-satellite parameters allocation depends on.

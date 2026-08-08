@@ -136,7 +136,7 @@ func (r *Rounds) OpenRound(
 	ctx context.Context,
 	key domain.RoundKey,
 	bucketEnd time.Time,
-	open func(port.RoundInputs) (port.Round, []byte, error),
+	open func(port.RoundInputs) (port.RoundOutcome, error),
 ) (bool, error) {
 	opened := false
 
@@ -158,23 +158,27 @@ func (r *Rounds) OpenRound(
 			return err
 		}
 
-		round, payload, err := open(inputs)
+		outcome, err := open(inputs)
 		if err != nil {
-			if errors.Is(err, port.ErrSkipRound) {
-				// Roll back rather than commit an empty transaction. Same
-				// effect on the data, but it releases the lock through the path
-				// that is exercised on every error, instead of a second one
-				// that only runs on this branch.
-				return err
-			}
+			// ErrSkipRound rolls back rather than committing an empty
+			// transaction. Same effect on the data, but it releases the lock
+			// through the path exercised on every error, instead of a second
+			// one that only runs on this branch.
 			return err
 		}
 
-		if err := insertRound(ctx, tx, round); err != nil {
+		if err := insertRound(ctx, tx, outcome.Round); err != nil {
 			return err
 		}
-		if err := enqueue(ctx, tx, round, payload); err != nil {
+		if err := enqueue(ctx, tx, outcome.Round.EventID, "planning.round.triggered.v1",
+			"planning.round.triggered.v1", outcome.RoundPayload, outcome.Round.TriggeredAt); err != nil {
 			return err
+		}
+
+		if outcome.Plan != nil {
+			if err := commitPlan(ctx, tx, outcome.Round, *outcome.Plan); err != nil {
+				return err
+			}
 		}
 		opened = true
 		return nil
@@ -233,11 +237,21 @@ func (r *Rounds) readInputs(ctx context.Context, tx pgx.Tx, key domain.RoundKey,
 	}
 
 	if err := tx.QueryRow(ctx, `
-		SELECT plan_id::text FROM planning.collection_plans
+		SELECT plan_id::text, row_version FROM planning.collection_plans
 		WHERE satellite_id = $1 AND lower(bucket) = $2
 		ORDER BY plan_version DESC LIMIT 1
-	`, key.SatelliteID, key.BucketStart).Scan(&inputs.LivePlanID); err != nil && !errors.Is(err, pgx.ErrNoRows) {
+	`, key.SatelliteID, key.BucketStart).Scan(&inputs.LivePlanID, &inputs.LivePlanRowVersion); err != nil &&
+		!errors.Is(err, pgx.ErrNoRows) {
 		return port.RoundInputs{}, fmt.Errorf("reading the live plan for %s: %w", key, err)
+	}
+
+	// The next version is dense per bucket. collection_plans_unique_version is
+	// the backstop that says so out loud if two rounds ever race past the lock.
+	if err := tx.QueryRow(ctx, `
+		SELECT coalesce(max(plan_version), 0) + 1 FROM planning.collection_plans
+		WHERE satellite_id = $1 AND lower(bucket) = $2
+	`, key.SatelliteID, key.BucketStart).Scan(&inputs.NextPlanVersion); err != nil {
+		return port.RoundInputs{}, fmt.Errorf("reading the next plan version for %s: %w", key, err)
 	}
 
 	return inputs, nil
@@ -271,22 +285,114 @@ func insertRound(ctx context.Context, tx pgx.Tx, r port.Round) error {
 // Never together and never the other way round — a publish inside the
 // transaction would succeed and the transaction could still roll back,
 // announcing a round that never opened, and nothing downstream could tell.
-func enqueue(ctx context.Context, tx pgx.Tx, r port.Round, payload []byte) error {
+func enqueue(ctx context.Context, tx pgx.Tx, eventID, eventType, subject string, payload []byte, occurredAt time.Time) error {
 	_, err := tx.Exec(ctx, `
 		INSERT INTO planning.outbox (
 			event_id, event_type, schema_version, subject, payload, headers, occurred_at
 		) VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7)
-	`,
-		r.EventID,
-		"planning.round.triggered.v1",
-		"1.0.0",
-		"planning.round.triggered.v1",
-		string(payload),
-		`{}`,
-		r.TriggeredAt,
-	)
+	`, eventID, eventType, "1.0.0", subject, string(payload), `{}`, occurredAt)
 	if err != nil {
-		return fmt.Errorf("enqueueing the round event for %s: %w", r.RoundID, err)
+		return fmt.Errorf("enqueueing %s (%s): %w", eventType, eventID, err)
+	}
+	return nil
+}
+
+// commitPlan writes the plan, its acquisitions, the demotion of anything it
+// supersedes, and every outbox row — all inside the caller's locked
+// transaction.
+//
+// Order matters and is NOT relied upon. ADR-0012 made the exclusion constraint
+// DEFERRABLE INITIALLY DEFERRED precisely so that demoting the old plan and
+// inserting the new one can happen in either order without a hidden statement
+// contract; a genuinely conflicting plan is still rejected, at COMMIT.
+func commitPlan(ctx context.Context, tx pgx.Tx, round port.Round, plan port.PlanCommit) error {
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO planning.collection_plans (
+			plan_id, round_id, satellite_id, bucket, plan_version,
+			supersedes_plan_id, policy, metrics, committed_at
+		) VALUES ($1, $2, $3, tstzrange($4, $5, '[)'), $6, $7, $8, $9::jsonb, $10)
+	`,
+		plan.PlanID, plan.RoundID, round.Key.SatelliteID,
+		round.Key.BucketStart, round.BucketEnd, plan.PlanVersion,
+		plan.SupersedesPlanID, plan.Policy, string(plan.MetricsJSON), plan.CommittedAt,
+	); err != nil {
+		return fmt.Errorf("writing plan %s: %w", plan.PlanID, err)
+	}
+
+	if plan.SupersedesPlanID != nil {
+		// Retained with a status, not deleted (ADR-0012). The SUPERSEDED reason
+		// code promises the customer an account of what replaced them, and
+		// deleting the evidence in the same transaction that creates the need
+		// for it is not an explanation.
+		//
+		// Guarded on row_version: optimistic concurrency on the plan being
+		// replaced. If another writer touched it since this round read it, zero
+		// rows update and the round aborts rather than superseding a plan it
+		// never saw.
+		tag, err := tx.Exec(ctx, `
+			UPDATE planning.collection_plans
+			SET row_version = row_version + 1
+			WHERE plan_id = $1 AND row_version = $2
+		`, *plan.SupersedesPlanID, plan.SupersededRowVersion)
+		if err != nil {
+			return fmt.Errorf("superseding plan %s: %w", *plan.SupersedesPlanID, err)
+		}
+		if tag.RowsAffected() != 1 {
+			return fmt.Errorf("%w: plan %s changed under this round (row_version %d no longer current)",
+				port.ErrConcurrentPlan, *plan.SupersedesPlanID, plan.SupersededRowVersion)
+		}
+
+		if _, err := tx.Exec(ctx, `
+			UPDATE planning.acquisitions
+			SET status = 'SUPERSEDED', superseded_at = $2
+			WHERE plan_id = $1 AND status = 'ACTIVE'
+		`, *plan.SupersedesPlanID, plan.CommittedAt); err != nil {
+			return fmt.Errorf("demoting the acquisitions of plan %s: %w", *plan.SupersedesPlanID, err)
+		}
+	}
+
+	batch := &pgx.Batch{}
+	for _, a := range plan.Acquisitions {
+		batch.Queue(`
+			INSERT INTO planning.acquisitions (
+				acquisition_id, plan_id, request_id, opportunity_id, customer_id,
+				satellite_id, mode, acq_window, geometry, footprint,
+				slew_time_from_previous_s, gap_from_previous_s, duty_cycle_cost_s,
+				awarded_value_credits, clearing_price_credits, status
+			) VALUES (
+				gen_random_uuid(), $1, $2, $3, $4,
+				$5, $6, tstzrange($7, $8, '[)'), $9, ST_GeomFromGeoJSON($10),
+				$11, $12, $13,
+				$14, $15, 'ACTIVE'
+			)
+		`,
+			plan.PlanID, a.RequestID, a.OpportunityID, a.CustomerID,
+			round.Key.SatelliteID, a.Mode, a.Start, a.End, a.GeometryJSON, string(a.FootprintGeoJSON),
+			a.SlewFromPreviousS, a.GapFromPreviousS, a.DutyCycleCostS,
+			a.AwardedValueCredits, a.ClearingPriceCredits,
+		)
+	}
+	results := tx.SendBatch(ctx, batch)
+	for i := range plan.Acquisitions {
+		if _, err := results.Exec(); err != nil {
+			_ = results.Close() //nolint:errcheck // the insert error is the one that matters
+			return fmt.Errorf("writing acquisition %d of %d (%s): %w",
+				i+1, len(plan.Acquisitions), plan.Acquisitions[i].OpportunityID, err)
+		}
+	}
+	if err := results.Close(); err != nil {
+		return fmt.Errorf("closing the acquisition batch for plan %s: %w", plan.PlanID, err)
+	}
+
+	if err := enqueue(ctx, tx, plan.PlanEventID, "planning.plan.committed.v1",
+		"planning.plan.committed.v1", plan.PlanPayload, plan.CommittedAt); err != nil {
+		return err
+	}
+	for _, event := range plan.UnfulfilledEvents {
+		if err := enqueue(ctx, tx, event.EventID, event.EventType, event.Subject,
+			event.Payload, plan.CommittedAt); err != nil {
+			return err
+		}
 	}
 	return nil
 }
