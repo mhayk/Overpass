@@ -1,0 +1,720 @@
+openapi: 3.0.3
+
+# OpenAPI 3.0.3, matching tasking-api.v1.yaml for the same reason: oapi-codegen's
+# 3.1 support is immature and a generator that silently mis-generates is worse
+# than a dialect mismatch we have written down. See the note in that document.
+
+info:
+  title: Overpass Plan Gateway
+  version: 1.0.0
+  description: |
+    Read models over the collection plan.
+
+    ## What this service is for
+
+    `plan-gateway` is the eventually-consistent side of ADR-0003. It owns no
+    business rules and makes no decisions: it projects events from `tasking`,
+    `feasibility` and `planning` into read models shaped for the frontend, and
+    serves them.
+
+    That separation is the point. The planner's write path holds an invariant
+    under a lock; this one answers "what does the globe look like" a few hundred
+    milliseconds later, and the two must not contend.
+
+    ## Staleness is exposed, never hidden
+
+    Every projection response carries `as_of`, the stream position it was built
+    from. A read model that cannot say how far behind it is forces the UI to
+    guess, and the UI will guess optimistically — showing a plan as current when
+    it is thirty seconds old and already superseded.
+
+    ## Plans are addressed by bucket, not by time range
+
+    This is the one genuinely contested decision in this document and it is
+    recorded rather than assumed.
+
+    A `CollectionPlan` exists per `(satellite_id, bucket_start)`, and
+    `plan_version` increments within that pair. ADR-0012 made the projection
+    append-only, so several versions of the same bucket coexist and a read must
+    be able to name one.
+
+    A free time range spanning two buckets would therefore match several plan
+    versions per bucket, and every acquisition in the response would need to
+    carry which version it came from — pushing the reconciliation into the
+    client, which has no way to do it correctly.
+
+    So: **plans are read per bucket**, optionally at a specific version.
+    **Acquisitions are read by time range**, because an acquisition belongs to
+    exactly one plan and needs no version arithmetic to interpret. The two reads
+    answer different questions and neither is a special case of the other.
+
+    ASSUMPTION, flagged: this was decided without a product answer on whether
+    operators think in buckets or in wall-clock windows. If they think in
+    windows, the fix is a convenience endpoint that resolves a window to a set
+    of buckets — not a change to this shape, which the versioning requires.
+
+  contact:
+    name: Overpass
+    url: https://github.com/mhayk/Overpass
+
+servers:
+  - url: http://localhost:8082
+    description: Local compose stack
+
+tags:
+  - name: plans
+    description: Committed collection plans, per satellite and horizon bucket.
+  - name: acquisitions
+    description: Individual scheduled acquisitions.
+  - name: opportunities
+    description: Candidate acquisitions a request could have won.
+  - name: requests
+    description: Request status as the read model sees it.
+  - name: geo
+    description: CZML and GeoJSON renderings for the globe and the 2D view.
+  - name: operations
+    description: Liveness and readiness.
+
+paths:
+  /v1/plans:
+    get:
+      operationId: listPlans
+      tags: [plans]
+      summary: List committed plans
+      description: |
+        Cursor-paginated, newest bucket first. Only the CURRENT version of each
+        bucket is returned unless `include_superseded` is set — a client asking
+        "what is planned" almost never means "and everything it replaced".
+      parameters:
+        - $ref: '#/components/parameters/SatelliteId'
+        - name: bucket_start_after
+          in: query
+          description: Buckets starting at or after this instant.
+          schema: { type: string, format: date-time }
+        - name: bucket_start_before
+          in: query
+          schema: { type: string, format: date-time }
+        - name: include_superseded
+          in: query
+          description: |
+            Include plan versions that have been replaced. Off by default: the
+            history is retained (ADR-0012) but it is not what a client asking
+            for "the plan" wants, and returning it silently would double every
+            response during active re-planning.
+          schema: { type: boolean, default: false }
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: A page of plans.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlanPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /v1/plans/{satellite_id}/{bucket_start}:
+    parameters:
+      - $ref: '#/components/parameters/SatelliteIdPath'
+      - name: bucket_start
+        in: path
+        required: true
+        description: Start of the horizon bucket, RFC 3339.
+        schema: { type: string, format: date-time }
+    get:
+      operationId: getPlan
+      tags: [plans]
+      summary: Get one plan
+      description: |
+        Returns the current version of this bucket's plan, or a named version.
+
+        Addressed by bucket because `plan_version` only means something within
+        one — see the note in this document's description.
+      parameters:
+        - name: plan_version
+          in: query
+          description: |
+            A specific version. Omitted means the current one. Naming a version
+            is how the retained history from ADR-0012 is actually reachable; a
+            history nothing can address was not worth keeping.
+          schema: { type: integer, minimum: 1 }
+      responses:
+        '200':
+          description: The plan.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Plan'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /v1/acquisitions:
+    get:
+      operationId: listAcquisitions
+      tags: [acquisitions]
+      summary: List scheduled acquisitions
+      description: |
+        By time range, because an acquisition belongs to exactly one plan and
+        needs no version arithmetic to interpret. This is the read behind the
+        per-satellite timeline in M4-02.
+      parameters:
+        - $ref: '#/components/parameters/SatelliteId'
+        - name: window_start
+          in: query
+          required: true
+          schema: { type: string, format: date-time }
+        - name: window_end
+          in: query
+          required: true
+          schema: { type: string, format: date-time }
+        - name: request_id
+          in: query
+          schema: { $ref: '#/components/schemas/Uuid' }
+        - name: status
+          in: query
+          description: |
+            Repeatable. Defaults to the live set — ACTIVE and EXECUTED —
+            because a timeline showing superseded acquisitions alongside live
+            ones is a timeline nobody can read.
+          schema:
+            type: array
+            items:
+              $ref: '#/components/schemas/AcquisitionStatus'
+          style: form
+          explode: true
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: A page of acquisitions, earliest first.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AcquisitionPage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /v1/requests/{request_id}:
+    parameters:
+      - $ref: '#/components/parameters/RequestId'
+    get:
+      operationId: getRequestView
+      tags: [requests]
+      summary: Request status, as the read model sees it
+      description: |
+        The projection, not the write model. `tasking-api` owns the request's
+        authoritative state; this answers the different question of what the
+        rest of the system currently believes, and says how stale that belief
+        is.
+
+        When a request lost a round, `unfulfilment` explains which constraint
+        bound. That is the data behind the "why was my request rejected?" panel
+        in M4-04, and it is structured rather than a message string because a
+        string cannot be aggregated, charted, or acted on.
+      responses:
+        '200':
+          description: The request view.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RequestView'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /v1/requests/{request_id}/opportunities:
+    parameters:
+      - $ref: '#/components/parameters/RequestId'
+    get:
+      operationId: listRequestOpportunities
+      tags: [opportunities]
+      summary: Candidates this request could have won
+      description: |
+        Every opportunity feasibility found, whether or not it was allocated.
+        The losing candidates are what M4-05 renders as ghosts on the timeline —
+        showing only the winner explains nothing about why it won.
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+        - $ref: '#/components/parameters/Limit'
+      responses:
+        '200':
+          description: A page of opportunities.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OpportunityPage'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /v1/geo/plans/{satellite_id}/{bucket_start}/czml:
+    parameters:
+      - $ref: '#/components/parameters/SatelliteIdPath'
+      - name: bucket_start
+        in: path
+        required: true
+        schema: { type: string, format: date-time }
+    get:
+      operationId: getPlanCZML
+      tags: [geo]
+      summary: CZML rendering of one plan
+      description: |
+        A CZML document Cesium can load directly: the satellite's path over the
+        bucket, and a footprint polygon per acquisition.
+
+        **CZML is not specified here beyond its media type, deliberately.** It
+        is a Cesium document format with its own structure outside JSON Schema,
+        and a partial schema would be a contract that looks binding and is not.
+        The shape we actually emit is pinned by golden-file tests in M1-15,
+        which is a stronger guarantee than an incomplete declaration.
+      parameters:
+        - name: plan_version
+          in: query
+          schema: { type: integer, minimum: 1 }
+      responses:
+        '200':
+          description: A CZML document.
+          content:
+            application/json:
+              schema:
+                type: array
+                description: |
+                  A CZML packet stream. The first packet is the document packet;
+                  see https://github.com/AnalyticalGraphicsInc/czml-writer/wiki/CZML-Structure
+                items:
+                  type: object
+                  additionalProperties: true
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /v1/geo/footprints:
+    get:
+      operationId: getFootprints
+      tags: [geo]
+      summary: GeoJSON footprints over a window
+      description: |
+        A FeatureCollection of acquisition footprints, for the deck.gl coverage
+        view in M4-01.
+
+        Geometry follows RFC 7946 and is not re-specified here. Coordinates are
+        WGS84, longitude first — the same ordering as everywhere else in this
+        system, and the one a swap silently relocates to another hemisphere.
+      parameters:
+        - $ref: '#/components/parameters/SatelliteId'
+        - name: window_start
+          in: query
+          required: true
+          schema: { type: string, format: date-time }
+        - name: window_end
+          in: query
+          required: true
+          schema: { type: string, format: date-time }
+      responses:
+        '200':
+          description: A GeoJSON FeatureCollection.
+          content:
+            application/geo+json:
+              schema:
+                $ref: '#/components/schemas/FeatureCollection'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /healthz:
+    get:
+      operationId: getLiveness
+      tags: [operations]
+      summary: Liveness probe
+      description: Process is up. Checks nothing external — a liveness probe that fails on a dependency outage causes a restart loop that makes the outage worse.
+      responses:
+        '200':
+          description: Alive.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatus'
+
+  /readyz:
+    get:
+      operationId: getReadiness
+      tags: [operations]
+      summary: Readiness probe
+      description: |
+        Checks Postgres, because a read model that cannot be read is not ready.
+
+        Deliberately does **not** fail on projection lag. A gateway that is
+        behind is still serving correct, stale data with `as_of` attached, and
+        taking it out of rotation would replace stale answers with no answers.
+        Lag is a metric to alert on, not a readiness condition.
+      responses:
+        '200':
+          description: Ready.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatus'
+        '503':
+          description: Not ready.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthStatus'
+
+components:
+  parameters:
+    SatelliteId:
+      name: satellite_id
+      in: query
+      schema:
+        $ref: '#/components/schemas/SatelliteId'
+
+    SatelliteIdPath:
+      name: satellite_id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/SatelliteId'
+
+    RequestId:
+      name: request_id
+      in: path
+      required: true
+      schema:
+        $ref: '#/components/schemas/Uuid'
+
+    Cursor:
+      name: cursor
+      in: query
+      description: |
+        Opaque cursor from a previous response's `next_cursor`. Not a page
+        number and not parseable. Offset pagination is not offered: these lists
+        grow at the head under active planning, so offsets shift under the
+        reader and produce duplicates and gaps.
+      schema: { type: string, maxLength: 512 }
+
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+
+  responses:
+    BadRequest:
+      description: Malformed syntax — unparseable parameter, inverted window, bad cursor.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+
+    NotFound:
+      description: No such plan, request, or bucket.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+
+    ServiceUnavailable:
+      description: |
+        The read model cannot be reached. Distinct from an empty result: "there
+        is no plan" and "I cannot tell you whether there is a plan" are
+        different answers and a client must not conflate them.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+
+  schemas:
+    Uuid:
+      type: string
+      format: uuid
+
+    SatelliteId:
+      type: string
+      pattern: '^[A-Z0-9][A-Z0-9_-]{0,31}$'
+      minLength: 1
+      maxLength: 32
+
+    ImagingMode:
+      type: string
+      enum: [SPOTLIGHT, STRIPMAP, SCAN]
+
+    AcquisitionStatus:
+      type: string
+      enum: [ACTIVE, SUPERSEDED, EXECUTED]
+      description: |
+        Mirrors the status column the non-overlap constraint is predicated on.
+        SUPERSEDED rows are retained history (ADR-0012) and are excluded from
+        the live set.
+
+    TimeWindow:
+      type: object
+      required: [start, end]
+      properties:
+        start: { type: string, format: date-time }
+        end: { type: string, format: date-time }
+
+    Staleness:
+      type: object
+      required: [as_of, lag_seconds]
+      description: |
+        How current this answer is. Present on every projection response,
+        because a read model that cannot say how far behind it is forces the UI
+        to guess and the UI guesses optimistically.
+      properties:
+        as_of:
+          type: string
+          format: date-time
+          description: The occurred_at of the last event folded into this projection.
+        lag_seconds:
+          type: number
+          minimum: 0
+          description: Seconds between `as_of` and now, at the moment of the read.
+
+    Acquisition:
+      type: object
+      required:
+        [acquisition_id, request_id, satellite_id, mode, window, status, footprint]
+      properties:
+        acquisition_id: { $ref: '#/components/schemas/Uuid' }
+        request_id: { $ref: '#/components/schemas/Uuid' }
+        opportunity_id: { $ref: '#/components/schemas/Uuid' }
+        customer_id: { type: string }
+        satellite_id: { $ref: '#/components/schemas/SatelliteId' }
+        mode: { $ref: '#/components/schemas/ImagingMode' }
+        window: { $ref: '#/components/schemas/TimeWindow' }
+        status: { $ref: '#/components/schemas/AcquisitionStatus' }
+        footprint: { $ref: '#/components/schemas/Polygon' }
+        slew_time_from_previous_s:
+          type: number
+          minimum: 0
+          description: |
+            Attitude manoeuvre plus settling after the preceding acquisition.
+            Carried so the timeline can render the slew as an occupied block
+            rather than as apparent idle time — making the sequence-dependent
+            setup cost visible is the difference between a Gantt chart and an
+            explanation.
+        gap_from_previous_s: { type: number, minimum: 0 }
+        awarded_value_credits: { type: integer, minimum: 0 }
+
+    Plan:
+      type: object
+      required:
+        [plan_id, satellite_id, bucket, plan_version, policy, committed_at, acquisitions, staleness]
+      properties:
+        plan_id: { $ref: '#/components/schemas/Uuid' }
+        satellite_id: { $ref: '#/components/schemas/SatelliteId' }
+        bucket: { $ref: '#/components/schemas/TimeWindow' }
+        plan_version: { type: integer, minimum: 1 }
+        supersedes_plan_id: { $ref: '#/components/schemas/Uuid' }
+        superseded_by_plan_id:
+          $ref: '#/components/schemas/Uuid'
+        policy:
+          type: string
+          description: Which allocation policy produced this plan. Named so a benchmark result can be tied to a plan a reviewer can look at.
+        committed_at: { type: string, format: date-time }
+        acquisitions:
+          type: array
+          items:
+            $ref: '#/components/schemas/Acquisition'
+        metrics:
+          type: object
+          additionalProperties: true
+          description: Plan-level metrics as committed on planning.plan.committed.v1.
+        staleness: { $ref: '#/components/schemas/Staleness' }
+
+    PlanPage:
+      type: object
+      required: [items, staleness]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Plan'
+        next_cursor:
+          type: string
+          description: Absent on the last page.
+        staleness: { $ref: '#/components/schemas/Staleness' }
+
+    AcquisitionPage:
+      type: object
+      required: [items, staleness]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Acquisition'
+        next_cursor: { type: string }
+        staleness: { $ref: '#/components/schemas/Staleness' }
+
+    Opportunity:
+      type: object
+      required:
+        [opportunity_id, satellite_id, mode, access_window, quality_score, footprint]
+      properties:
+        opportunity_id: { $ref: '#/components/schemas/Uuid' }
+        satellite_id: { $ref: '#/components/schemas/SatelliteId' }
+        mode: { $ref: '#/components/schemas/ImagingMode' }
+        access_window: { $ref: '#/components/schemas/TimeWindow' }
+        acquisition_duration_s: { type: number, minimum: 0 }
+        orbit_number: { type: integer, minimum: 0 }
+        quality_score:
+          type: number
+          minimum: 0
+          maximum: 1
+          description: |
+            Geometric quality only. NOT value — value comes from the bid and the
+            tier, and conflating them would corrupt the allocation mechanism.
+        footprint: { $ref: '#/components/schemas/Polygon' }
+        won:
+          type: boolean
+          description: Whether this candidate became an acquisition.
+
+    OpportunityPage:
+      type: object
+      required: [items, staleness]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Opportunity'
+        next_cursor: { type: string }
+        staleness: { $ref: '#/components/schemas/Staleness' }
+
+    RequestView:
+      type: object
+      required: [request_id, state, staleness]
+      properties:
+        request_id: { $ref: '#/components/schemas/Uuid' }
+        customer_id: { type: string }
+        target_name: { type: string }
+        state:
+          type: string
+          enum:
+            [RECEIVED, AWAITING_PLANNING, PLANNED, ACQUIRED, INFEASIBLE, REJECTED, EXPIRED, CANCELLED]
+        window: { $ref: '#/components/schemas/TimeWindow' }
+        opportunity_count: { type: integer, minimum: 0 }
+        acquisition: { $ref: '#/components/schemas/Acquisition' }
+        unfulfilment: { $ref: '#/components/schemas/Unfulfilment' }
+        staleness: { $ref: '#/components/schemas/Staleness' }
+
+    Unfulfilment:
+      type: object
+      required: [reason_code]
+      description: |
+        Which constraint bound, as structured data rather than a message.
+        Strings cannot be aggregated, charted, or acted on, and "requests
+        unfulfilled by reason" is a domain metric.
+      properties:
+        reason_code:
+          type: string
+          enum:
+            - LOST_TO_HIGHER_VALUE
+            - BLOCKED_BY_SLEW_CONSTRAINT
+            - DUTY_CYCLE_EXHAUSTED
+            - DEADLINE_PASSED
+            - NO_OPPORTUNITY_IN_BUCKET
+            - SUPERSEDED
+            - CANCELLED_BY_CUSTOMER
+        shortfall_credits:
+          type: integer
+          description: How much more the bid needed to be. Present for LOST_TO_HIGHER_VALUE, and the reason the shortfall is a number rather than prose — a bid suggestion is only possible if it is.
+        required_slew_s: { type: number, minimum: 0 }
+        available_gap_s: { type: number, minimum: 0 }
+        superseded_by_plan_id: { $ref: '#/components/schemas/Uuid' }
+
+    Position:
+      type: array
+      minItems: 2
+      maxItems: 2
+      items:
+        type: number
+      description: |
+        [longitude, latitude], WGS84. Longitude FIRST, per RFC 7946. Note that
+        3.0.3 cannot express positional item types, so this constrains only the
+        length — the ordering is enforced at the service boundary, which is the
+        same limitation recorded in contracts/README.md for the event schemas.
+
+    Polygon:
+      type: object
+      required: [type, coordinates]
+      properties:
+        type:
+          type: string
+          enum: [Polygon]
+        coordinates:
+          type: array
+          items:
+            type: array
+            items:
+              $ref: '#/components/schemas/Position'
+
+    Feature:
+      type: object
+      required: [type, geometry, properties]
+      properties:
+        type:
+          type: string
+          enum: [Feature]
+        geometry: { $ref: '#/components/schemas/Polygon' }
+        properties:
+          type: object
+          additionalProperties: true
+
+    FeatureCollection:
+      type: object
+      required: [type, features]
+      description: RFC 7946 FeatureCollection. Geometry is not re-specified here.
+      properties:
+        type:
+          type: string
+          enum: [FeatureCollection]
+        features:
+          type: array
+          items:
+            $ref: '#/components/schemas/Feature'
+
+    HealthStatus:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok, degraded, unavailable]
+        checks:
+          type: object
+          additionalProperties:
+            type: object
+            properties:
+              status:
+                type: string
+                enum: [ok, failed]
+              detail: { type: string }
+              latency_ms: { type: number }
+        version: { type: string }
+
+    Problem:
+      type: object
+      required: [type, title, status]
+      description: |
+        RFC 9457 Problem Details, the same shape tasking-api uses. Inventing a
+        second error envelope for the second service is how APIs become
+        inconsistent.
+      properties:
+        type: { type: string, format: uri }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        instance: { type: string }
+        reason_code: { type: string }
+        correlation_id: { type: string, format: uuid }
