@@ -46,7 +46,7 @@ func (p *Projection) ProjectRequestReceived(ctx context.Context, e port.RequestR
 			updated_at     = now()
 		WHERE readmodel.request_views.last_event_at <= EXCLUDED.last_event_at
 	`, e.RequestID, e.CustomerID, e.TargetName, e.WindowStart, e.WindowEnd,
-		wktOrEmpty(e.TargetWKT), e.EventAt)
+		geometryOrNull(e.TargetGeoJSON), e.EventAt)
 	if err != nil {
 		return fmt.Errorf("projecting request %s: %w", e.RequestID, err)
 	}
@@ -62,11 +62,11 @@ func (p *Projection) ProjectOpportunities(ctx context.Context, e port.Opportunit
 					(opportunity_id, request_id, satellite_id, mode, access_window,
 					 acquisition_duration_s, orbit_number, quality_score, footprint)
 				VALUES ($1, $2, $3, $4, tstzrange($5, $6, '[)'), $7, $8, $9,
-				        ST_GeomFromText($10, 4326))
+				        ST_SetSRID(ST_GeomFromGeoJSON($10), 4326))
 				ON CONFLICT (opportunity_id) DO NOTHING
 			`, o.OpportunityID, e.RequestID, o.SatelliteID, o.Mode,
 				o.AccessStart, o.AccessEnd, o.AcquisitionDurationS, o.OrbitNumber,
-				o.QualityScore, o.FootprintWKT); err != nil {
+				o.QualityScore, geometryOrNull(o.FootprintGeoJSON)); err != nil {
 				return fmt.Errorf("projecting opportunity %s: %w", o.OpportunityID, err)
 			}
 		}
@@ -156,12 +156,12 @@ func (p *Projection) ProjectPlanCommitted(ctx context.Context, e port.PlanCommit
 					 satellite_id, mode, acq_window, status, footprint,
 					 slew_time_from_previous_s, gap_from_previous_s, awarded_value_credits)
 				VALUES ($1, $2, $3, $4, $5, $6, $7, tstzrange($8, $9, '[)'), $10,
-				        ST_GeomFromText($11, 4326), $12, $13, $14)
+				        ST_SetSRID(ST_GeomFromGeoJSON($11), 4326), $12, $13, $14)
 				ON CONFLICT (acquisition_id) DO UPDATE SET
 					status = EXCLUDED.status
 			`, a.AcquisitionID, e.PlanID, a.RequestID, a.OpportunityID, a.CustomerID,
 				e.SatelliteID, a.Mode, a.WindowStart, a.WindowEnd,
-				"ACTIVE", a.FootprintWKT,
+				"ACTIVE", geometryOrNull(a.FootprintGeoJSON),
 				a.SlewTimeFromPreviousS, a.GapFromPreviousS, a.AwardedValueCredits,
 			); err != nil {
 				return fmt.Errorf("projecting acquisition %s: %w", a.AcquisitionID, err)
@@ -287,9 +287,15 @@ func (p *Projection) Reset(ctx context.Context) error {
 	})
 }
 
-func wktOrEmpty(wkt string) any {
-	if wkt == "" {
-		return ""
+// geometryOrNull hands raw GeoJSON to PostGIS, or NULL when there is none.
+//
+// A nil slice must become a SQL NULL rather than an empty string: an empty
+// string is not valid GeoJSON and ST_GeomFromGeoJSON errors on it, which would
+// turn "this acquisition has no footprint" — a legitimate state — into a failed
+// fold and an endlessly redelivered message.
+func geometryOrNull(geojson []byte) any {
+	if len(geojson) == 0 {
+		return nil
 	}
-	return "SRID=4326;" + wkt
+	return string(geojson)
 }

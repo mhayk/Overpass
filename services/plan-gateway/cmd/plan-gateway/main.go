@@ -24,6 +24,7 @@ import (
 	"github.com/mhayk/overpass/services/plan-gateway/internal/adapter/logging"
 	"github.com/mhayk/overpass/services/plan-gateway/internal/adapter/natsmsg"
 	"github.com/mhayk/overpass/services/plan-gateway/internal/adapter/postgres"
+	"github.com/mhayk/overpass/services/plan-gateway/internal/adapter/wire"
 	"github.com/mhayk/overpass/services/plan-gateway/internal/app"
 )
 
@@ -103,7 +104,7 @@ func startProjector(
 		return nil, err
 	}
 
-	projector := app.NewProjector(source, postgres.NewProjection(pool),
+	projector := app.NewProjector(source, postgres.NewProjection(pool), wire.New(),
 		log.With(slog.String("component", "projector")))
 
 	wg.Add(1)
