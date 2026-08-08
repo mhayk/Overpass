@@ -222,6 +222,15 @@ func TestQueryParametersReachTheReadModel(t *testing.T) {
 	}
 }
 
+// realPolygon is a closed ring with actual positions.
+//
+// Not `{"type":"Polygon","coordinates":[]}`, which is what these fixtures
+// originally carried. It is valid JSON and valid-looking GeoJSON, and it made
+// every geo rendering emit ZERO acquisition entities — so a test asserting that
+// two different plans render differently compared one empty document against
+// another and could not fail. Found by exactly that test.
+var realPolygon = []byte(`{"type":"Polygon","coordinates":[[[4.01,51.9],[4.19,51.9],[4.19,52],[4.01,52],[4.01,51.9]]]}`)
+
 // populated is a plan with everything optional actually set, so the rendering
 // paths run against real values rather than zero ones.
 func populated() port.PlanView {
@@ -243,7 +252,7 @@ func populated() port.PlanView {
 			WindowStart:           lastEvent,
 			WindowEnd:             lastEvent.Add(8 * time.Second),
 			Status:                "ACTIVE",
-			FootprintGeoJSON:      []byte(`{"type":"Polygon","coordinates":[]}`),
+			FootprintGeoJSON:      realPolygon,
 			SlewTimeFromPreviousS: &slew, GapFromPreviousS: &gap,
 			AwardedValueCredits: 500,
 		}},
@@ -256,7 +265,7 @@ func populatedOpportunity() port.OpportunityView {
 		OpportunityID: "opp-1", SatelliteID: "SAT-1", Mode: "STRIPMAP",
 		AccessStart: lastEvent, AccessEnd: lastEvent.Add(10 * time.Minute),
 		AcquisitionDurationS: 8, OrbitNumber: &orbit, QualityScore: 0.87,
-		FootprintGeoJSON: []byte(`{"type":"Polygon","coordinates":[]}`),
+		FootprintGeoJSON: realPolygon,
 		Won:              true,
 	}
 }

@@ -42,6 +42,11 @@ func (s *Server) Routes() http.Handler {
 	r.Get("/v1/acquisitions", s.listAcquisitions)
 	r.Get("/v1/requests/{request_id}", s.getRequest)
 	r.Get("/v1/requests/{request_id}/opportunities", s.listOpportunities)
+
+	// The geo renderings, per ADR-0009: CZML for Cesium, GeoJSON for deck.gl,
+	// both from the same read model so the two views cannot disagree.
+	r.Get("/v1/geo/plans/{satellite_id}/{bucket_start}/czml", s.planCZML)
+	r.Get("/v1/geo/footprints", s.footprintsGeoJSON)
 	return r
 }
 

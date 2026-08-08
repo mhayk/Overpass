@@ -49,8 +49,15 @@ func pool(t *testing.T) *pgxpool.Pool {
 // GeoJSON, because that is what the contracts publish and what the projection
 // now hands straight to ST_GeomFromGeoJSON. Longitude first.
 var (
-	pointGeoJSON   = []byte(`{"type":"Point","coordinates":[4.4,51.9]}`)
-	polygonGeoJSON = []byte(`{"type":"Polygon","coordinates":[[[4,51],[4,52],[5,52],[5,51],[4,51]]]}`)
+	pointGeoJSON = []byte(`{"type":"Point","coordinates":[4.412345678,51.987654321]}`)
+	// Nine decimal places, which is what a propagator actually produces and what
+	// PostGIS stores. The fixture used whole numbers first, and that made the
+	// coordinate-precision test pass with the precision argument REMOVED —
+	// there were no decimals to truncate, so it asserted nothing.
+	polygonGeoJSON = []byte(`{"type":"Polygon","coordinates":` +
+		`[[[4.123456789,51.987654321],[4.223456789,51.987654321],` +
+		`[4.223456789,52.087654321],[4.123456789,52.087654321],` +
+		`[4.123456789,51.987654321]]]}`)
 )
 
 var (

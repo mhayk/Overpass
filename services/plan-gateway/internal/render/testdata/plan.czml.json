@@ -1,0 +1,125 @@
+[
+  {
+    "id": "document",
+    "name": "Overpass plan CAPELLA-14 v2",
+    "version": "1.0",
+    "clock": {
+      "interval": "2026-08-07T09:00:00Z/2026-08-07T12:00:00Z",
+      "currentTime": "2026-08-07T09:00:00Z",
+      "multiplier": 60,
+      "range": "LOOP_STOP",
+      "step": "SYSTEM_CLOCK_MULTIPLIER"
+    },
+    "properties": {
+      "plan_id": "33333333-4444-4555-8666-777777777777",
+      "satellite_id": "CAPELLA-14",
+      "plan_version": 2,
+      "superseded": false,
+      "policy": "GREEDY_BY_BID",
+      "as_of": "2026-08-07T09:05:00Z",
+      "lag_seconds": 300
+    }
+  },
+  {
+    "id": "acquisition/66666666-7777-4888-8999-000000000000",
+    "name": "CAPELLA-14 STRIPMAP",
+    "description": "request cbbbbbbb-cccc-4ddd-8eee-ffffffffffff, ACTIVE, 12000 credits",
+    "availability": "2026-08-07T10:14:00Z/2026-08-07T10:14:18Z",
+    "polygon": {
+      "positions": {
+        "cartographicDegrees": [
+          4.01,
+          51.9,
+          0,
+          4.19,
+          51.9,
+          0,
+          4.19,
+          52,
+          0,
+          4.01,
+          52,
+          0,
+          4.01,
+          51.9,
+          0
+        ]
+      },
+      "material": {
+        "solidColor": {
+          "color": {
+            "rgba": [
+              64,
+              196,
+              255,
+              100
+            ]
+          }
+        }
+      },
+      "outline": true,
+      "outlineWidth": 2,
+      "outlineColor": {
+        "rgba": [
+          255,
+          255,
+          255,
+          160
+        ]
+      },
+      "heightReference": "CLAMP_TO_GROUND",
+      "arcType": "GEODESIC"
+    }
+  },
+  {
+    "id": "acquisition/76666666-7777-4888-8999-000000000000",
+    "name": "CAPELLA-14 SCAN",
+    "description": "request dbbbbbbb-cccc-4ddd-8eee-ffffffffffff, SUPERSEDED, 4000 credits",
+    "availability": "2026-08-07T11:02:00Z/2026-08-07T11:02:31Z",
+    "polygon": {
+      "positions": {
+        "cartographicDegrees": [
+          4.01,
+          51.9,
+          0,
+          4.19,
+          51.9,
+          0,
+          4.19,
+          52,
+          0,
+          4.01,
+          52,
+          0,
+          4.01,
+          51.9,
+          0
+        ]
+      },
+      "material": {
+        "solidColor": {
+          "color": {
+            "rgba": [
+              160,
+              160,
+              170,
+              45
+            ]
+          }
+        }
+      },
+      "outline": true,
+      "outlineWidth": 2,
+      "outlineColor": {
+        "rgba": [
+          255,
+          255,
+          255,
+          160
+        ]
+      },
+      "heightReference": "CLAMP_TO_GROUND",
+      "arcType": "GEODESIC"
+    }
+  }
+]
