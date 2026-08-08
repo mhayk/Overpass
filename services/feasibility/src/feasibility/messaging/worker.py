@@ -21,10 +21,8 @@ most easily lost in a refactor: **ack strictly after commit, never before.**
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import json
 import logging
-import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -34,13 +32,14 @@ from nats.aio.client import Client as NatsClient
 from nats.js.errors import NotFoundError
 from opentelemetry.trace import Status, StatusCode
 
+from feasibility.failures import build_refusal
 from feasibility.messaging.idempotency import (
     Delivery,
     NonRetryableError,
     Outcome,
     process_once,
 )
-from feasibility.messaging.outbox import OutboxMessage, enqueue
+from feasibility.messaging.outbox import enqueue
 from feasibility.telemetry import consumer_span
 
 if TYPE_CHECKING:
@@ -52,9 +51,6 @@ log = logging.getLogger(__name__)
 
 CONSUMER = "feasibility-worker"
 STREAM = "TASKING"
-FAILURE_SUBJECT = "feasibility.failed.v1"
-FAILURE_EVENT_TYPE = "feasibility.failed.v1"
-SCHEMA_VERSION = "1.0.0"
 
 # Redelivery backoff for a transient failure. Short enough that a blip does not
 # stall the request, long enough that a database that is down does not get five
@@ -110,33 +106,44 @@ def _publish_refusal(
     back. A refusal published twice is a second `feasibility.failed.v1` for a
     request that only failed once, and the state machine downstream would see a
     transition it cannot explain.
+
+    The payload is built by `failures.build_refusal`, which is pure and which
+    records what it emits for `contracts-validate`. It used to be built inline
+    here, as six bare fields with no envelope — invalid against its own schema
+    and undecodable by every consumer, for as long as nothing had shown the
+    schema what this producer really sends. See #132.
     """
-    request_id = None
-    with contextlib.suppress(json.JSONDecodeError, AttributeError):
-        request_id = json.loads(delivery.payload).get("data", {}).get("request_id")
 
     def handler(cursor: psycopg.Cursor[Any]) -> None:
         enqueue(
             cursor,
-            OutboxMessage(
-                event_id=str(uuid.uuid4()),
-                event_type=FAILURE_EVENT_TYPE,
-                schema_version=SCHEMA_VERSION,
-                subject=FAILURE_SUBJECT,
-                payload={
-                    "request_id": request_id,
-                    "reason_code": failure.reason_code,
-                    "retryable": False,
-                    "reason_detail": failure.detail,
-                    "attempt": delivery.delivered_count,
-                    "failed_at": datetime.now(UTC).isoformat(),
-                },
-                occurred_at=datetime.now(UTC),
-                headers=delivery.headers,
+            build_refusal(
+                delivery,
+                failure.reason_code,
+                # Terminal by construction: this path is reached only from a
+                # NonRetryableError, which is the exception that means "correct
+                # negative answer" rather than "something broke".
+                retryable=False,
+                detail=failure.detail,
+                now=datetime.now(UTC),
             ),
         )
 
-    process_once(connection, f"{CONSUMER}:refusal", delivery, handler)
+    try:
+        process_once(connection, f"{CONSUMER}:refusal", delivery, handler)
+    except ValueError:
+        # A refusal that cannot be attributed to a request. The causing message
+        # had no readable envelope, so there is no request_id to name and no
+        # valid event to publish — and publishing an invalid one would be worse
+        # than publishing none, because the consumer would reject it forever.
+        #
+        # Logged and dropped rather than raised: the caller is about to ACK a
+        # message it has already decided is terminal, and turning this into a
+        # retryable failure would redeliver a message nothing can ever handle.
+        log.exception(
+            "cannot publish a refusal for %s; the causing message is unattributable",
+            delivery.event_id,
+        )
 
 
 def handle_one(
