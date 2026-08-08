@@ -280,9 +280,13 @@ paths:
         - name: plan_version
           in: query
           schema: { type: integer, minimum: 1 }
+        - $ref: '#/components/parameters/IfNoneMatch'
       responses:
         '200':
           description: A CZML document.
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
           content:
             application/json:
               schema:
@@ -293,6 +297,8 @@ paths:
                 items:
                   type: object
                   additionalProperties: true
+        '304':
+          $ref: '#/components/responses/NotModified'
         '404':
           $ref: '#/components/responses/NotFound'
         '503':
@@ -320,13 +326,27 @@ paths:
           in: query
           required: true
           schema: { type: string, format: date-time }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/IfNoneMatch'
       responses:
         '200':
-          description: A GeoJSON FeatureCollection.
+          description: |
+            A GeoJSON FeatureCollection.
+
+            Bounded by `limit`, and the collection reports whether it was
+            truncated. An unbounded geometry endpoint is a denial-of-service
+            waiting for a client to ask for a year; silently truncating instead
+            would let a viewport show a coverage gap that does not exist, which
+            is worse than an error.
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
           content:
             application/geo+json:
               schema:
                 $ref: '#/components/schemas/FeatureCollection'
+        '304':
+          $ref: '#/components/responses/NotModified'
         '400':
           $ref: '#/components/responses/BadRequest'
         '503':
@@ -409,6 +429,21 @@ components:
       in: query
       schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
 
+    IfNoneMatch:
+      name: If-None-Match
+      in: header
+      description: |
+        The `ETag` of a previously fetched rendering. If it still matches, the
+        server answers `304` with no body.
+
+        This is the payload budget's main lever, and it exists because of how
+        the globe is actually used: a client polls the same horizon every few
+        seconds and the answer changes only when a plan is committed. Re-sending
+        an unchanged CZML document each time is the difference between a live
+        view and a view that is merely expensive.
+      required: false
+      schema: { type: string, maxLength: 256 }
+
   responses:
     BadRequest:
       description: Malformed syntax — unparseable parameter, inverted window, bad cursor.
@@ -433,6 +468,33 @@ components:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/Problem'
+
+    NotModified:
+      description: |
+        The rendering is byte-identical to the one the client already has.
+
+        No body, deliberately: a 304 carrying a payload defeats the entire
+        point. The `ETag` is repeated so a client that discarded it can recover
+        without a second round trip.
+      headers:
+        ETag:
+          $ref: '#/components/headers/ETag'
+
+  headers:
+    ETag:
+      description: |
+        A strong validator over the rendered bytes.
+
+        Strong, not weak: these documents are generated deterministically from
+        the read model, so two responses with the same tag really are identical
+        octet for octet. A weak tag would allow "semantically equivalent" and
+        there is no case here where that buys anything.
+
+        The tag covers the RENDERING, not the read model as a whole. Two
+        different query windows over the same data are different documents and
+        must not share a tag.
+      required: true
+      schema: { type: string, maxLength: 256 }
 
   schemas:
     Uuid:
@@ -673,8 +735,14 @@ components:
 
     FeatureCollection:
       type: object
-      required: [type, features]
-      description: RFC 7946 FeatureCollection. Geometry is not re-specified here.
+      required: [type, features, truncated]
+      description: |
+        RFC 7946 FeatureCollection. Geometry is not re-specified here.
+
+        `truncated` and `staleness` are foreign members, which RFC 7946 §6.1
+        permits and every GeoJSON reader ignores. Putting them on the collection
+        rather than in a wrapper object keeps the response loadable by deck.gl
+        and Cesium directly, with no unwrapping step in the client.
       properties:
         type:
           type: string
@@ -683,6 +751,17 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/Feature'
+        truncated:
+          type: boolean
+          description: |
+            Whether `limit` cut the result short.
+
+            Explicit, because the alternative is a coverage view that shows a
+            gap where there is really a limit — a viewport confidently drawing
+            emptiness over a fully-tasked region. A client that sees this set
+            must narrow its window rather than believe what it was sent.
+        staleness:
+          $ref: '#/components/schemas/Staleness'
 
     HealthStatus:
       type: object
