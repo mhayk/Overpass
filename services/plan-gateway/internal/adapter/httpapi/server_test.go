@@ -29,6 +29,7 @@ type fakeReads struct {
 	acquisitions  []port.AcquisitionView
 	request       port.RequestView
 	opportunities []port.OpportunityView
+	ephemeris     []port.EphemerisSample
 	err           error
 
 	lastPlanQuery port.PlanQuery
@@ -59,6 +60,15 @@ func (f *fakeReads) RequestOpportunities(
 	_ context.Context, _ string,
 ) ([]port.OpportunityView, port.Cursor, error) {
 	return f.opportunities, port.Cursor{LastEventAt: lastEvent}, f.err
+}
+
+// Ephemeris returns whatever the fixture holds, including nothing. Nothing is
+// the interesting case for the handler: a plan whose bucket the sweep has not
+// reached still has to render.
+func (f *fakeReads) Ephemeris(
+	_ context.Context, _ string, _, _ time.Time,
+) ([]port.EphemerisSample, error) {
+	return f.ephemeris, f.err
 }
 
 func serve(t *testing.T, reads port.Reads, health func() error) http.Handler {

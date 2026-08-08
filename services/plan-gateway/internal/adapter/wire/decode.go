@@ -89,6 +89,56 @@ func (Decoder) Opportunities(payload []byte) (port.OpportunitiesComputed, error)
 	return out, nil
 }
 
+// Ephemeris decodes feasibility.ephemeris.computed.v1.
+//
+// The one decode here that computes rather than copies. The event carries
+// `[offset_s, lon, lat, alt_m]` tuples against an epoch, because a full
+// timestamp per sample would outweigh the position it labels; everything
+// downstream works in absolute instants. Resolving them here means it happens
+// once, at the boundary, instead of the epoch being carried around by every
+// consumer of the projection.
+func (Decoder) Ephemeris(payload []byte) (port.EphemerisComputed, error) {
+	var e events.FeasibilityEphemerisComputed
+	if err := unmarshal(payload, &e, "feasibility.ephemeris.computed.v1"); err != nil {
+		return port.EphemerisComputed{}, err
+	}
+
+	epoch := time.Time(e.Data.Epoch).UTC()
+	out := port.EphemerisComputed{
+		EventAt:     time.Time(e.OccurredAt).UTC(),
+		SatelliteID: string(e.Data.SatelliteId),
+		TleEpoch:    time.Time(e.Data.TleReference.TleEpoch).UTC(),
+		Samples:     make([]port.EphemerisSample, 0, len(e.Data.Samples)),
+	}
+
+	for i, sample := range e.Data.Samples {
+		// The generated type is [][]float64. `prefixItems` — which is what
+		// states that a sample is exactly four numbers, longitude first — is
+		// dropped by both code generators, so the length is checked here or
+		// nowhere. Indexing a short sample would panic; indexing a long one
+		// would silently ignore the tail.
+		if len(sample) != ephemerisSampleArity {
+			return port.EphemerisComputed{}, fmt.Errorf(
+				"%w: sample %d has %d values, want [offset_s, lon, lat, alt_m]",
+				ErrMalformed, i, len(sample))
+		}
+		out.Samples = append(out.Samples, port.EphemerisSample{
+			// Seconds as a float, so a fractional interval survives. Multiplied
+			// into a Duration rather than cast, because casting truncates and
+			// a half-second offset would collapse onto its neighbour.
+			At:           epoch.Add(time.Duration(sample[0] * float64(time.Second))),
+			LongitudeDeg: sample[1],
+			LatitudeDeg:  sample[2],
+			AltitudeM:    sample[3],
+		})
+	}
+	return out, nil
+}
+
+// A sample is [offset_s, longitude_deg, latitude_deg, altitude_m]. Four,
+// stated once, because the generated type cannot state it at all.
+const ephemerisSampleArity = 4
+
 // PlanCommitted decodes planning.plan.committed.v1.
 func (Decoder) PlanCommitted(payload []byte) (port.PlanCommitted, error) {
 	var e events.PlanCommitted

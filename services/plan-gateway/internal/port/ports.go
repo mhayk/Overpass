@@ -30,6 +30,7 @@ type Projection interface {
 	ProjectOpportunities(ctx context.Context, e OpportunitiesComputed) error
 	ProjectPlanCommitted(ctx context.Context, e PlanCommitted) error
 	ProjectUnfulfilled(ctx context.Context, e RequestUnfulfilled) error
+	ProjectEphemeris(ctx context.Context, e EphemerisComputed) error
 
 	// Cursor and Advance track how far each stream has been folded.
 	Cursor(ctx context.Context, stream string) (Cursor, error)
@@ -116,6 +117,31 @@ type Acquisition struct {
 	AwardedValueCredits   int64
 }
 
+// EphemerisComputed mirrors feasibility.ephemeris.computed.v1.
+//
+// One satellite over one bucket. The samples arrive as offsets from an epoch
+// because that is cheaper on the wire; they are resolved to absolute instants
+// here, at the boundary, so nothing downstream has to carry the epoch around to
+// know what a sample means.
+type EphemerisComputed struct {
+	EventAt     time.Time
+	SatelliteID string
+	// The element set the track was propagated from. Carried through to the
+	// projection, where a fresher one is what lets a newer track win over an
+	// older one for the same instants.
+	TleEpoch time.Time
+	Samples  []EphemerisSample
+}
+
+// EphemerisSample is one position, at one instant.
+type EphemerisSample struct {
+	At           time.Time
+	LongitudeDeg float64
+	LatitudeDeg  float64
+	// Height above the WGS84 ellipsoid, in metres. Not above terrain.
+	AltitudeM float64
+}
+
 // RequestUnfulfilled mirrors planning.request.unfulfilled.v1.
 type RequestUnfulfilled struct {
 	EventAt    time.Time
@@ -138,6 +164,7 @@ type Decoder interface {
 	Opportunities(payload []byte) (OpportunitiesComputed, error)
 	PlanCommitted(payload []byte) (PlanCommitted, error)
 	Unfulfilled(payload []byte) (RequestUnfulfilled, error)
+	Ephemeris(payload []byte) (EphemerisComputed, error)
 }
 
 // Message is one delivery from the broker, already unwrapped from transport.
@@ -171,6 +198,11 @@ type Reads interface {
 	Acquisitions(ctx context.Context, q AcquisitionQuery) ([]AcquisitionView, Cursor, error)
 	Request(ctx context.Context, requestID string) (RequestView, error)
 	RequestOpportunities(ctx context.Context, requestID string) ([]OpportunityView, Cursor, error)
+
+	// Ephemeris returns one satellite's samples over `[from, to)`, in time
+	// order. An empty result is not an error: the sweep may not have reached
+	// this horizon.
+	Ephemeris(ctx context.Context, satelliteID string, from, to time.Time) ([]EphemerisSample, error)
 }
 
 // PlanQuery filters a plan list.
@@ -205,6 +237,18 @@ type PlanView struct {
 	MetricsJSON      []byte
 	CommittedAt      time.Time
 	Acquisitions     []AcquisitionView
+
+	// The satellite's sampled position across this bucket, in time order.
+	//
+	// EMPTY IS A LEGITIMATE STATE and the renderer must treat it as one. The
+	// ephemeris sweep runs on its own timer and may not have reached a bucket
+	// yet, so a plan can exist before its track does. An absent orbit layer is
+	// the correct rendering of that; a path interpolated through the footprint
+	// centroids that ARE present would look like an orbit and be a fiction.
+	//
+	// Populated by Plan() and deliberately NOT by Plans(). A list of twenty
+	// buckets would carry twenty thousand samples to render a table.
+	Track []EphemerisSample
 }
 
 // AcquisitionView is a projected acquisition.

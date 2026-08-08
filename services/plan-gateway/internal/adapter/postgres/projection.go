@@ -275,6 +275,59 @@ func (p *Projection) ProjectPlanCommitted(ctx context.Context, e port.PlanCommit
 	})
 }
 
+// ProjectEphemeris materialises one satellite's sampled track.
+//
+// One statement for the whole bucket, via unnest. A thousand samples is a
+// thousand rows, and a thousand round trips to insert them would make the fold
+// slower than the propagation that produced them.
+//
+// The guard is on tle_epoch, not on last_event_at, and that is the one
+// interesting decision here. A satellite gets a new element set roughly daily,
+// and the next sweep republishes the same buckets from it — same satellite, the
+// same instants, slightly different positions. Newest ELEMENT SET wins, not
+// newest event: two events for one bucket are not a correction and a stale one,
+// they are two different answers whose quality is ordered by the TLE behind
+// them. Comparing epochs makes the fold converge on the same track whatever
+// order they arrive in.
+func (p *Projection) ProjectEphemeris(ctx context.Context, e port.EphemerisComputed) error {
+	if len(e.Samples) == 0 {
+		return nil
+	}
+
+	at := make([]time.Time, len(e.Samples))
+	longitudes := make([]float64, len(e.Samples))
+	latitudes := make([]float64, len(e.Samples))
+	altitudes := make([]float64, len(e.Samples))
+	for i, s := range e.Samples {
+		at[i] = s.At
+		longitudes[i] = s.LongitudeDeg
+		latitudes[i] = s.LatitudeDeg
+		altitudes[i] = s.AltitudeM
+	}
+
+	return pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
+		_, err := tx.Exec(ctx, `
+			INSERT INTO readmodel.ephemeris
+				(satellite_id, sample_at, longitude_deg, latitude_deg, altitude_m,
+				 tle_epoch, last_event_at)
+			SELECT $1, s.at, s.lon, s.lat, s.alt, $6, $7
+			FROM unnest($2::timestamptz[], $3::float8[], $4::float8[], $5::float8[])
+			     AS s(at, lon, lat, alt)
+			ON CONFLICT (satellite_id, sample_at) DO UPDATE SET
+				longitude_deg = EXCLUDED.longitude_deg,
+				latitude_deg  = EXCLUDED.latitude_deg,
+				altitude_m    = EXCLUDED.altitude_m,
+				tle_epoch     = EXCLUDED.tle_epoch,
+				last_event_at = GREATEST(readmodel.ephemeris.last_event_at, EXCLUDED.last_event_at)
+			WHERE readmodel.ephemeris.tle_epoch <= EXCLUDED.tle_epoch
+		`, e.SatelliteID, at, longitudes, latitudes, altitudes, e.TleEpoch, e.EventAt)
+		if err != nil {
+			return fmt.Errorf("projecting ephemeris for %s: %w", e.SatelliteID, err)
+		}
+		return nil
+	})
+}
+
 // ProjectUnfulfilled records why a request lost.
 func (p *Projection) ProjectUnfulfilled(ctx context.Context, e port.RequestUnfulfilled) error {
 	return pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
@@ -346,6 +399,7 @@ func (p *Projection) Advance(ctx context.Context, stream string, sequence uint64
 func (p *Projection) Reset(ctx context.Context) error {
 	return pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
 		for _, table := range []string{
+			"readmodel.ephemeris",
 			"readmodel.acquisition_views",
 			"readmodel.plan_views",
 			"readmodel.opportunity_views",

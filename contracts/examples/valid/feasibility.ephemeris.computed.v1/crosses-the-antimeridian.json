@@ -1,0 +1,30 @@
+{
+  "event_id": "2b3c4d5e-6f7a-5b8c-9d0e-1f2a3b4c5d6e",
+  "event_type": "feasibility.ephemeris.computed.v1",
+  "schema_version": "1.0.0",
+  "occurred_at": "2026-08-07T12:00:01.902Z",
+  "correlation_id": "c8d5f2e3-4a6b-4c7d-8e9f-1a2b3c4d5e6f",
+  "causation_id": null,
+  "producer": "feasibility-service",
+  "data": {
+    "satellite_id": "CAPELLA-14",
+    "computed_at": "2026-08-07T12:00:01.888Z",
+    "horizon": { "start": "2026-08-07T12:00:00Z", "end": "2026-08-07T15:00:00Z" },
+    "tle_reference": {
+      "satellite_id": "CAPELLA-14",
+      "norad_id": 59103,
+      "tle_epoch": "2026-08-05T18:12:44Z",
+      "tle_age_hours": 41.8,
+      "staleness": "AGING"
+    },
+    "epoch": "2026-08-07T12:00:00Z",
+    "sample_interval_s": 10,
+    "sample_count": 4,
+    "samples": [
+      [0, 179.914022, -14.220118, 512877.4],
+      [10, -179.792551, -13.554902, 512901.9],
+      [20, -179.499318, -12.889511, 512924.6],
+      [30, -179.206622, -12.223961, 512945.5]
+    ]
+  }
+}

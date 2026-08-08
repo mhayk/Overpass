@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -438,4 +440,151 @@ func getJSON(t *testing.T, url string) map[string]any {
 		t.Fatalf("GET %s returned %d: %v", url, resp.StatusCode, body)
 	}
 	return body
+}
+
+// getText fetches a body without assuming it is a JSON object.
+//
+// CZML is a JSON ARRAY of packets, so getJSON's map decode fails on it — and it
+// fails with "cannot unmarshal array into Go value of type map", which reads as
+// a broken endpoint rather than a test using the wrong helper.
+func getText(t *testing.T, url string) string {
+	t.Helper()
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		t.Fatalf("GET %s: %v", url, err)
+	}
+	defer resp.Body.Close() //nolint:errcheck // read-only
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("reading %s: %v", url, err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("GET %s returned %d: %s", url, resp.StatusCode, body)
+	}
+	return string(body)
+}
+
+// TestAnEphemerisTrackIsProjectedAndReachesTheGlobe is the only place the
+// ephemeris projection's SQL is executed at all.
+//
+// It is a bulk upsert through `unnest`, an ON CONFLICT guarded on tle_epoch,
+// and a half-open range scan — three things that compile whatever they mean.
+// CLAUDE.md's rule applies with full force here: reading is not verification.
+func TestAnEphemerisTrackIsProjectedAndReachesTheGlobe(t *testing.T) {
+	gw, _ := gateway(t)
+	f := newFixture(t)
+	at := time.Date(2026, 9, 1, 9, 0, 0, 0, time.UTC)
+	tleEpoch := at.Add(-11 * time.Hour)
+
+	// A plan, so there is something for the CZML endpoint to render the track
+	// onto. The two arrive on different streams and nothing orders them.
+	subject, payload := f.receivedEvent(t, at)
+	publish(t, subject, payload, at)
+	planSubject, planPayload := f.planEvent(t, at.Add(time.Minute), 1)
+	publish(t, planSubject, planPayload, at.Add(time.Minute))
+
+	// A thousand samples, which is what a three-hour bucket at ten seconds
+	// really is. A handful would not exercise the bulk path the fold takes.
+	const samples = 1080
+	ephSubject, ephPayload := f.ephemerisEvent(t, at.Add(2*time.Minute), samples, tleEpoch, 4.0)
+	publish(t, ephSubject, ephPayload, at.Add(2*time.Minute))
+
+	eventually(t, "the ephemeris to project", 60*time.Second, func() bool {
+		return rowCount(t,
+			`SELECT count(*) FROM readmodel.ephemeris WHERE satellite_id = $1`,
+			f.satelliteID) == samples
+	})
+	// And the plan, separately. They arrive on different streams through
+	// different consumers, so the ephemeris landing says nothing about the plan
+	// having landed — waiting only for the first produced a 404 from the CZML
+	// endpoint that read as a broken route rather than as a racing test.
+	eventually(t, "the plan to project", 60*time.Second, func() bool {
+		return rowCount(t,
+			`SELECT count(*) FROM readmodel.plan_views WHERE satellite_id = $1`,
+			f.satelliteID) == 1
+	})
+
+	// The read is half-open over the plan's bucket, so the last sample — at
+	// bucket start + 10790 s — is inside it and a sample at the boundary would
+	// not be. Asserting the count through the API rather than the table is what
+	// makes this a test of the whole path.
+	body := getText(t, gw.baseURL+"/v1/geo/plans/"+f.satelliteID+"/"+
+		f.bucketStart.Format(time.RFC3339)+"/czml")
+	if !strings.Contains(body, `"satellite/`+f.satelliteID+`"`) {
+		t.Fatalf("no satellite packet in the CZML document:\n%.500s", body)
+	}
+	if !strings.Contains(body, `"path"`) {
+		t.Fatalf("the CZML document carries no path:\n%.500s", body)
+	}
+	if !strings.Contains(body, `"interpolationAlgorithm":"LAGRANGE"`) {
+		t.Fatalf("the position is not a sampled one:\n%.500s", body)
+	}
+}
+
+// TestAFresherElementSetReplacesAnOlderTrack is the guard that makes the
+// ephemeris fold converge.
+//
+// A satellite gets a new TLE roughly daily and the sweep republishes the same
+// buckets from it: same satellite, same instants, different positions. Newest
+// ELEMENT SET wins, not newest event — the two events are not a correction and
+// a stale one, they are two answers ordered by the TLE behind them. The test
+// delivers them in the WRONG order on purpose, because arrival order is what
+// the guard exists to stop mattering.
+func TestAFresherElementSetReplacesAnOlderTrack(t *testing.T) {
+	gateway(t)
+	f := newFixture(t)
+	at := time.Date(2026, 9, 1, 9, 0, 0, 0, time.UTC)
+	const samples = 12
+
+	fresh := at.Add(-2 * time.Hour)
+	stale := at.Add(-40 * time.Hour)
+
+	// The FRESHER element set first, then the older one behind it.
+	freshSubject, freshPayload := f.ephemerisEvent(t, at, samples, fresh, 10.0)
+	publish(t, freshSubject, freshPayload, at)
+
+	eventually(t, "the first track to project", 60*time.Second, func() bool {
+		return rowCount(t,
+			`SELECT count(*) FROM readmodel.ephemeris WHERE satellite_id = $1`,
+			f.satelliteID) == samples
+	})
+
+	staleSubject, stalePayload := f.ephemerisEvent(t, at.Add(time.Minute), samples, stale, 20.0)
+	publish(t, staleSubject, stalePayload, at.Add(time.Minute))
+
+	// Settle, so the older event has every chance to overwrite before we assert
+	// that it did not.
+	time.Sleep(3 * time.Second)
+
+	var longitude float64
+	if err := env.pool.QueryRow(context.Background(),
+		`SELECT longitude_deg FROM readmodel.ephemeris
+		 WHERE satellite_id = $1 ORDER BY sample_at LIMIT 1`,
+		f.satelliteID).Scan(&longitude); err != nil {
+		t.Fatalf("reading the projected track: %v", err)
+	}
+	if longitude != 10.0 {
+		t.Fatalf("longitude = %v; the older element set overwrote the fresher one", longitude)
+	}
+
+	// And the other direction: a genuinely fresher element set must win, or the
+	// guard is simply "first writer wins" wearing a comment.
+	fresherSubject, fresherPayload := f.ephemerisEvent(t, at.Add(2*time.Minute), samples, at, 30.0)
+	publish(t, fresherSubject, fresherPayload, at.Add(2*time.Minute))
+
+	eventually(t, "the fresher track to replace the first", 60*time.Second, func() bool {
+		var lon float64
+		if err := env.pool.QueryRow(context.Background(),
+			`SELECT longitude_deg FROM readmodel.ephemeris
+			 WHERE satellite_id = $1 ORDER BY sample_at LIMIT 1`,
+			f.satelliteID).Scan(&lon); err != nil {
+			return false
+		}
+		return lon == 30.0
+	})
 }

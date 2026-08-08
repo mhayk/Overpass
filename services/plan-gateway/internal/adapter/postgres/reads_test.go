@@ -496,3 +496,143 @@ func TestBucketFiltersAreInclusiveAtBothEnds(t *testing.T) {
 		t.Fatalf("a bucket filtered to its own start returned %d plans, want 1", len(got))
 	}
 }
+
+// TestAPlanCarriesItsOrbitTrack is the join that makes the CZML path possible.
+//
+// Plan() has to fetch two unrelated things — the acquisitions the planner
+// committed and the positions feasibility propagated — and hand back one view.
+// They arrive on different streams and neither implies the other.
+func TestAPlanCarriesItsOrbitTrack(t *testing.T) {
+	p := pool(t)
+	reads, f := seeded(t, 1)
+	pr := postgres.NewProjection(p)
+
+	if err := pr.ProjectEphemeris(t.Context(),
+		f.ephemeris(epoch.Add(30*time.Second), freshTLE, 4.0)); err != nil {
+		t.Fatalf("ephemeris: %v", err)
+	}
+
+	plan, err := reads.Plan(t.Context(), f.satelliteID, bucket, nil)
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if len(plan.Track) != 6 {
+		t.Fatalf("Track has %d samples, want 6", len(plan.Track))
+	}
+	if !plan.Track[0].At.Equal(bucket) {
+		t.Errorf("first sample at %s, want the bucket start %s", plan.Track[0].At, bucket)
+	}
+	// In time order, not in insertion order. `unnest` does not promise one and
+	// a path drawn through shuffled samples is a scribble.
+	for i := 1; i < len(plan.Track); i++ {
+		if !plan.Track[i].At.After(plan.Track[i-1].At) {
+			t.Fatalf("sample %d is not after %d; the track is not in time order", i, i-1)
+		}
+	}
+	if plan.Track[0].LongitudeDeg != 4.0 {
+		t.Errorf("LongitudeDeg = %v, want the projected longitude", plan.Track[0].LongitudeDeg)
+	}
+}
+
+// TestAPlanWithNoEphemerisHasAnEmptyTrackAndNoError is the state the sweep
+// makes ordinary: it runs on its own timer, so a plan committed for a bucket it
+// has not reached is normal. Reporting that as an error would make the whole
+// CZML endpoint fail for a missing optional layer.
+func TestAPlanWithNoEphemerisHasAnEmptyTrackAndNoError(t *testing.T) {
+	reads, f := seeded(t, 1)
+
+	plan, err := reads.Plan(t.Context(), f.satelliteID, bucket, nil)
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if len(plan.Track) != 0 {
+		t.Errorf("Track has %d samples with nothing projected", len(plan.Track))
+	}
+}
+
+// TestTheEphemerisReadIsHalfOpen. Plan buckets abut, so a closed upper bound
+// would put the first sample of the next bucket on the end of this one — a
+// duplicated position at the boundary, drawn as a kink in the path.
+func TestTheEphemerisReadIsHalfOpen(t *testing.T) {
+	p := pool(t)
+	reads, f := seeded(t, 1)
+	pr := postgres.NewProjection(p)
+
+	if err := pr.ProjectEphemeris(t.Context(),
+		f.ephemeris(epoch.Add(30*time.Second), freshTLE, 4.0)); err != nil {
+		t.Fatalf("ephemeris: %v", err)
+	}
+
+	// Samples sit at bucket+0s, +10s, ... +50s. A window ending exactly on the
+	// third one must return two.
+	got, err := reads.Ephemeris(t.Context(), f.satelliteID, bucket, bucket.Add(20*time.Second))
+	if err != nil {
+		t.Fatalf("ephemeris: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d samples over [start, start+20s), want 2 — the upper bound is inclusive", len(got))
+	}
+	// And inclusive at the lower bound, or the first position of every bucket
+	// is missing and the path starts late.
+	if !got[0].At.Equal(bucket) {
+		t.Errorf("first sample at %s, want the lower bound %s", got[0].At, bucket)
+	}
+}
+
+// TestAListOfPlansDoesNotDragEveryTrackWithIt. One bucket is about a thousand
+// samples; a twenty-bucket list would carry twenty thousand rows to render a
+// table nobody draws an orbit on.
+func TestAListOfPlansDoesNotDragEveryTrackWithIt(t *testing.T) {
+	p := pool(t)
+	reads, f := seeded(t, 1)
+	pr := postgres.NewProjection(p)
+
+	if err := pr.ProjectEphemeris(t.Context(),
+		f.ephemeris(epoch.Add(30*time.Second), freshTLE, 4.0)); err != nil {
+		t.Fatalf("ephemeris: %v", err)
+	}
+
+	plans, _, err := reads.Plans(t.Context(), port.PlanQuery{SatelliteID: f.satelliteID})
+	if err != nil {
+		t.Fatalf("plans: %v", err)
+	}
+	if len(plans) == 0 {
+		t.Fatal("no plans; the fixture did not seed")
+	}
+	for _, plan := range plans {
+		if len(plan.Track) != 0 {
+			t.Errorf("the plan list carried %d ephemeris samples", len(plan.Track))
+		}
+	}
+}
+
+// TestResetClearsTheEphemeris. A rebuild that leaves one table behind produces
+// a read model that is a mix of two replays, which is worse than either.
+func TestResetClearsTheEphemeris(t *testing.T) {
+	p := pool(t)
+	pr := postgres.NewProjection(p)
+	reads, f := seeded(t, 1)
+
+	if err := pr.ProjectEphemeris(t.Context(),
+		f.ephemeris(epoch.Add(30*time.Second), freshTLE, 4.0)); err != nil {
+		t.Fatalf("ephemeris: %v", err)
+	}
+	before, err := reads.Ephemeris(t.Context(), f.satelliteID, bucket, bucket.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("ephemeris: %v", err)
+	}
+	if len(before) == 0 {
+		t.Fatal("nothing was projected, so clearing it proves nothing")
+	}
+
+	if resetErr := pr.Reset(t.Context()); resetErr != nil {
+		t.Fatalf("reset: %v", resetErr)
+	}
+	after, err := reads.Ephemeris(t.Context(), f.satelliteID, bucket, bucket.Add(time.Hour))
+	if err != nil {
+		t.Fatalf("ephemeris after reset: %v", err)
+	}
+	if len(after) != 0 {
+		t.Errorf("%d samples survived a reset", len(after))
+	}
+}

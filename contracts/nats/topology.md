@@ -25,11 +25,21 @@ silently breaks the moment you replay from anywhere else.
 | `tasking.request.received.v1` | tasking-api | feasibility-service, plan-gateway |
 | `tasking.request.rejected.v1` | tasking-api | plan-gateway |
 | `feasibility.opportunities.computed.v1` | feasibility-service | planner-service, plan-gateway |
+| `feasibility.ephemeris.computed.v1` | feasibility-service | plan-gateway |
 | `feasibility.failed.v1` | feasibility-service | tasking-api (state machine), plan-gateway |
 | `planning.round.triggered.v1` | planner-service | plan-gateway |
 | `planning.plan.committed.v1` | planner-service | plan-gateway, acquisition-simulator |
 | `planning.request.unfulfilled.v1` | planner-service | tasking-api (state machine), plan-gateway |
 | `acquisition.executed.v1` | acquisition-simulator | plan-gateway, tasking-api |
+
+**One of these is not caused by a message.**
+`feasibility.ephemeris.computed.v1` is produced by a timer sweeping the
+constellation, not by a consumer reacting to a delivery. It therefore has no
+upstream `event_id` to inherit deduplication from, and derives its own as a
+UUIDv5 over `(satellite_id, horizon.start, tle_epoch)`. That keeps the envelope's
+rule intact — the same logical event always carries the same `event_id` — and it
+is what makes a sweep that overlaps its own previous horizon a no-op at the
+outbox rather than a duplicate on the wire.
 
 **The major version is in the subject, not only in the payload.** A `.v2` event
 is published to a different subject, so v1 and v2 consumers coexist without
@@ -55,9 +65,10 @@ Notes on the choices:
   a subset. `workqueue` would delete a message once any one consumer acked it,
   which silently breaks fan-out.
 - **`FEASIBILITY` has shorter retention** because its payloads are by far the
-  largest (thousands of opportunities per request) and its replay value decays
-  fastest — a three-day-old opportunity set is describing access windows that
-  have already passed.
+  largest (thousands of opportunities per request, and a sampled ephemeris track
+  per satellite per bucket) and its replay value decays fastest — a three-day-old
+  opportunity set is describing access windows that have already passed, and a
+  three-day-old ephemeris bucket is describing where a satellite already was.
 - **`replicas: 1`** because the deployment target is a single machine
   ([ADR-0005](../../docs/decisions/0005-docker-compose-over-kubernetes.md)).
   Production would be 3, and this is the line that would change.

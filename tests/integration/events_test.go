@@ -177,3 +177,52 @@ func (f fixture) derivedID(kind byte, n int) string {
 	}
 	return f.nonce[:len(f.nonce)-12] + string(node)
 }
+
+// ephemerisEvent builds one satellite's track over the fixture's bucket.
+//
+// `samples` are generated rather than copied from the example, because the
+// example carries six and the interesting properties here — that a thousand
+// rows land in one statement, and that a fresher element set wins — need a
+// track and a length the example does not have.
+func (f fixture) ephemerisEvent(
+	t *testing.T, at time.Time, samples int, tleEpoch time.Time, longitude float64,
+) (string, []byte) {
+	t.Helper()
+	e := loadExample(t, "feasibility.ephemeris.computed.v1", "ascending-pass.json")
+	e["occurred_at"] = rfc3339(at)
+	// Derived from everything that distinguishes this track, the way the
+	// producer derives it. Two events for the same bucket from different
+	// element sets must be different events, or the second never gets projected.
+	e["event_id"] = f.derivedID('e', int(tleEpoch.Unix()%1000)+samples)
+
+	d := data(t, e)
+	d["satellite_id"] = f.satelliteID
+	d["computed_at"] = rfc3339(at)
+	d["epoch"] = rfc3339(f.bucketStart)
+	d["horizon"] = map[string]any{
+		"start": rfc3339(f.bucketStart),
+		"end":   rfc3339(f.bucketStart.Add(3 * time.Hour)),
+	}
+	d["sample_interval_s"] = 10
+	d["sample_count"] = samples
+
+	ref, ok := d["tle_reference"].(map[string]any)
+	if !ok {
+		t.Fatal("the example has no tle_reference")
+	}
+	ref["satellite_id"] = f.satelliteID
+	ref["tle_epoch"] = rfc3339(tleEpoch)
+
+	track := make([]any, 0, samples)
+	for i := range samples {
+		track = append(track, []any{
+			float64(i * 10),
+			longitude + float64(i)*0.001,
+			51.9 + float64(i)*0.0007,
+			693412.8,
+		})
+	}
+	d["samples"] = track
+
+	return "feasibility.ephemeris.computed.v1", encode(t, e)
+}

@@ -50,6 +50,7 @@ from feasibility.orbit import (
     search,
     timescale,
 )
+from feasibility.orbit.ephemeris import sample_track
 from feasibility.tle.element_set import ElementSet, parse_catalogue
 
 
@@ -390,3 +391,72 @@ class TestPhysicalInvariants:
         for earlier, later in pairwise(windows):
             orbits = (later.peak_at - earlier.peak_at).total_seconds() / 60.0 / period_minutes
             assert later.orbit_number - earlier.orbit_number == pytest.approx(round(orbits), abs=1)
+
+
+class TestSampledEphemerisAgainstAnIndependentPropagator:
+    """The published orbit track, against the same oracle as the subpoint.
+
+    This class lives here rather than in test_ephemeris.py because the oracle
+    does — `independent_subpoint` shares no code with `Propagator` beyond the
+    element set, and duplicating it next to the sampling tests would be a second
+    implementation of the thing whose independence is the entire point.
+
+    What it adds over the subpoint tests above: a TRACK is a sequence, and the
+    faults a sequence has are not the faults a point has. A loop that samples the
+    same instant repeatedly, steps in minutes instead of seconds, or reverses the
+    order produces points that are each individually correct.
+    """
+
+    def test_every_sample_in_a_bucket_matches_the_independent_path(
+        self, catalogue: dict[str, ElementSet]
+    ) -> None:
+        element_set = catalogue["SENTINEL-1A"]
+        start = datetime(2026, 8, 7, 9, tzinfo=UTC)
+        track = sample_track(
+            "SENTINEL-1A", Propagator(element_set), start, start + timedelta(minutes=10), 10.0
+        )
+
+        worst_km = 0.0
+        for offset, longitude, latitude, _altitude in track.samples:
+            lat, lon, _height = independent_subpoint(element_set, start + timedelta(seconds=offset))
+            delta_lon = (lon - longitude + 180.0) % 360.0 - 180.0
+            worst_km = max(
+                worst_km,
+                math.hypot(
+                    (lat - latitude) * 111.32,
+                    delta_lon * 111.32 * math.cos(math.radians(lat)),
+                ),
+            )
+
+        assert worst_km <= SUBPOINT_TOLERANCE_KM, (
+            f"the sampled track disagrees with the independent path by {worst_km:.3f} km"
+        )
+
+    def test_the_samples_advance_in_time_rather_than_repeating_one_instant(
+        self, catalogue: dict[str, ElementSet]
+    ) -> None:
+        # A sampling loop that forgets to advance produces a track of identical
+        # points, every one of which passes the comparison above.
+        element_set = catalogue["SENTINEL-1A"]
+        start = datetime(2026, 8, 7, 9, tzinfo=UTC)
+        track = sample_track(
+            "SENTINEL-1A", Propagator(element_set), start, start + timedelta(minutes=10), 10.0
+        )
+
+        positions = {(round(lon, 6), round(lat, 6)) for _t, lon, lat, _alt in track.samples}
+        assert len(positions) == len(track.samples)
+
+    def test_altitude_stays_in_the_sun_synchronous_band(
+        self, catalogue: dict[str, ElementSet]
+    ) -> None:
+        # Sentinel-1A flies a ~693 km orbit. A frame error that left latitude and
+        # longitude plausible would still move this, and altitude is the one
+        # field of a sample that nothing else in the suite constrains.
+        element_set = catalogue["SENTINEL-1A"]
+        start = datetime(2026, 8, 7, 9, tzinfo=UTC)
+        track = sample_track(
+            "SENTINEL-1A", Propagator(element_set), start, start + timedelta(hours=3), 10.0
+        )
+
+        for _offset, _longitude, _latitude, altitude_m in track.samples:
+            assert 650_000 < altitude_m < 750_000

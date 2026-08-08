@@ -19,9 +19,14 @@ import type { Acquisition } from '@/lib/gateway';
  *
  * What it draws today: acquisition footprints on a real WGS84 ellipsoid, with
  * the clock spanning the requested window. What it does NOT draw is the
- * satellites — there is no ephemeris in the read model, and interpolating a
- * path through footprint centroids would render something that looks like an
- * orbit and is not one. That arrives with #128.
+ * satellites — not because the positions are missing any more (#128 landed the
+ * ephemeris projection, and the CZML endpoint now serves a `position` and a
+ * `path` per satellite) but because this component builds its entities from
+ * `/v1/geo/footprints` rather than from that document. Consuming it is the rest
+ * of #28; see web/README.md for the choice it involves.
+ *
+ * What remains off the table either way: interpolating a path through footprint
+ * centroids. It renders something that looks like an orbit and is not one.
  */
 
 export interface CesiumGlobeProps {

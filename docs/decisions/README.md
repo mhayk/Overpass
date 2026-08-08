@@ -32,6 +32,7 @@ paper trail is the point.
 | [0012](0012-retain-superseded-acquisitions.md) | Retain superseded acquisitions with a status, and make the non-overlap constraint partial and deferred | accepted | M1 |
 | [0013](0013-parallel-agent-execution-in-worktrees.md) | Run parallel agent work as one git worktree per contract boundary, not as concurrent agents in one checkout | accepted | M1 |
 | [0015](0015-planner-projects-its-own-request-value.md) | Give the planner its own projection of request value, instead of reading the tasking schema | accepted | M2 |
+| [0016](0016-ephemeris-sampling-and-horizon.md) | Sample the ephemeris every ten seconds, in aligned three-hour buckets, over a rolling day | accepted | M1 |
 
 ## Planned
 
