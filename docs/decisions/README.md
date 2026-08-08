@@ -26,6 +26,7 @@ paper trail is the point.
 | [0005](0005-docker-compose-over-kubernetes.md) | Docker Compose as the deployment target, not Kubernetes | accepted | M0 |
 | [0006](0006-transactional-outbox.md) | Publish through a transactional outbox, not directly from the handler | accepted | M1 |
 | [0008](0008-idempotency.md) | Idempotency in two places: a required HTTP key at ingress, and a dedup ledger in every consumer | accepted | M1 |
+| [0009](0009-cesium-deckgl-division.md) | Split the frontend by question: Cesium answers where and when, deck.gl answers how much and where things collide | accepted | M1 |
 | [0010](0010-test-strategy-and-coverage.md) | Treat the test suite as the verification harness for generated code, and gate coverage at 80/95 | accepted | M0 |
 | [0011](0011-tle-sourcing-live-and-frozen.md) | Fetch TLEs live from Celestrak at seed time, and test orbital math against a frozen snapshot | accepted | M1 |
 | [0012](0012-retain-superseded-acquisitions.md) | Retain superseded acquisitions with a status, and make the non-overlap constraint partial and deferred | accepted | M1 |
