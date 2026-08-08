@@ -12,6 +12,12 @@ requires-python = ">=3.12"
 dependencies = [
     "httpx>=0.28,<0.29",
     "nats-py>=2.9,<3",
+    # Tracing. The API and SDK are separate packages on purpose: library code
+    # depends on the API alone and stays a no-op unless an application installs
+    # a provider, which is what keeps the unit tests free of an exporter.
+    "opentelemetry-api>=1.29,<2",
+    "opentelemetry-sdk>=1.29,<2",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.29,<2",
     "psycopg[binary,pool]>=3.2,<4",
     "pyproj>=3.7,<4",
     "sgp4>=2.27,<3",
