@@ -35,6 +35,11 @@ type stack struct {
 
 	taskingAPIBin  string
 	planGatewayBin string
+
+	// tempoOTLP is where services export spans; tempoQuery is where the test
+	// reads them back. Empty when Tempo did not start.
+	tempoOTLP  string
+	tempoQuery string
 }
 
 var (
@@ -170,7 +175,54 @@ func boot(ctx context.Context) (*stack, func(), error) {
 		return nil, teardown, err
 	}
 
+	// Tempo, so the end-to-end trace assertion has somewhere to read from.
+	//
+	// Services export straight to Tempo here rather than through the collector,
+	// and that is a deliberate narrowing: what this suite asserts is that ONE
+	// trace spans two services, which is a property of context propagation. The
+	// collector hop is a separate claim and is verified separately, against the
+	// real compose stack.
+	tempo, err := startTempo(ctx, root)
+	if err != nil {
+		return nil, teardown, err
+	}
+	cleanups = append(cleanups, func() { //nolint:contextcheck // teardown needs a live context
+		_ = tempo.Terminate(context.Background()) //nolint:errcheck // teardown
+	})
+	if built.tempoOTLP, err = tempo.PortEndpoint(ctx, "4317/tcp", ""); err != nil {
+		return nil, teardown, fmt.Errorf("tempo otlp endpoint: %w", err)
+	}
+	if built.tempoQuery, err = tempo.PortEndpoint(ctx, "3200/tcp", "http"); err != nil {
+		return nil, teardown, fmt.Errorf("tempo query endpoint: %w", err)
+	}
+
 	return built, teardown, nil
+}
+
+// startTempo runs the same image and the same config as the compose stack.
+//
+// The same config file, not a test-local copy. A trace backend configured
+// differently here would let the suite pass against ingester timings nobody
+// deploys — and those timings are exactly what decides whether a trace is
+// queryable within the test's patience.
+func startTempo(ctx context.Context, root string) (testcontainers.Container, error) {
+	return testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+		Started: true,
+		ContainerRequest: testcontainers.ContainerRequest{
+			Image:        "grafana/tempo:2.6.1",
+			Cmd:          []string{"-config.file=/etc/tempo/tempo.yaml"},
+			User:         "0:0",
+			ExposedPorts: []string{"3200/tcp", "4317/tcp"},
+			Files: []testcontainers.ContainerFile{{
+				HostFilePath:      filepath.Join(root, "deploy", "tempo", "tempo.yaml"),
+				ContainerFilePath: "/etc/tempo/tempo.yaml",
+				FileMode:          0o644,
+			}},
+			WaitingFor: wait.ForHTTP("/ready").
+				WithPort("3200/tcp").
+				WithStartupTimeout(90 * time.Second),
+		},
+	})
 }
 
 // prepareDatabase runs the same two sources the compose stack and CI use.
