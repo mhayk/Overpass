@@ -176,10 +176,22 @@ async def test_a_terminal_refusal_is_published_and_acked(
 
     await run(config(), refusing, max_batches=2)
 
+    # Read through `data`, because that is where the contract puts these.
+    #
+    # This assertion used to read them from the TOP LEVEL, and passed, because
+    # the producer put them there — six bare fields with no envelope, invalid
+    # against feasibility.failed.v1 and undecodable by every consumer. The test
+    # and the code were wrong together, which is the failure mode #124 named
+    # and #132 fixed. It is written this way now so that regressing the
+    # producer breaks it.
     with connection.cursor() as cur:
         cur.execute(
             """
-            SELECT payload->>'reason_code', payload->>'retryable', payload->>'request_id'
+            SELECT payload->'data'->>'reason_code',
+                   payload->'data'->>'retryable',
+                   payload->'data'->>'request_id',
+                   payload->>'event_type',
+                   payload->>'causation_id'
             FROM feasibility.outbox
             WHERE event_type = 'feasibility.failed.v1'
             ORDER BY id DESC LIMIT 1
@@ -190,6 +202,10 @@ async def test_a_terminal_refusal_is_published_and_acked(
     assert row[0] == "NO_ACCESS_IN_HORIZON"
     assert row[1] == "false"
     assert row[2] == request_id
+    assert row[3] == "feasibility.failed.v1"
+    # The refusal names the request that caused it. A null here would say the
+    # failure came from nowhere.
+    assert row[4] == event_id
 
     client = await nats.connect(servers=[_nats_url()])
     try:
