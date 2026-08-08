@@ -45,12 +45,22 @@ jobs:
           go-version: '1.25'
           cache-dependency-path: '**/go.sum'
 
+      # uv, because the end-to-end trace assertion runs the Python worker as a
+      # real process. Without it that test SKIPS, and a skipped test is a green
+      # tick for work nobody did — which is exactly the failure the assertion
+      # exists to prevent.
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: services/feasibility/uv.lock
+
       # Pulled up front so the pull time is visible as its own step rather than
       # hidden inside a test timeout.
       - name: Pull the images
         run: |
           docker pull postgis/postgis:16-3.4
           docker pull nats:2.10-alpine
+          docker pull grafana/tempo:2.6.1
 
       # -count=1 defeats the test cache unconditionally. A cached pass here
       # would mean the containers never started, and the job would be fastest
