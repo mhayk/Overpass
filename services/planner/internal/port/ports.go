@@ -182,17 +182,17 @@ type Rounds interface {
 		open func(RoundInputs) (Round, []byte, error)) (opened bool, err error)
 }
 
-// Satellites reads the per-satellite parameters the transition model needs.
+// Satellites reads the per-satellite parameters allocation depends on.
 //
-// A port of its own rather than a method on Rounds. Agility is read once per
-// satellite per round and then consulted for every pairwise transition, so it
-// belongs to whatever is doing the allocating — which is M2-04, not the round
-// trigger.
+// A port of its own rather than a method on Rounds. A profile is read once per
+// satellite per round and then consulted for every candidate and every pairwise
+// transition, so it belongs to whatever is doing the allocating — which is
+// M2-04, not the round trigger.
 type Satellites interface {
-	// Agility returns one satellite's transition parameters. ErrNotFound when
-	// the satellite is unknown, which is a different fact from a satellite with
-	// default parameters and must not be flattened into one.
-	Agility(ctx context.Context, satelliteID string) (domain.Agility, error)
+	// Profile returns one satellite's agility and power budget. ErrNotFound
+	// when the satellite is unknown, which is a different fact from a satellite
+	// with default parameters and must not be flattened into one.
+	Profile(ctx context.Context, satelliteID string) (domain.SatelliteProfile, error)
 }
 
 // ErrNotFound is returned when a read finds nothing.
