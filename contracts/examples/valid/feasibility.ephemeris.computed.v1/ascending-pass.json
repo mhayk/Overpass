@@ -1,0 +1,32 @@
+{
+  "event_id": "1a2b3c4d-5e6f-5a7b-8c9d-0e1f2a3b4c5d",
+  "event_type": "feasibility.ephemeris.computed.v1",
+  "schema_version": "1.0.0",
+  "occurred_at": "2026-08-07T09:00:02.114Z",
+  "correlation_id": "b7c4e1d2-3f5a-4b6c-8d9e-0a1b2c3d4e5f",
+  "causation_id": null,
+  "producer": "feasibility-service",
+  "data": {
+    "satellite_id": "SENTINEL-1A",
+    "computed_at": "2026-08-07T09:00:02.101Z",
+    "horizon": { "start": "2026-08-07T09:00:00Z", "end": "2026-08-07T12:00:00Z" },
+    "tle_reference": {
+      "satellite_id": "SENTINEL-1A",
+      "norad_id": 39634,
+      "tle_epoch": "2026-08-06T21:41:12Z",
+      "tle_age_hours": 11.3,
+      "staleness": "FRESH"
+    },
+    "epoch": "2026-08-07T09:00:00Z",
+    "sample_interval_s": 10,
+    "sample_count": 6,
+    "samples": [
+      [0, 12.401883, 51.203114, 693412.8],
+      [10, 12.372145, 51.868902, 693388.1],
+      [20, 12.342108, 52.534612, 693361.7],
+      [30, 12.311765, 53.200236, 693333.5],
+      [40, 12.281108, 53.865766, 693303.6],
+      [50, 12.250131, 54.531193, 693272.0]
+    ]
+  }
+}

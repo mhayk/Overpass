@@ -340,3 +340,90 @@ func TestGarbageIsRejected(t *testing.T) {
 		})
 	}
 }
+
+// TestEphemerisSamplesResolveToAbsoluteInstants is the one decode in this
+// package that computes rather than copies.
+//
+// The event carries offsets from an epoch, because a timestamp per sample would
+// be more bytes than the position it labels. Everything downstream — the
+// projection's primary key, the range query the renderer reads through — works
+// in absolute instants, so the resolution has to happen exactly once, and the
+// boundary is where.
+func TestEphemerisSamplesResolveToAbsoluteInstants(t *testing.T) {
+	payload := example(t, "feasibility.ephemeris.computed.v1", "ascending-pass.json")
+
+	got, err := wire.New().Ephemeris(payload)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	if got.SatelliteID != "SENTINEL-1A" {
+		t.Errorf("SatelliteID = %q", got.SatelliteID)
+	}
+	// From the reference, not from occurred_at. It is what lets a fresher
+	// element set overwrite an older track for the same instants.
+	wantTLE := time.Date(2026, 8, 6, 21, 41, 12, 0, time.UTC)
+	if !got.TleEpoch.Equal(wantTLE) {
+		t.Errorf("TleEpoch = %s, want %s", got.TleEpoch, wantTLE)
+	}
+	if len(got.Samples) != 6 {
+		t.Fatalf("got %d samples, want 6", len(got.Samples))
+	}
+
+	epoch := time.Date(2026, 8, 7, 9, 0, 0, 0, time.UTC)
+	if !got.Samples[0].At.Equal(epoch) {
+		t.Errorf("first sample at %s, want the epoch %s", got.Samples[0].At, epoch)
+	}
+	if want := epoch.Add(50 * time.Second); !got.Samples[5].At.Equal(want) {
+		t.Errorf("last sample at %s, want %s", got.Samples[5].At, want)
+	}
+
+	// Longitude first. A swap here relocates the whole constellation and
+	// renders without complaint.
+	if got.Samples[0].LongitudeDeg != 12.401883 {
+		t.Errorf("LongitudeDeg = %v, want the second element of the tuple", got.Samples[0].LongitudeDeg)
+	}
+	if got.Samples[0].LatitudeDeg != 51.203114 {
+		t.Errorf("LatitudeDeg = %v, want the third element of the tuple", got.Samples[0].LatitudeDeg)
+	}
+	if got.Samples[0].AltitudeM != 693412.8 {
+		t.Errorf("AltitudeM = %v", got.Samples[0].AltitudeM)
+	}
+}
+
+// TestAnEphemerisSampleOfTheWrongLengthIsRejected covers the gap the generated
+// type cannot: `prefixItems` renders as [][]float64, so a three-element sample
+// decodes cleanly into a slice of three. Reading it positionally without
+// checking would index out of range at best and silently shift longitude into
+// latitude at worst.
+func TestAnEphemerisSampleOfTheWrongLengthIsRejected(t *testing.T) {
+	path := filepath.Join("..", "..", "..", "..", "..",
+		"contracts", "examples", "invalid", "feasibility.ephemeris.computed.v1",
+		"sample-missing-altitude.json")
+	payload, err := os.ReadFile(path) //nolint:gosec // a fixed repo-relative path
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+
+	if _, err := wire.New().Ephemeris(payload); !errors.Is(err, wire.ErrMalformed) {
+		t.Fatalf("err = %v, want ErrMalformed", err)
+	}
+}
+
+// TestAnEphemerisTrackCrossingTheAntimeridianIsNotNormalised pins a decision by
+// showing it: longitude is carried through as published, including the jump
+// from +179 to -179. Wrapping it to a continuous 0..360 range here would make
+// the numbers look tidier and put the track in the wrong place for every
+// consumer that expects WGS84.
+func TestAnEphemerisTrackCrossingTheAntimeridianIsNotNormalised(t *testing.T) {
+	payload := example(t, "feasibility.ephemeris.computed.v1", "crosses-the-antimeridian.json")
+
+	got, err := wire.New().Ephemeris(payload)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Samples[0].LongitudeDeg <= 179 || got.Samples[1].LongitudeDeg >= -179 {
+		t.Errorf("longitudes %v and %v were normalised across the antimeridian",
+			got.Samples[0].LongitudeDeg, got.Samples[1].LongitudeDeg)
+	}
+}

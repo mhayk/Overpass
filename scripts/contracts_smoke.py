@@ -35,6 +35,7 @@ sys.path.insert(0, str(ROOT / "gen" / "python"))
 from pydantic import ValidationError  # noqa: E402
 
 from overpass_contracts.events import (  # noqa: E402
+    feasibility_ephemeris_computed_v1_schema,
     planning_plan_committed_v1_schema,
     planning_request_unfulfilled_v1_schema,
     tasking_request_received_v1_schema,
@@ -49,6 +50,13 @@ MODELS = {
     "planning.plan.committed.v1": planning_plan_committed_v1_schema.PlanCommitted,
     "planning.request.unfulfilled.v1": (
         planning_request_unfulfilled_v1_schema.PlanningRequestUnfulfilled
+    ),
+    # Wired because feasibility-service PRODUCES this one, in Python. For every
+    # other event here the binding only has to read; for this one a model that
+    # can read but not write would emit payloads its own schema rejects, which
+    # is precisely what the round-trip below is for.
+    "feasibility.ephemeris.computed.v1": (
+        feasibility_ephemeris_computed_v1_schema.FeasibilityEphemerisComputed
     ),
 }
 
@@ -132,6 +140,7 @@ PYDANTIC_REJECTS = {
     "plan-version-zero.json": True,              # ge=1
     "longitude-out-of-range.json": False,        # prefixItems bounds dropped
     "latitude-longitude-swapped.json": False,    # prefixItems bounds dropped
+    "sample-missing-altitude.json": True,        # min_length on the sample tuple
 }
 
 

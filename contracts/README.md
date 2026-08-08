@@ -166,6 +166,23 @@ cleanly. **This one is not fixed, it is documented and asserted**, in the
 table in `gen/go/contracttest/roundtrip_test.go`. An unclassified fixture fails
 the run, so the gap cannot grow quietly.
 
+**A tuple with `items: false` generates as `[]interface{}`; with
+`items: {type: number}` it generates as `[]float64`.** Same drop of
+`prefixItems`, two very different Go types. `Position` sets `items: false` — the
+strictest possible statement in JSON Schema, "nothing beyond the prefix" — and
+go-jsonschema, having no prefix to work from, emits `[]interface{}`. The
+ephemeris sample tuple states `items: {"type": "number"}` instead, which
+`maxItems: 4` already makes vacuous for validation, and gets `[][]float64`.
+
+That is worth knowing rather than clever: the schema is not weakened (the four
+`prefixItems` bounds are still what the validator asserts), the redundant
+`items` is *true* rather than a second rule, and the generated code is a numeric
+slice a reader can use instead of a bag of `interface{}` to type-assert.
+Verified by generating both, not reasoned about. What it does NOT buy is the
+per-element bounds, which are still dropped — so a sample's LENGTH is checked in
+`plan-gateway`'s decoder by hand, and its bounds are the schema's job at the
+boundary. Same conclusion as everywhere else: the JSON Schema is the authority.
+
 **Toolchain pins that are not about reproducibility.**
 `datamodel-code-generator` 0.28.5 maps `sys.version_info` onto a closed enum and
 raises on anything it does not recognise, so it *cannot run* under Python 3.14.

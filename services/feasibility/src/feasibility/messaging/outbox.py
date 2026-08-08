@@ -27,6 +27,8 @@ from typing import TYPE_CHECKING, Any
 from psycopg.pq import TransactionStatus
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     import psycopg
 
 
@@ -75,6 +77,66 @@ def enqueue(cursor: psycopg.Cursor[object], message: OutboxMessage) -> None:
             message.occurred_at,
         ),
     )
+
+
+def enqueue_once(cursor: psycopg.Cursor[object], message: OutboxMessage) -> bool:
+    """Write one event unless its id is already in the outbox. Returns whether it was.
+
+    `enqueue` raises on a duplicate id, and that is right for a handler: an
+    event id that already exists means the handler ran twice, which the
+    idempotency ledger was supposed to have prevented, and swallowing it would
+    hide a real fault.
+
+    The ephemeris sweep is the one producer where a repeat is EXPECTED rather
+    than exceptional. It runs on a timer over a rolling horizon, so every tick
+    necessarily re-covers buckets it already published, and its event id is
+    derived from `(satellite_id, bucket, tle_epoch)` precisely so that the
+    repeat collides here instead of reaching the wire.
+
+    A separate function rather than a flag on `enqueue`, so nothing acquires
+    this behaviour by accident. A publisher that quietly tolerates duplicate
+    ids is a publisher whose deduplication has stopped meaning anything.
+    """
+    cursor.execute(
+        """
+        INSERT INTO feasibility.outbox
+            (event_id, event_type, schema_version, subject, payload, headers, occurred_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (event_id) DO NOTHING
+        """,
+        (
+            message.event_id,
+            message.event_type,
+            message.schema_version,
+            message.subject,
+            json.dumps(message.payload),
+            json.dumps(message.headers),
+            message.occurred_at,
+        ),
+    )
+    return cursor.rowcount == 1
+
+
+def already_enqueued(cursor: psycopg.Cursor[Any], event_ids: Sequence[str]) -> set[str]:
+    """Which of these event ids the outbox already holds.
+
+    A performance shortcut in front of `enqueue_once`, not a replacement for it.
+    Deriving an ephemeris event's id costs nothing; producing its BODY costs an
+    SGP4 propagation over a thousand instants. Asking first means a steady-state
+    sweep does no physics at all, where enqueue-and-discard would do all of it
+    every tick and throw the answer away.
+
+    It is not a correctness mechanism and must not be treated as one: two
+    sweepers can both see an id as absent. `enqueue_once`'s ON CONFLICT is what
+    actually holds, which is why it stays even though this exists.
+    """
+    if not event_ids:
+        return set()
+    cursor.execute(
+        "SELECT event_id::text FROM feasibility.outbox WHERE event_id = ANY(%s::uuid[])",
+        (list(event_ids),),
+    )
+    return {row[0] for row in cursor.fetchall()}
 
 
 def claim_unpublished(

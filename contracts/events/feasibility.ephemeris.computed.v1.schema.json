@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://overpass.dev/contracts/events/feasibility.ephemeris.computed.v1.schema.json",
+  "title": "FeasibilityEphemerisComputed",
+  "description": "feasibility-service has propagated ONE satellite over ONE horizon bucket and is publishing where it was, as sampled positions on the WGS84 ellipsoid. This is the orbit itself, not a consequence of it: unlike feasibility.opportunities.computed.v1, nothing here depends on a customer request, and the sweep that produces it runs on a timer rather than on a message.\n\nIt exists because the read model held no ephemeris and therefore no satellite path. Interpolating a curve through committed footprint centroids would have drawn something that looks like an orbit and is not one, which is worse than an absent layer because a viewer would believe it.\n\nOne satellite per event, not the whole constellation. A twelve-satellite bundle would be twelve times the payload for a consumer that renders one satellite's plan at a time, and a single oversized message is also a single message to redeliver.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["event_id", "event_type", "schema_version", "occurred_at", "correlation_id", "causation_id", "producer", "data"],
+  "properties": {
+    "event_id": {
+      "$ref": "../common/envelope.v1.schema.json#/$defs/EventId",
+      "description": "DERIVED, not random, for this event type. The producing sweep is a timer rather than a message handler, so it has no upstream event_id to inherit deduplication from — it computes a UUIDv5 over (satellite_id, horizon start, tle_epoch) instead. Re-running the sweep over a bucket it has already covered therefore collides on the outbox's unique event_id and inserts nothing, which is what makes a rolling sweep safe to run every few minutes."
+    },
+    "event_type": { "enum": ["feasibility.ephemeris.computed.v1"] },
+    "schema_version": { "$ref": "../common/envelope.v1.schema.json#/$defs/SchemaVersion" },
+    "occurred_at": { "$ref": "../common/envelope.v1.schema.json#/$defs/OccurredAt" },
+    "correlation_id": {
+      "$ref": "../common/envelope.v1.schema.json#/$defs/CorrelationId",
+      "description": "The sweep's own correlation id. There is no customer transaction to correlate to — this event is caused by the passage of time, not by a request."
+    },
+    "causation_id": {
+      "$ref": "../common/envelope.v1.schema.json#/$defs/CausationId",
+      "description": "Null, always. The envelope permits null for events with no antecedent, and a timer tick is not an event anybody published."
+    },
+    "producer": { "enum": ["feasibility-service"] },
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["satellite_id", "computed_at", "horizon", "tle_reference", "epoch", "sample_interval_s", "sample_count", "samples"],
+      "properties": {
+        "satellite_id": { "$ref": "../common/primitives.v1.schema.json#/$defs/SatelliteId" },
+        "computed_at": { "$ref": "../common/primitives.v1.schema.json#/$defs/Timestamp" },
+        "horizon": {
+          "$ref": "../common/primitives.v1.schema.json#/$defs/TimeWindow",
+          "description": "The half-open bucket these samples cover. Buckets are aligned to a fixed grid so that the same bucket is always the same interval — which is what lets the derived event_id above be stable across sweeps, and what stops two sweeps producing overlapping-but-different tracks."
+        },
+        "tle_reference": {
+          "$ref": "../common/sar.v1.schema.json#/$defs/TleReference",
+          "description": "The element set this track was propagated from. Singular, because one event is one satellite. This is what makes a drawn orbit auditable: a track that disagrees with reality is a question about which TLE produced it, and without this it is unanswerable."
+        },
+        "epoch": {
+          "$ref": "../common/primitives.v1.schema.json#/$defs/Timestamp",
+          "description": "Time origin for the sample offsets. Normally equal to horizon.start and carried separately anyway, because the samples are meaningless without it and a consumer must never have to infer it."
+        },
+        "sample_interval_s": {
+          "$ref": "../common/primitives.v1.schema.json#/$defs/DurationSeconds",
+          "description": "Nominal spacing between samples. Descriptive, not authoritative: every sample carries its own offset, so a consumer reconstructs times from the offsets and uses this only to reason about resolution. Stating the interval AND the per-sample offset is deliberate redundancy — deriving times from the interval alone would let one dropped sample silently shift the rest of the track."
+        },
+        "sample_count": {
+          "type": "integer",
+          "minimum": 2,
+          "description": "Length of the samples array. Redundant on purpose, like opportunity_count: consumers log and alert on track size without deserialising it. Two is the minimum because one point is a position, not a path."
+        },
+        "samples": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 20000,
+          "items": {
+            "type": "array",
+            "minItems": 4,
+            "maxItems": 4,
+            "prefixItems": [
+              {
+                "type": "number",
+                "minimum": 0,
+                "description": "Seconds after `epoch`. An offset rather than an RFC 3339 timestamp: a full timestamp per sample is more bytes than the position it labels, and this is the one event whose size is dominated by repetition."
+              },
+              {
+                "type": "number",
+                "minimum": -180,
+                "maximum": 180,
+                "description": "Longitude, decimal degrees, WGS84. FIRST, as everywhere else in this system."
+              },
+              {
+                "type": "number",
+                "minimum": -90,
+                "maximum": 90,
+                "description": "Latitude, decimal degrees, WGS84."
+              },
+              {
+                "type": "number",
+                "description": "Height above the WGS84 ellipsoid, metres. Not above terrain, and not a slant range. Unbounded here rather than clamped to a LEO band, because the contract should not decide what orbits this system may carry."
+              }
+            ],
+            "items": { "type": "number" },
+            "description": "One sample: [seconds_after_epoch, longitude_deg, latitude_deg, altitude_m].\n\nA positional tuple rather than an object, because at this cardinality the field names would be most of the payload. The cost is the documented generator gap — neither binding renders prefixItems, so both see a bare list of numbers and the per-element bounds above are asserted by the schema at the boundary rather than by the type. `items` restates 'every element is a number', which prefixItems plus maxItems already implies, purely so the generators emit a numeric slice instead of an untyped one."
+          }
+        }
+      }
+    }
+  },
+  "examples": [
+    {
+      "event_id": "5f2c9d3a-7b41-5e88-9c02-6a1f4b8d7e33",
+      "event_type": "feasibility.ephemeris.computed.v1",
+      "schema_version": "1.0.0",
+      "occurred_at": "2026-08-07T09:00:02.114Z",
+      "correlation_id": "b7c4e1d2-3f5a-4b6c-8d9e-0a1b2c3d4e5f",
+      "causation_id": null,
+      "producer": "feasibility-service",
+      "data": {
+        "satellite_id": "SENTINEL-1A",
+        "computed_at": "2026-08-07T09:00:02.101Z",
+        "horizon": { "start": "2026-08-07T09:00:00Z", "end": "2026-08-07T12:00:00Z" },
+        "tle_reference": {
+          "satellite_id": "SENTINEL-1A",
+          "norad_id": 39634,
+          "tle_epoch": "2026-08-05T22:40:01Z",
+          "tle_age_hours": 34.3,
+          "staleness": "AGING"
+        },
+        "epoch": "2026-08-07T09:00:00Z",
+        "sample_interval_s": 10,
+        "sample_count": 4,
+        "samples": [
+          [0, 12.401883, 51.203114, 693412.8],
+          [10, 12.372145, 51.868902, 693388.1],
+          [20, 12.342108, 52.534612, 693361.7],
+          [30, 12.311765, 53.200236, 693333.5]
+        ]
+      }
+    }
+  ]
+}

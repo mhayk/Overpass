@@ -129,6 +129,13 @@ func (p *Projector) route(ctx context.Context, m port.Message) (time.Time, error
 		}
 		e.EventAt = pick(e.EventAt, m.EventAt)
 		return e.EventAt, p.projection.ProjectPlanCommitted(ctx, e)
+	case SubjectEphemerisComputed:
+		e, err := p.decode.Ephemeris(m.Payload)
+		if err != nil {
+			return time.Time{}, err
+		}
+		e.EventAt = pick(e.EventAt, m.EventAt)
+		return e.EventAt, p.projection.ProjectEphemeris(ctx, e)
 	case SubjectRequestUnfulfilled:
 		e, err := p.decode.Unfulfilled(m.Payload)
 		if err != nil {
@@ -163,6 +170,7 @@ func pick(fromPayload, fromBroker time.Time) time.Time {
 const (
 	SubjectRequestReceived       = "tasking.request.received.v1"
 	SubjectOpportunitiesComputed = "feasibility.opportunities.computed.v1"
+	SubjectEphemerisComputed     = "feasibility.ephemeris.computed.v1"
 	SubjectPlanCommitted         = "planning.plan.committed.v1"
 	SubjectRequestUnfulfilled    = "planning.request.unfulfilled.v1"
 )

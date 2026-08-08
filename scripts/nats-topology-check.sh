@@ -36,6 +36,7 @@ note() { printf '  %s\n' "$*"; }
 CASES=(
   "TASKING:gateway-projector-tasking:tasking.request.received.v1"
   "FEASIBILITY:gateway-projector-feasibility:feasibility.opportunities.computed.v1"
+  "FEASIBILITY:gateway-projector-feasibility:feasibility.ephemeris.computed.v1"
   "PLANNING:gateway-projector-planning:planning.plan.committed.v1"
   "PLANNING:gateway-projector-planning:acquisition.executed.v1"
   "TASKING:feasibility-worker:tasking.request.received.v1"

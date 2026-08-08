@@ -63,6 +63,12 @@ var (
 var (
 	epoch  = time.Date(2026, 8, 8, 9, 0, 0, 0, time.UTC).UTC()
 	bucket = time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC).UTC()
+
+	// Two element sets, a day apart. Which of them a track came from is what
+	// decides whether it survives a competing track for the same instants —
+	// arrival order is explicitly not what decides it.
+	staleTLE = time.Date(2026, 8, 6, 21, 41, 12, 0, time.UTC).UTC()
+	freshTLE = time.Date(2026, 8, 7, 21, 44, 3, 0, time.UTC).UTC()
 )
 
 // fixture is a deterministic set of events. The ids are fixed rather than
@@ -128,6 +134,26 @@ func (f fixture) plan(version int) port.PlanCommitted {
 	}
 }
 
+// ephemeris is one satellite's track over the fixture's bucket.
+//
+// `tleEpoch` and `longitude` are parameters because the interesting property is
+// which of two tracks for the SAME instants survives, and that is decided by
+// the element set behind them rather than by arrival order.
+func (f fixture) ephemeris(at time.Time, tleEpoch time.Time, longitude float64) port.EphemerisComputed {
+	e := port.EphemerisComputed{
+		EventAt: at, SatelliteID: f.satelliteID, TleEpoch: tleEpoch,
+	}
+	for i := range 6 {
+		e.Samples = append(e.Samples, port.EphemerisSample{
+			At:           bucket.Add(time.Duration(i*10) * time.Second),
+			LongitudeDeg: longitude + float64(i)*0.041234,
+			LatitudeDeg:  51.9 + float64(i)*0.663211,
+			AltitudeM:    693412.8,
+		})
+	}
+	return e
+}
+
 // snapshot digests every projected row.
 //
 // Ordered explicitly, and excluding updated_at. updated_at is now() and would
@@ -151,6 +177,13 @@ func snapshot(t *testing.T, p *pgxpool.Pool) string {
 		`SELECT opportunity_id::text, request_id::text, satellite_id, mode,
 		        quality_score::text, won::text, ST_AsText(footprint)
 		 FROM readmodel.opportunity_views ORDER BY opportunity_id`,
+		// The ephemeris belongs in the digest for the same reason the others
+		// do: the replay and convergence properties are claims about the WHOLE
+		// read model, and a table left out of the snapshot is a table those
+		// tests do not actually cover.
+		`SELECT satellite_id, sample_at::text, longitude_deg::text, latitude_deg::text,
+		        altitude_m::text, tle_epoch::text, last_event_at::text
+		 FROM readmodel.ephemeris ORDER BY satellite_id, sample_at`,
 	}
 
 	digest := sha256.New()
@@ -210,8 +243,14 @@ func TestAFullReplayProducesIdenticalReadModels(t *testing.T) {
 	events := []func(context.Context) error{
 		func(ctx context.Context) error { return pr.ProjectRequestReceived(ctx, f.received()) },
 		func(ctx context.Context) error { return pr.ProjectOpportunities(ctx, f.opportunities()) },
+		func(ctx context.Context) error {
+			return pr.ProjectEphemeris(ctx, f.ephemeris(epoch.Add(30*time.Second), staleTLE, 4.0))
+		},
 		func(ctx context.Context) error { return pr.ProjectPlanCommitted(ctx, f.plan(1)) },
 		func(ctx context.Context) error { return pr.ProjectPlanCommitted(ctx, f.plan(2)) },
+		func(ctx context.Context) error {
+			return pr.ProjectEphemeris(ctx, f.ephemeris(epoch.Add(90*time.Second), freshTLE, 9.0))
+		},
 	}
 
 	if err := pr.Reset(t.Context()); err != nil {
@@ -263,15 +302,29 @@ func TestReplayingEventsInADifferentOrderConverges(t *testing.T) {
 	inOrder := []func(context.Context) error{
 		func(ctx context.Context) error { return pr.ProjectRequestReceived(ctx, f.received()) },
 		func(ctx context.Context) error { return pr.ProjectOpportunities(ctx, f.opportunities()) },
+		func(ctx context.Context) error {
+			return pr.ProjectEphemeris(ctx, f.ephemeris(epoch.Add(30*time.Second), staleTLE, 4.0))
+		},
+		func(ctx context.Context) error {
+			return pr.ProjectEphemeris(ctx, f.ephemeris(epoch.Add(90*time.Second), freshTLE, 9.0))
+		},
 		func(ctx context.Context) error { return pr.ProjectPlanCommitted(ctx, f.plan(1)) },
 		func(ctx context.Context) error { return pr.ProjectPlanCommitted(ctx, f.plan(2)) },
 	}
 	// The newer plan first, then the older one — exactly what a redelivery of
-	// version 1 after version 2 looks like.
+	// version 1 after version 2 looks like. The ephemeris is reversed too: the
+	// fresher element set's track arrives first and the older one behind it,
+	// which is the case its tle_epoch guard exists for.
 	shuffled := []func(context.Context) error{
 		func(ctx context.Context) error { return pr.ProjectRequestReceived(ctx, f.received()) },
 		func(ctx context.Context) error { return pr.ProjectPlanCommitted(ctx, f.plan(2)) },
+		func(ctx context.Context) error {
+			return pr.ProjectEphemeris(ctx, f.ephemeris(epoch.Add(90*time.Second), freshTLE, 9.0))
+		},
 		func(ctx context.Context) error { return pr.ProjectOpportunities(ctx, f.opportunities()) },
+		func(ctx context.Context) error {
+			return pr.ProjectEphemeris(ctx, f.ephemeris(epoch.Add(30*time.Second), staleTLE, 4.0))
+		},
 		func(ctx context.Context) error { return pr.ProjectPlanCommitted(ctx, f.plan(1)) },
 	}
 

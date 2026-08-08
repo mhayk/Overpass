@@ -28,11 +28,23 @@ the frontend by a wide margin. The page is interactive before it arrives.
 
 ## What the globe does not draw yet
 
-Satellites. The read model holds the acquisitions the planner committed, not the
-ephemeris they were derived from, so there are no positions to render and no
-path to scrub. Interpolating one through footprint centroids would draw
-something that looks like an orbit and is not one — worse than an absent layer,
-because a viewer would believe it. Tracked in #128.
+Satellites. The positions now exist — #128 landed the ephemeris projection, so
+`readmodel.ephemeris` holds sampled positions and
+`/v1/geo/plans/{satellite}/{bucket}/czml` serves them as a `position` and a
+`path` per satellite. What has not happened is here: this component builds its
+entities from `/v1/geo/footprints`, not from the CZML document, so it draws
+footprints and nothing else.
+
+Wiring it is the remaining half of #28, and it is a real choice rather than a
+copy: either load the CZML document into `CzmlDataSource` and let the server's
+rendering drive the whole scene, or keep building entities by hand and add the
+path from the same samples. The first is less code and makes the server the one
+place geometry is decided; the second keeps the selection-highlighting this
+component already does.
+
+What is NOT on the table, then or now, is interpolating a path through footprint
+centroids. It would draw something that looks like an orbit and is not one —
+worse than an absent layer, because a viewer would believe it.
 
 ## Tests
 

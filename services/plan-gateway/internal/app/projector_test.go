@@ -82,6 +82,27 @@ func envelopeFor(t *testing.T, subject string, at time.Time) string {
 				"quality_score":          0.9,
 			}},
 		}
+	case app.SubjectEphemerisComputed:
+		base["producer"] = "feasibility-service"
+		base["data"] = map[string]any{
+			"satellite_id": "CAPELLA-14",
+			"computed_at":  when,
+			"horizon":      map[string]any{"start": when, "end": stamp(at.Add(3 * time.Hour))},
+			"tle_reference": map[string]any{
+				"satellite_id":  "CAPELLA-14",
+				"norad_id":      59103,
+				"tle_epoch":     stamp(at.Add(-12 * time.Hour)),
+				"tle_age_hours": 12,
+				"staleness":     "FRESH",
+			},
+			"epoch":             when,
+			"sample_interval_s": 10,
+			"sample_count":      2,
+			"samples": []any{
+				[]float64{0, 4.01, 51.9, 693412.8},
+				[]float64{10, 4.05, 52.5, 693400.1},
+			},
+		}
 	case app.SubjectPlanCommitted:
 		base["producer"] = "planner-service"
 		base["data"] = map[string]any{
@@ -188,6 +209,10 @@ func (p *recordingProjection) ProjectUnfulfilled(_ context.Context, _ port.Reque
 	return p.note("unfulfilled")
 }
 
+func (p *recordingProjection) ProjectEphemeris(_ context.Context, _ port.EphemerisComputed) error {
+	return p.note("ephemeris")
+}
+
 func (p *recordingProjection) Cursor(_ context.Context, stream string) (port.Cursor, error) {
 	return p.cursors[stream], nil
 }
@@ -273,6 +298,7 @@ func TestEachSubjectReachesItsFold(t *testing.T) {
 		{app.SubjectOpportunitiesComputed, "opportunities"},
 		{app.SubjectPlanCommitted, "plan"},
 		{app.SubjectRequestUnfulfilled, "unfulfilled"},
+		{app.SubjectEphemerisComputed, "ephemeris"},
 	} {
 		t.Run(tc.subject, func(t *testing.T) {
 			projection := newRecording()

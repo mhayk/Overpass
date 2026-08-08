@@ -54,6 +54,10 @@ var decoders = map[string]func(*json.Decoder) error{
 		var v events.FeasibilityOpportunitiesComputed
 		return d.Decode(&v)
 	},
+	"feasibility.ephemeris.computed.v1": func(d *json.Decoder) error {
+		var v events.FeasibilityEphemerisComputed
+		return d.Decode(&v)
+	},
 	"planning.plan.committed.v1": func(d *json.Decoder) error {
 		var v events.PlanCommitted
 		return d.Decode(&v)
@@ -126,6 +130,11 @@ func TestInvalidFixturesAreRejected(t *testing.T) {
 		"longitude-out-of-range.json":     false,
 		"latitude-longitude-swapped.json": false,
 		"wrong-event-type.json":           false,
+		// An ephemeris sample of three numbers instead of four. The schema pins
+		// the length with minItems/maxItems; Go sees [][]float64, and a slice
+		// carries no length in its type, so a short sample decodes cleanly.
+		// The same gap as prefixItems, arrived at from the other end.
+		"sample-missing-altitude.json": false,
 	}
 
 	walkFixtures(t, "invalid", func(name, eventType string, raw []byte) {

@@ -11,6 +11,7 @@ package render
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/mhayk/overpass/services/plan-gateway/internal/port"
@@ -38,6 +39,7 @@ type Packet struct {
 	Properties   *PlanProps   `json:"properties,omitempty"`
 	Label        *LabelGfx    `json:"label,omitempty"`
 	Position     *PositionGfx `json:"position,omitempty"`
+	Path         *PathGfx     `json:"path,omitempty"`
 }
 
 // Clock drives the timeline. Cesium scrubs against this rather than re-querying.
@@ -94,9 +96,42 @@ type Cartesian2 struct {
 	Cartesian2 []float64 `json:"cartesian2"`
 }
 
-// PositionGfx anchors a label.
+// PositionGfx is a position, constant or sampled.
+//
+// Both forms in one struct because CZML uses one property for both, and the
+// difference is entirely whether `epoch` is set. Constant: three numbers, no
+// epoch. Sampled: `[t, lon, lat, height]` repeated, with the offsets in seconds
+// after `epoch` — which is exactly the shape the ephemeris event carries, so
+// the renderer copies rather than converts.
 type PositionGfx struct {
+	// Epoch is the origin for the sample time offsets. Absent for a constant
+	// position, and its absence is what tells Cesium to read the array as one
+	// triple rather than as samples.
+	Epoch string `json:"epoch,omitempty"`
+
 	CartographicDegrees []float64 `json:"cartographicDegrees"`
+
+	// LAGRANGE, not Cesium's default LINEAR. Straight lines between samples cut
+	// the corner of a curving orbit; at ten-second spacing that is small over
+	// most of a pass and visible where the track turns hardest, which for a
+	// sun-synchronous constellation is the poles — where it spends most of its
+	// time.
+	InterpolationAlgorithm string `json:"interpolationAlgorithm,omitempty"`
+	InterpolationDegree    int    `json:"interpolationDegree,omitempty"`
+
+	// FIXED, i.e. Earth-fixed. The samples are geodetic longitude and latitude
+	// on a rotating Earth; INERTIAL would make the track drift westward across
+	// the globe at fifteen degrees an hour and still render perfectly happily.
+	ReferenceFrame string `json:"referenceFrame,omitempty"`
+}
+
+// PathGfx draws the orbit track swept by a sampled position.
+type PathGfx struct {
+	Material   Material `json:"material"`
+	Width      float64  `json:"width"`
+	LeadTime   float64  `json:"leadTime"`
+	TrailTime  float64  `json:"trailTime"`
+	Resolution float64  `json:"resolution"`
 }
 
 // PlanProps carries plan metadata Cesium ignores and the UI reads.
@@ -118,17 +153,23 @@ var (
 	colourExecuted   = []int{80, 220, 140, 120}
 	colourSuperseded = []int{160, 160, 170, 45}
 	colourOutline    = []int{255, 255, 255, 160}
+	// The orbit track. Warm against the cool footprints, so the two layers are
+	// distinguishable at a glance without a legend — the path crosses the
+	// footprints constantly and a similar hue would read as one shape.
+	colourPath = []int{255, 190, 90, 220}
 )
 
 // PlanCZML renders one plan as a CZML packet stream.
 //
-// What it does NOT contain: the satellite's position track and its ground
-// track. Those need ephemeris, and the read model holds none — it holds the
-// acquisitions the planner committed, not the orbit they were derived from.
-// Interpolating a path through the footprint centroids would produce a curve
-// that looks like an orbit and is not one, which is worse than an absent layer:
-// a viewer would believe it. The path arrives when an ephemeris projection
-// does, and the document packet's clock is already shaped to carry it.
+// The satellite's path comes from `plan.Track` — sampled positions projected
+// from feasibility.ephemeris.computed.v1 — or it is absent. There is no third
+// option, and that is the decision #27 made and #128 kept: interpolating a
+// curve through the committed footprint centroids would produce something that
+// looks like an orbit and is not one, which is worse than an absent layer
+// because a viewer would believe it.
+//
+// So a plan whose bucket the ephemeris sweep has not reached renders exactly as
+// it did before: footprints and a clock, no path.
 func PlanCZML(plan port.PlanView, staleness port.Cursor, now time.Time) ([]byte, error) {
 	interval := czmlInterval(plan.BucketStart, plan.BucketEnd)
 	lag := now.Sub(staleness.LastEventAt).Seconds()
@@ -161,6 +202,13 @@ func PlanCZML(plan port.PlanView, staleness port.Cursor, now time.Time) ([]byte,
 		},
 	}}
 
+	// The satellite before the acquisitions. Packet order is not semantic in
+	// CZML, but a reader opening the document sees the entity that owns the
+	// scene first, and the golden file is easier to review for it.
+	if packet := satellitePacket(plan); packet != nil {
+		packets = append(packets, *packet)
+	}
+
 	for _, a := range plan.Acquisitions {
 		packet, err := acquisitionPacket(a)
 		if err != nil {
@@ -172,6 +220,84 @@ func PlanCZML(plan port.PlanView, staleness port.Cursor, now time.Time) ([]byte,
 	}
 
 	return json.Marshal(packets)
+}
+
+// satellitePacket renders the orbit track, or nothing at all.
+//
+// Two samples is the floor, and it is not arbitrary: one sample is a position,
+// not a path, and Cesium given a single sample holds the satellite there for
+// the whole interval — a stationary satellite, rendered confidently.
+func satellitePacket(plan port.PlanView) *Packet {
+	if len(plan.Track) < 2 {
+		return nil
+	}
+
+	epoch := plan.Track[0].At
+	values := make([]float64, 0, len(plan.Track)*4)
+	for _, sample := range plan.Track {
+		values = append(values,
+			sample.At.Sub(epoch).Seconds(),
+			round(sample.LongitudeDeg, 6),
+			round(sample.LatitudeDeg, 6),
+			// Whole metres. The propagator's own error is metres and no viewer
+			// can display less; the fractional part is pure payload on the
+			// largest array in the document.
+			round(sample.AltitudeM, 0),
+		)
+	}
+
+	// Availability spans the SAMPLES, not the plan's bucket. They are usually
+	// the same interval and must not be assumed to be: a bucket the sweep has
+	// only partly covered would otherwise ask Cesium for positions it does not
+	// have, and Cesium answers by holding the last one — a satellite frozen in
+	// place, which reads as a bug in the physics rather than a gap in the data.
+	last := plan.Track[len(plan.Track)-1].At
+
+	return &Packet{
+		ID:           "satellite/" + plan.SatelliteID,
+		Name:         plan.SatelliteID,
+		Description:  fmt.Sprintf("%d sampled positions", len(plan.Track)),
+		Availability: czmlInterval(epoch, last),
+		Position: &PositionGfx{
+			Epoch:                  epoch.UTC().Format(CZMLTimeFormat),
+			CartographicDegrees:    values,
+			InterpolationAlgorithm: "LAGRANGE",
+			// Five, Cesium's own default for sampled positions. Higher degrees
+			// fit the samples more closely and ring between them, which on an
+			// orbit shows up as a track that wobbles across its own path.
+			InterpolationDegree: 5,
+			ReferenceFrame:      "FIXED",
+		},
+		Path: &PathGfx{
+			Material: Material{SolidColor: &SolidColor{Color: Material{RGBA: colourPath}}},
+			Width:    2,
+			// Half an orbit of trail and none of lead. Drawing the whole bucket
+			// at once makes three hours of ground track cross itself repeatedly
+			// and tells a viewer nothing about where the satellite is now;
+			// showing where it is going would also pre-announce acquisitions
+			// the timeline is about to reach.
+			LeadTime:  0,
+			TrailTime: 2700,
+			// Cesium subdivides the path to this many seconds when the samples
+			// are further apart. Ours are ten seconds apart, so this never
+			// fires — it is here so the path stays smooth if the sample
+			// interval is ever widened for payload.
+			Resolution: 60,
+		},
+	}
+}
+
+// round to n decimal places.
+//
+// Coordinate precision is decided HERE rather than in SQL, unlike footprints —
+// those go through ST_AsGeoJSON, which takes a precision argument, so there is
+// no reason not to let PostGIS do it. Nothing rounds a float8 column on the way
+// out, and this is the largest array in the document, so the last layer before
+// the bytes is where it has to happen. The budget test in this package is what
+// measures the result.
+func round(v float64, places int) float64 {
+	scale := math.Pow(10, float64(places))
+	return math.Round(v*scale) / scale
 }
 
 func acquisitionPacket(a port.AcquisitionView) (*Packet, error) {

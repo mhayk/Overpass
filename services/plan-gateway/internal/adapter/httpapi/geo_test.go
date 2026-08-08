@@ -1,6 +1,7 @@
 package httpapi_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -300,5 +301,76 @@ func TestTheCZMLValidatorTracksThePlanNotTheGlobalCursor(t *testing.T) {
 
 	if rec := getWith(t, h, czmlPath, tag); rec.Code != http.StatusNotModified {
 		t.Fatalf("an unrelated cursor move invalidated the document (%d)", rec.Code)
+	}
+}
+
+// TestTheCZMLEndpointServesTheOrbitTrackWhenThereIsOne is the end of the #128
+// chain that the unit tests each see only a piece of: the read model holds
+// samples, Plan() carries them, and the document that reaches a client has a
+// path in it.
+func TestTheCZMLEndpointServesTheOrbitTrackWhenThereIsOne(t *testing.T) {
+	plan := populated()
+	for i := range 4 {
+		plan.Track = append(plan.Track, port.EphemerisSample{
+			At:           plan.BucketStart.Add(time.Duration(i*10) * time.Second),
+			LongitudeDeg: 4.0 + float64(i)*0.04,
+			LatitudeDeg:  51.9 + float64(i)*0.66,
+			AltitudeM:    693412,
+		})
+	}
+
+	rec := getWith(t, serve(t, &fakeReads{plan: plan}, nil), czmlPath, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+
+	var packets []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &packets); err != nil {
+		t.Fatalf("not JSON: %v", err)
+	}
+	var found bool
+	for _, packet := range packets {
+		if packet["id"] == "satellite/SAT-1" {
+			found = true
+			if _, present := packet["path"]; !present {
+				t.Error("the satellite packet has no path")
+			}
+		}
+	}
+	if !found {
+		t.Errorf("no satellite packet in the document:\n%s", rec.Body.String())
+	}
+}
+
+// TestTheCZMLEndpointStillServesAPlanWithNoTrack is the case that must not
+// regress. The ephemeris sweep runs on its own timer, so a plan committed for a
+// bucket it has not reached is ordinary rather than exceptional — and the
+// globe has to render footprints for it either way.
+func TestTheCZMLEndpointStillServesAPlanWithNoTrack(t *testing.T) {
+	rec := getWith(t, serve(t, &fakeReads{plan: populated()}, nil), czmlPath, "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("%d %s", rec.Code, rec.Body.String())
+	}
+	if bytes.Contains(rec.Body.Bytes(), []byte(`"path"`)) {
+		t.Error("a path was rendered with no ephemeris behind it")
+	}
+}
+
+// TestTheETagChangesWhenTheTrackDoes. The validator is computed over the
+// rendered bytes, so this holds by construction — it is asserted because the
+// consequence of it NOT holding is invisible: a globe would keep revalidating
+// its way to a 304 and never draw the orbit that had arrived.
+func TestTheETagChangesWhenTheTrackDoes(t *testing.T) {
+	without := getWith(t, serve(t, &fakeReads{plan: populated()}, nil), czmlPath, "")
+
+	plan := populated()
+	plan.Track = []port.EphemerisSample{
+		{At: plan.BucketStart, LongitudeDeg: 4, LatitudeDeg: 51.9, AltitudeM: 693412},
+		{At: plan.BucketStart.Add(10 * time.Second), LongitudeDeg: 4.04, LatitudeDeg: 52.56, AltitudeM: 693410},
+	}
+	with := getWith(t, serve(t, &fakeReads{plan: plan}, nil), czmlPath, "")
+
+	if without.Header().Get("ETag") == with.Header().Get("ETag") {
+		t.Error("the ETag did not change when the orbit track appeared")
 	}
 }

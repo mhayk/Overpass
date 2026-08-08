@@ -376,3 +376,166 @@ func TestStalenessIsOnTheGeoRenderings(t *testing.T) {
 		t.Errorf("lag = %v, want 300", fc.Staleness.LagSeconds)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// The satellite path (#128)
+// ---------------------------------------------------------------------------
+//
+// Until the ephemeris projection landed, PlanCZML carried footprints and a
+// clock and no orbit — and the alternative on the table, interpolating a curve
+// through footprint centroids, was refused because it would draw something that
+// looks like an orbit and is not one. These tests pin the difference: the path
+// comes from sampled positions or it does not exist.
+
+// sampleTrack is a short, physically plausible LEO arc.
+//
+// Six decimal places on the coordinates and whole metres on the altitude,
+// because that is what the renderer emits and a fixture at full float precision
+// would measure a payload the system never sends.
+func sampleTrack(n int) []port.EphemerisSample {
+	out := make([]port.EphemerisSample, 0, n)
+	for i := range n {
+		out = append(out, port.EphemerisSample{
+			At:           bucketStart.Add(time.Duration(i*10) * time.Second),
+			LongitudeDeg: 4.0 + float64(i)*0.041234,
+			LatitudeDeg:  51.9 + float64(i)*0.663211,
+			AltitudeM:    693412.83219,
+		})
+	}
+	return out
+}
+
+func planWithTrack(n int) port.PlanView {
+	plan := samplePlan()
+	plan.Track = sampleTrack(n)
+	return plan
+}
+
+func packetsOf(t *testing.T, body []byte) []map[string]any {
+	t.Helper()
+	var packets []map[string]any
+	if err := json.Unmarshal(body, &packets); err != nil {
+		t.Fatalf("not JSON: %v", err)
+	}
+	return packets
+}
+
+func TestAPlanWithNoEphemerisCarriesNoPath(t *testing.T) {
+	// The read model can legitimately hold no track for a bucket — the sweep
+	// runs on its own timer and may not have reached it. An absent layer is the
+	// correct answer; a path invented from what IS present is not.
+	got, err := render.PlanCZML(samplePlan(), port.Cursor{LastEventAt: committedAt}, renderedAt)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	for _, packet := range packetsOf(t, got) {
+		if _, present := packet["path"]; present {
+			t.Fatalf("packet %v carries a path with no ephemeris behind it", packet["id"])
+		}
+	}
+}
+
+func TestTheSatellitePacketCarriesSampledPositionsAndAPath(t *testing.T) {
+	got, err := render.PlanCZML(planWithTrack(4), port.Cursor{LastEventAt: committedAt}, renderedAt)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	packets := packetsOf(t, got)
+	if len(packets) != 4 {
+		t.Fatalf("got %d packets, want document + satellite + two acquisitions", len(packets))
+	}
+
+	satellite := packets[1]
+	if satellite["id"] != "satellite/CAPELLA-14" {
+		t.Fatalf("second packet is %v, want the satellite", satellite["id"])
+	}
+	if _, present := satellite["path"]; !present {
+		t.Error("the satellite packet has no path")
+	}
+
+	position, ok := satellite["position"].(map[string]any)
+	if !ok {
+		t.Fatalf("position is %T, want an object with an epoch and samples", satellite["position"])
+	}
+	if position["epoch"] != "2026-08-07T09:00:00Z" {
+		t.Errorf("epoch = %v, want the first sample's instant", position["epoch"])
+	}
+	// LAGRANGE, not LINEAR. Cesium's default straight-line interpolation between
+	// samples cuts the corner of a curving orbit; at ten-second spacing that is
+	// small, and it is visible at the poles where the track turns hardest.
+	if position["interpolationAlgorithm"] != "LAGRANGE" {
+		t.Errorf("interpolationAlgorithm = %v", position["interpolationAlgorithm"])
+	}
+
+	values, ok := position["cartographicDegrees"].([]any)
+	if !ok {
+		t.Fatalf("cartographicDegrees is %T, want an array", position["cartographicDegrees"])
+	}
+	if len(values) != 4*4 {
+		t.Fatalf("got %d values for 4 samples, want 16 — [t, lon, lat, height] each", len(values))
+	}
+	// The order, which is the failure that renders happily and is wrong.
+	if values[0] != float64(0) {
+		t.Errorf("first value is %v, want a zero time offset from the epoch", values[0])
+	}
+	if values[1] != 4.0 {
+		t.Errorf("second value is %v, want the longitude", values[1])
+	}
+	if values[2] != 51.9 {
+		t.Errorf("third value is %v, want the latitude", values[2])
+	}
+	if values[3] != float64(693413) {
+		t.Errorf("fourth value is %v, want the height in metres", values[3])
+	}
+	if values[4] != float64(10) {
+		t.Errorf("fifth value is %v, want the second sample at ten seconds", values[4])
+	}
+}
+
+func TestThePathIsAvailableOnlyOverTheBucketItWasSampledFor(t *testing.T) {
+	// Availability is what stops Cesium extrapolating a position outside the
+	// samples it holds. Without it the satellite sits frozen at the last sample
+	// for the rest of the timeline, which reads as a stationary satellite.
+	got, err := render.PlanCZML(planWithTrack(4), port.Cursor{LastEventAt: committedAt}, renderedAt)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	satellite := packetsOf(t, got)[1]
+	if satellite["availability"] != "2026-08-07T09:00:00Z/2026-08-07T09:00:30Z" {
+		t.Errorf("availability = %v, want the sampled span", satellite["availability"])
+	}
+}
+
+func TestSamplesAreRoundedToTheSystemsCoordinatePrecision(t *testing.T) {
+	// Six decimal places is ~0.1 m at the equator, matching what the read layer
+	// asks PostGIS for on footprints. Full float64 precision would be about
+	// forty percent more payload for digits no viewer can display and a
+	// propagator cannot justify — this is the single largest array in the
+	// document, so it is the one place the difference is worth a test.
+	plan := samplePlan()
+	plan.Track = []port.EphemerisSample{
+		{At: bucketStart, LongitudeDeg: 4.1234567891234, LatitudeDeg: 51.9876543219876, AltitudeM: 693412.83219},
+		{At: bucketStart.Add(10 * time.Second), LongitudeDeg: 4.2, LatitudeDeg: 52.0, AltitudeM: 693400.0},
+	}
+	got, err := render.PlanCZML(plan, port.Cursor{LastEventAt: committedAt}, renderedAt)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if bytes.Contains(got, []byte("4.1234567891234")) {
+		t.Error("full float precision reached the wire")
+	}
+	if !bytes.Contains(got, []byte("4.123457")) {
+		t.Errorf("longitude was not rounded to six places:\n%s", got)
+	}
+	if !bytes.Contains(got, []byte("693413")) {
+		t.Errorf("altitude was not rounded to whole metres:\n%s", got)
+	}
+}
+
+func TestPlanCZMLWithATrackGolden(t *testing.T) {
+	got, err := render.PlanCZML(planWithTrack(6), port.Cursor{LastEventAt: committedAt}, renderedAt)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	golden(t, "plan-with-track.czml.json", got)
+}

@@ -114,7 +114,59 @@ func (r *Reads) Plan(
 		return port.PlanView{}, err
 	}
 	p.Acquisitions = acqs
+
+	// The orbit track for this bucket, if the ephemeris sweep has reached it.
+	//
+	// Loaded HERE and not in Plans(). One bucket is about a thousand samples;
+	// a twenty-bucket list would drag twenty thousand rows into a response that
+	// renders a table. Only the CZML rendering needs a path.
+	track, err := r.Ephemeris(ctx, p.SatelliteID, p.BucketStart, p.BucketEnd)
+	if err != nil {
+		return port.PlanView{}, err
+	}
+	p.Track = track
 	return p, nil
+}
+
+// Ephemeris returns one satellite's samples over `[from, to)`, in time order.
+//
+// Half-open, matching the plan bucket it is usually asked for: the sample at
+// exactly `to` belongs to the next bucket, and including it would draw the
+// first point of the following track onto the end of this one.
+//
+// An empty result is not an error and must not be reported as one. The sweep
+// runs on its own timer and a bucket it has not reached yet has no samples,
+// which is a plan with no path rather than a failure to read.
+func (r *Reads) Ephemeris(
+	ctx context.Context, satelliteID string, from, to time.Time,
+) ([]port.EphemerisSample, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT sample_at, longitude_deg, latitude_deg, altitude_m
+		FROM readmodel.ephemeris
+		WHERE satellite_id = $1 AND sample_at >= $2 AND sample_at < $3
+		ORDER BY sample_at
+	`, satelliteID, from, to)
+	if err != nil {
+		return nil, fmt.Errorf("reading ephemeris for %s: %w", satelliteID, err)
+	}
+	defer rows.Close()
+
+	var out []port.EphemerisSample
+	for rows.Next() {
+		var s port.EphemerisSample
+		if scanErr := rows.Scan(&s.At, &s.LongitudeDeg, &s.LatitudeDeg, &s.AltitudeM); scanErr != nil {
+			return nil, fmt.Errorf("scanning ephemeris sample: %w", scanErr)
+		}
+		out = append(out, s)
+	}
+	if rowsErr := rows.Err(); rowsErr != nil {
+		return nil, fmt.Errorf("reading ephemeris: %w", rowsErr)
+	}
+	// Rounding is NOT applied here, unlike the six decimal places asked of
+	// ST_AsGeoJSON above. Nothing rounds a float8 column on the way out of
+	// Postgres, and the renderer is the layer whose budget test measures the
+	// result — see render.satellitePacket.
+	return out, nil
 }
 
 func (r *Reads) acquisitionsForPlan(ctx context.Context, planID string) ([]port.AcquisitionView, error) {

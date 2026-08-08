@@ -145,6 +145,42 @@ class Propagator:
             elevation_m=float(sub.elevation.m),
         )
 
+    def subpoints(self, whens: Sequence[datetime]) -> list[GroundPoint]:
+        """Vectorised form of `subpoint`. One propagation call, not N.
+
+        Exists for the same reason `elevations_deg` does. An ephemeris bucket is
+        a thousand instants, and doing them one at a time is the difference
+        between a sweep that keeps up with a rolling horizon and one that does
+        not.
+
+        Skyfield returns scalars for a scalar Time and arrays otherwise, so the
+        single-instant case is handled explicitly rather than being indexed into
+        and raising on a float.
+        """
+        if not whens:
+            return []
+        geocentric = self._satellite.at(self.times(whens))
+        sub = wgs84.geographic_position_of(geocentric)
+        latitudes = sub.latitude.degrees
+        longitudes = sub.longitude.degrees
+        elevations = sub.elevation.m
+        if not hasattr(latitudes, "__len__"):
+            return [
+                GroundPoint(
+                    latitude_deg=float(latitudes),
+                    longitude_deg=float(longitudes),
+                    elevation_m=float(elevations),
+                )
+            ]
+        return [
+            GroundPoint(
+                latitude_deg=float(lat),
+                longitude_deg=float(lon),
+                elevation_m=float(height),
+            )
+            for lat, lon, height in zip(latitudes, longitudes, elevations, strict=True)
+        ]
+
     def topocentric(self, target: GroundPoint, when: datetime) -> Topocentric:
         """Elevation, azimuth and slant range from `target` to the satellite."""
         elevations, azimuths, ranges = self._altaz(target, self.times([when]))

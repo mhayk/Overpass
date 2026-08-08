@@ -17,6 +17,9 @@ actually emits.
 | CZML, one plan, 40 acquisitions, 33-vertex footprints | 41245 | 1031 |
 | GeoJSON, 100 footprints, 33 vertices | 119522 | 1195 |
 | GeoJSON, 250 footprints (the limit), 33 vertices | 298622 | 1194 |
+| CZML, a 3-hour orbit track at 10 s (the chosen interval) | 36138 | 33 |
+| CZML, the same track at 30 s | 12092 | 33 |
+| CZML, the same track at 60 s | 6125 | 34 |
 
 ## Ceilings
 
@@ -25,10 +28,28 @@ actually emits.
 | CZML bytes per acquisition | 1150 |
 | GeoJSON bytes per feature | 1300 |
 | A full footprints page (250 features) | 358400 |
+| CZML bytes per ephemeris sample | 36 |
+| A plan document carrying a 3-hour orbit track | 87040 |
 
 Deliberately generous against what is measured above. The point is to catch a
 change that makes a document several times larger, not to fail when a field is
 renamed.
+
+## The sample interval is the ephemeris knob
+
+The orbit track is the largest single thing the globe loads, and its size is
+linear in one number: how often the satellite is sampled. The table above
+measures the same three-hour bucket at three intervals so the choice is a
+measurement rather than a preference.
+
+**Ten seconds is what ships.** A LEO SAR satellite covers about 66 km of ground
+track in ten seconds. Cesium interpolates between samples, and the error of that
+interpolation grows with the gap — at sixty seconds the samples are 400 km apart
+and the drawn curve visibly cuts the corner where the track turns hardest, which
+for a sun-synchronous constellation is over the poles, where it spends most of
+its time. Six times the payload buys a path that is right where it is most
+looked at. The argument in full, including what would make us revisit it, is in
+[ADR-0016](decisions/0016-ephemeris-sampling-and-horizon.md).
 
 ## What keeps these numbers down
 
@@ -46,11 +67,20 @@ denial of service waiting for a client to ask for a year.
 nine decimal places on every interval is measurable size for precision no viewer
 displays — and acquisition windows are scheduled to the second anyway.
 
-**No ephemeris.** The CZML carries footprints and a clock, not a position track.
-That is a correctness decision rather than a size one — the read model holds no
-ephemeris, and interpolating a path through footprint centroids would draw a
-curve that looks like an orbit and is not one — but it is also why a plan
-document stays small.
+**Ephemeris samples as offsets, rounded.** A sample is
+`[seconds_after_epoch, lon, lat, height_m]` rather than a timestamped object:
+field names would be most of the payload at this cardinality, and an RFC 3339
+timestamp per sample costs more than the position it labels. Coordinates are
+rounded to six decimal places (~0.1 m, the same precision the read layer asks
+PostGIS for on footprints) and heights to whole metres. Measured: full float64
+precision costs 49 bytes per sample against 33, about 50% more, for digits no
+viewer can display and a propagator whose own error is metres cannot justify.
+
+**No path without ephemeris.** A plan whose bucket the ephemeris sweep has not
+reached renders footprints and a clock and nothing else. That is a correctness
+decision rather than a size one — interpolating a path through footprint
+centroids would draw a curve that looks like an orbit and is not one — but it is
+also why a plan document without a track stays small.
 
 ## What is not measured here
 
