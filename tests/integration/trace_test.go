@@ -94,9 +94,22 @@ func startFeasibilityWorker(t *testing.T, root string) {
 		t.Fatalf("uv sync: %v\n%s", err, output)
 	}
 
+	// The venv's OWN interpreter, not `uv run`.
+	//
+	// `uv run` spawns python as a CHILD, so cmd.Process.Kill() kills uv and
+	// leaves the worker alive — still bound to the durable `feasibility-worker`
+	// consumer and still draining it. That was survivable while exactly one test
+	// started a worker. It stopped being survivable when a second one did:
+	// TestEveryConsumerReceivesWhatItFiltersOn publishes a probe message and
+	// requires the consumer's pending count to RISE, and an orphaned worker eats
+	// the probe before it can be counted. Diagnosed from that failure, in CI.
+	//
+	// `uv sync --frozen` above has already built the venv, so executing its
+	// interpreter directly is the same environment with one fewer process
+	// between the test and the thing it is trying to stop.
 	//nolint:noctx // Killed explicitly below; a context would reap it politely
 	// and this test needs it to stop when told, not when the framework decides.
-	cmd := exec.Command("uv", "run", "python", "-m", "feasibility")
+	cmd := exec.Command(venvPython(t, root), "-m", "feasibility")
 	cmd.Dir = filepath.Join(root, "services", "feasibility")
 	cmd.Env = append(os.Environ(),
 		"NATS_URL="+env.natsURL,
@@ -151,6 +164,25 @@ const traceCustomerID = "acme-imaging"
 // tasking_requests_customer_id_fkey and a 503 that reads as a database outage.
 // One row here rather than waiting: the trace assertion is about propagation,
 // not about seeding, and the constraint doing its job is correct behaviour.
+// venvPython resolves the interpreter `uv sync` just built.
+//
+// Both layouts, because the path differs by platform and a test that only works
+// on the CI runner is a test nobody can reproduce locally.
+func venvPython(t *testing.T, root string) string {
+	t.Helper()
+	venv := filepath.Join(root, "services", "feasibility", ".venv")
+	for _, candidate := range []string{
+		filepath.Join(venv, "bin", "python"),
+		filepath.Join(venv, "Scripts", "python.exe"),
+	} {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+	t.Fatalf("no interpreter in %s; did `uv sync --frozen` run?", venv)
+	return ""
+}
+
 func seedCustomer(t *testing.T) {
 	t.Helper()
 	if _, err := env.pool.Exec(context.Background(), `
