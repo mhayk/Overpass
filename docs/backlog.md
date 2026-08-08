@@ -176,6 +176,37 @@ optimum, with runtimes.
 | M2-13 | Policy benchmark harness and `docs/policy-benchmark.md` | `type/perf` `area/planner` `risk/medium` |
 | M2-14 | ADR-0007 — allocation strategy, heuristic versus optimal | `type/adr` `risk/low` |
 | M2-15 | Unfulfilment reasons with structured explanations | `type/feature` `area/planner` `risk/medium` |
+| M2-16 | Planner input projections: `request_snapshots` and `candidate_opportunities` | `type/feature` `area/infra` `area/planner` `risk/high` |
+
+M2-16 is not in the original decomposition, and like M1-21 it is a **prerequisite,
+not a track.** M1-01 gave the planner every table it writes and none that it
+reads: the candidates arrive on one event, and the bid, tier and deadline the
+planner allocates by arrive on another. Where those facts come from when a round
+fires is a consistency decision — settled in
+[ADR-0015](decisions/0015-planner-projects-its-own-request-value.md) — and it has
+to be settled before M2-01 exists, because every issue from M2-01 onward reads
+those two tables.
+
+It also touches `db/migrations/`, which [ADR-0013](decisions/0013-parallel-agent-execution-in-worktrees.md)
+names a shared-fate path no track may write to. That is what makes it solo work in
+the main session rather than the first item of a planner track.
+
+**Sequencing for M2**, on the same principle
+[`00-methodology.md`](ai-engineering/00-methodology.md) states — parallelise where
+a contract exists, serialise where an invariant lives:
+
+| Phase | Work | Concurrency |
+| --- | --- | --- |
+| Prerequisite | M2-16 projections and ADR-0015 | Solo, main session |
+| Core | M2-01, M2-02, M2-04, M2-10 — the invariant lives here | Solo, one owner |
+| Fan-out | M2-05…M2-08, the four policies behind the frozen interface | Parallel |
+| Integration | M2-03, M2-09, M2-12, M2-13, M2-15 | Solo, after merge |
+
+The policies are the only genuinely parallel work in M2, and they are parallel for
+exactly one reason: `AllocationPolicy` is a contract, each policy is a pure
+function behind it, and no two policies share a file. That contract does not exist
+until M2-04, so the fan-out cannot start earlier no matter how many agents are
+available.
 
 ---
 

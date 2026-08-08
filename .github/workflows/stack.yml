@@ -74,7 +74,8 @@ jobs:
           set -euo pipefail
           for t in reference.satellites tasking.tasking_requests tasking.outbox \
                    feasibility.opportunities planning.collection_plans \
-                   planning.acquisitions readmodel.processed_events; do
+                   planning.acquisitions planning.request_snapshots \
+                   planning.candidate_opportunities readmodel.processed_events; do
             docker compose exec -T postgres psql -U overpass -d overpass -tAc \
               "SELECT to_regclass('$t') IS NOT NULL" | grep -qx t \
               || { echo "::error::missing table $t — did the migrate container run?"; exit 1; }
@@ -89,10 +90,15 @@ jobs:
       # This used to build a throwaway table and test that, which proved
       # Postgres can enforce an exclusion constraint — never in doubt — rather
       # than proving anything about ours. It now runs against the real
-      # planning.acquisitions, and the script's first phase deliberately breaks
-      # the schema three ways to show the assertions have teeth before applying
-      # them to the genuine article.
-      - name: The non-overlap invariant is enforced by the database
+      # planning.acquisitions, and the script deliberately breaks the schema
+      # four ways to show the assertions have teeth before applying them to the
+      # genuine article.
+      #
+      # Phase 3 tests the opposite kind of claim, added by ADR-0015: a candidate
+      # opportunity that arrives before its request snapshot must be STORABLE.
+      # Its mutant is the foreign key someone would add by reflex, shown
+      # rejecting exactly that arrival.
+      - name: The planning schema's structural claims are enforced by the database
         run: ./scripts/db-invariants.sh
 
       # The idempotent-consumer guarantee is a property of a transaction and a
