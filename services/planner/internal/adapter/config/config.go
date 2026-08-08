@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/mhayk/overpass/services/planner/internal/domain"
 )
 
 // Config is everything this service reads from its environment.
@@ -47,6 +49,11 @@ type Config struct {
 	// records it — which is what lets a committed plan be attributed to a
 	// strategy after the fact.
 	AllocationPolicy string
+
+	// The fairness model. Planner configuration and deliberately NOT part of the
+	// published contract, so it can be re-tuned without versioning a schema —
+	// and so clients cannot optimise against a published formula.
+	Fairness domain.Fairness
 }
 
 // Load reads and validates the environment.
@@ -104,6 +111,12 @@ func Load() (Config, error) {
 		problems = append(problems, err.Error())
 	}
 
+	if cfg.Fairness, err = fairness(); err != nil {
+		problems = append(problems, err.Error())
+	} else if err := cfg.Fairness.Validate(); err != nil {
+		problems = append(problems, err.Error())
+	}
+
 	switch cfg.AllocationPolicy {
 	case "GREEDY_BY_BID", "GREEDY_BY_VALUE_DENSITY", "VICKREY_SEALED_BID", "EXACT_DP":
 	default:
@@ -125,6 +138,48 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("invalid configuration:\n  - %s", strings.Join(problems, "\n  - "))
 	}
 	return cfg, nil
+}
+
+// fairness reads the tier multipliers and the ageing curve.
+//
+// The multipliers arrive as one variable rather than four, because they are one
+// decision: TIER_MULTIPLIERS="GOVERNMENT=4,CIVIL_PROTECTION=3,COMMERCIAL=1,BEST_EFFORT=0.5".
+// Four separate variables would let a deployment set three of them and leave the
+// fourth on a default that no longer relates to the others, which is a fairness
+// policy nobody chose.
+func fairness() (domain.Fairness, error) {
+	f := domain.DefaultFairness()
+
+	if raw, ok := os.LookupEnv("TIER_MULTIPLIERS"); ok && raw != "" {
+		parsed := map[string]float64{}
+		for _, pair := range strings.Split(raw, ",") {
+			name, value, found := strings.Cut(strings.TrimSpace(pair), "=")
+			if !found {
+				return f, fmt.Errorf("TIER_MULTIPLIERS entry %q is not TIER=multiplier", pair)
+			}
+			multiplier, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+			if err != nil {
+				return f, fmt.Errorf("TIER_MULTIPLIERS entry %q has a non-numeric multiplier", pair)
+			}
+			parsed[strings.TrimSpace(name)] = multiplier
+		}
+		// Replaced wholesale, not merged into the defaults. Merging would let a
+		// partial override inherit multipliers from a policy it was written to
+		// replace; Fairness.Validate then insists every tier is present, so an
+		// incomplete list fails at startup rather than in a plan.
+		f.TierMultipliers = parsed
+	}
+
+	var err error
+	if f.AgeingTimeConstant, err = duration("AGEING_TIME_CONSTANT", f.AgeingTimeConstant); err != nil {
+		return f, err
+	}
+	if raw, ok := os.LookupEnv("MAX_AGEING_FACTOR"); ok && raw != "" {
+		if f.MaxAgeingFactor, err = strconv.ParseFloat(raw, 64); err != nil {
+			return f, fmt.Errorf("MAX_AGEING_FACTOR is not a number: %q", raw)
+		}
+	}
+	return f, nil
 }
 
 func env(key, fallback string) string {

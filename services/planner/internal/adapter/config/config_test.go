@@ -143,3 +143,83 @@ func TestEveryValidLogLevelIsAccepted(t *testing.T) {
 		})
 	}
 }
+
+func TestFairnessDefaultsAreLoaded(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://overpass@localhost/overpass")
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("loading: %v", err)
+	}
+	if got := cfg.Fairness.TierMultipliers["CIVIL_PROTECTION"]; got != 3.0 {
+		t.Errorf("CIVIL_PROTECTION multiplier = %v, want 3.0", got)
+	}
+	if cfg.Fairness.MaxAgeingFactor != 3.0 {
+		t.Errorf("max ageing factor = %v", cfg.Fairness.MaxAgeingFactor)
+	}
+	if err := cfg.Fairness.Validate(); err != nil {
+		t.Errorf("the loaded default fairness is invalid: %v", err)
+	}
+}
+
+func TestTierMultipliersCanBeOverridden(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://overpass@localhost/overpass")
+	t.Setenv("TIER_MULTIPLIERS", "GOVERNMENT=10,CIVIL_PROTECTION=8,COMMERCIAL=2,BEST_EFFORT=1")
+	t.Setenv("MAX_AGEING_FACTOR", "4")
+	t.Setenv("AGEING_TIME_CONSTANT", "2h")
+
+	cfg, err := config.Load()
+	if err != nil {
+		t.Fatalf("loading: %v", err)
+	}
+	if got := cfg.Fairness.TierMultipliers["GOVERNMENT"]; got != 10 {
+		t.Errorf("GOVERNMENT multiplier = %v, want 10", got)
+	}
+	if cfg.Fairness.MaxAgeingFactor != 4 {
+		t.Errorf("max ageing factor = %v, want 4", cfg.Fairness.MaxAgeingFactor)
+	}
+	if cfg.Fairness.AgeingTimeConstant != 2*time.Hour {
+		t.Errorf("ageing time constant = %v, want 2h", cfg.Fairness.AgeingTimeConstant)
+	}
+}
+
+// A partial override is REPLACED wholesale, not merged, so Validate catches the
+// missing tier at startup. Merging would let it inherit a multiplier from the
+// policy it was written to replace — a fairness policy nobody chose.
+func TestAPartialTierOverrideIsRefused(t *testing.T) {
+	t.Setenv("DATABASE_URL", "postgres://overpass@localhost/overpass")
+	t.Setenv("TIER_MULTIPLIERS", "GOVERNMENT=10,COMMERCIAL=2")
+
+	_, err := config.Load()
+	if err == nil {
+		t.Fatal("a tier list missing two tiers was accepted; those requests would be valued at zero and lose in silence")
+	}
+	if !strings.Contains(err.Error(), "CIVIL_PROTECTION") && !strings.Contains(err.Error(), "BEST_EFFORT") {
+		t.Errorf("the error does not name a missing tier: %v", err)
+	}
+}
+
+func TestMalformedFairnessIsRefused(t *testing.T) {
+	tests := []struct {
+		name  string
+		key   string
+		value string
+	}{
+		{"a multiplier entry with no equals", "TIER_MULTIPLIERS", "GOVERNMENT:4"},
+		{"a non-numeric multiplier", "TIER_MULTIPLIERS", "GOVERNMENT=high,CIVIL_PROTECTION=3,COMMERCIAL=1,BEST_EFFORT=0.5"},
+		{"a non-numeric ageing cap", "MAX_AGEING_FACTOR", "lots"},
+		// The bound: a cap at or above the tier spread lets an aged bottom-tier
+		// request outrank a fresh top-tier one.
+		{"an ageing cap that can invert the tiers", "MAX_AGEING_FACTOR", "8"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("DATABASE_URL", "postgres://overpass@localhost/overpass")
+			t.Setenv(tt.key, tt.value)
+			if _, err := config.Load(); err == nil {
+				t.Fatalf("accepted %s=%q", tt.key, tt.value)
+			}
+		})
+	}
+}
