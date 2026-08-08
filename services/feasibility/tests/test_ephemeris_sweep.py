@@ -336,3 +336,29 @@ def _purge_ephemeris_outbox() -> None:
     """
     with psycopg.connect(dsn(), autocommit=True) as conn, conn.cursor() as cursor:
         cursor.execute("DELETE FROM feasibility.outbox WHERE subject = %s", (EPHEMERIS_SUBJECT,))
+
+
+class TestTheElementSetCarriesTheSatelliteId:
+    """`ElementSet.name` is a satellite_id, not a Celestrak display string.
+
+    Load-bearing beyond tidiness. `pipeline.evaluate` publishes
+    `window.satellite_id`, which comes from `element_set.name`, and compares
+    `excluded_satellite_ids` against the same value. Parsing under the display
+    name would publish `CAPELLA-11 (ACADIA-1)` — a satellite_id the contract's
+    pattern rejects and that joins to nothing in reference.satellites — and would
+    make a customer's exclusion of `CAPELLA-11` match nothing at all.
+    """
+
+    def test_the_element_set_name_is_the_id_the_rest_of_the_system_uses(
+        self, connection: psycopg.Connection[Any]
+    ) -> None:
+        for entry in newest_element_sets(connection, WHEN):
+            assert entry.element_set.name == entry.satellite_id
+
+    def test_the_celestrak_name_is_still_available_for_display(
+        self, connection: psycopg.Connection[Any]
+    ) -> None:
+        # Not discarded — an operator looking at a satellite wants the name it
+        # is catalogued under.
+        entries = newest_element_sets(connection, WHEN)
+        assert all(entry.display_name for entry in entries)

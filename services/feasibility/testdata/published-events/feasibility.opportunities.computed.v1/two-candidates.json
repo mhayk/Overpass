@@ -1,0 +1,130 @@
+{
+  "event_id": "fceb713f-a183-558a-b8d1-c6d5e86bee7f",
+  "event_type": "feasibility.opportunities.computed.v1",
+  "schema_version": "1.0.0",
+  "occurred_at": "2026-08-07T09:14:04.870Z",
+  "correlation_id": "9b8a7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d",
+  "causation_id": "0f1d2c3b-4a59-4687-9c8d-1e2f3a4b5c6d",
+  "producer": "feasibility-service",
+  "data": {
+    "request_id": "3c4d5e6f-7a8b-4c9d-8e1f-2a3b4c5d6e7f",
+    "computed_at": "2026-08-07T09:14:04.870Z",
+    "horizon": {
+      "start": "2026-08-07T10:00:00Z",
+      "end": "2026-08-08T10:00:00Z"
+    },
+    "tle_references": [
+      {
+        "satellite_id": "SENTINEL-1A",
+        "norad_id": 39634,
+        "tle_epoch": "2026-08-06T21:41:12Z",
+        "tle_age_hours": 11.6,
+        "staleness": "FRESH"
+      }
+    ],
+    "satellites_evaluated": 6,
+    "opportunity_count": 2,
+    "truncated": false,
+    "compute_duration_ms": 742,
+    "opportunities": [
+      {
+        "opportunity_id": "331bfa28-a182-5d06-a86f-9247907c2539",
+        "satellite_id": "SENTINEL-1A",
+        "mode": "SPOTLIGHT",
+        "access_window": {
+          "start": "2026-08-07T10:00:00Z",
+          "end": "2026-08-07T10:01:36Z"
+        },
+        "acquisition_duration_s": 12.5,
+        "orbit_number": 61204,
+        "geometry": {
+          "incidence_angle_deg": 33.7,
+          "look_side": "RIGHT",
+          "squint_angle_deg": -4.1,
+          "slant_range_km": 812.4,
+          "elevation_angle_deg": 54.9,
+          "ground_azimuth_deg": 281.3,
+          "roll_angle_deg": 29.2
+        },
+        "footprint": {
+          "type": "Polygon",
+          "coordinates": [
+            [
+              [
+                -7.66,
+                40.28
+              ],
+              [
+                -7.57,
+                40.28
+              ],
+              [
+                -7.57,
+                40.35
+              ],
+              [
+                -7.66,
+                40.35
+              ],
+              [
+                -7.66,
+                40.28
+              ]
+            ]
+          ]
+        },
+        "duty_cycle_cost_s": 18.5,
+        "quality_score": 0.9
+      },
+      {
+        "opportunity_id": "8e4ba676-d803-5c32-9a58-1cde35294cb7",
+        "satellite_id": "SENTINEL-1A",
+        "mode": "SPOTLIGHT",
+        "access_window": {
+          "start": "2026-08-07T10:01:00Z",
+          "end": "2026-08-07T10:02:36Z"
+        },
+        "acquisition_duration_s": 12.5,
+        "orbit_number": 61205,
+        "geometry": {
+          "incidence_angle_deg": 33.7,
+          "look_side": "RIGHT",
+          "squint_angle_deg": -4.1,
+          "slant_range_km": 812.4,
+          "elevation_angle_deg": 54.9,
+          "ground_azimuth_deg": 281.3,
+          "roll_angle_deg": 29.2
+        },
+        "footprint": {
+          "type": "Polygon",
+          "coordinates": [
+            [
+              [
+                -7.6599,
+                40.28
+              ],
+              [
+                -7.5699,
+                40.28
+              ],
+              [
+                -7.5699,
+                40.35
+              ],
+              [
+                -7.6599,
+                40.35
+              ],
+              [
+                -7.6599,
+                40.28
+              ]
+            ]
+          ]
+        },
+        "duty_cycle_cost_s": 18.5,
+        "quality_score": 0.72
+      }
+    ]
+  }
+}

@@ -16,6 +16,10 @@ It now starts THREE loops rather than one: the consumer, the outbox relay, and
 the rolling ephemeris sweep. The relay's absence was a real defect rather than a
 staging decision — events went into `feasibility.outbox` and nothing ever took
 them out, so no consumer downstream ever saw anything this service produced.
+
+The consumer runs `handler.sweep_handler`, which is the real SGP4 sweep. It ran
+`_record_only` until #131 — a handler that did no domain work whatever, left
+behind when the issue that was supposed to replace it closed without doing so.
 """
 
 from __future__ import annotations
@@ -26,18 +30,13 @@ import logging
 import os
 import signal
 import sys
-from typing import TYPE_CHECKING, Any
-
-import psycopg
 
 from feasibility import telemetry
-from feasibility.messaging import Delivery, RelayConfig, WorkerConfig, run, run_relay
+from feasibility.handler import sweep_handler
+from feasibility.messaging import RelayConfig, WorkerConfig, run, run_relay
 from feasibility.orbit.ephemeris import SamplingPolicy
 from feasibility.sweeper import SweeperConfig
 from feasibility.sweeper import run as run_sweeper
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
 
 log = logging.getLogger("feasibility")
 
@@ -63,30 +62,6 @@ def _configure_logging() -> None:
         handlers=[handler],
         force=True,
     )
-
-
-def _record_only(_delivery: Delivery) -> Callable[[psycopg.Cursor[Any]], None]:
-    """Do no domain work, and let the idempotency ledger be the evidence.
-
-    NOT the SGP4 sweep. Wiring the real pipeline in needs the seeded
-    constellation from #31, and this entry point exists so the async hop can be
-    traced end to end before that lands.
-
-    The handler is genuinely empty rather than writing a marker row of its own.
-    `process_once` already inserts into feasibility.processed_events inside the
-    same transaction, so that row IS the state change — a second table invented
-    to prove the first one happened would be a fixture pretending to be schema.
-    (The first draft of this file did exactly that, against a
-    `feasibility.processed_requests` that does not exist and never has.)
-
-    Replacing this with the real evaluate() is #31's job. The worker loop, the
-    ledger and the tracing around them do not change when it does.
-    """
-
-    def handler(_cursor: psycopg.Cursor[Any]) -> None:
-        return
-
-    return handler
 
 
 def _sampling_policy() -> SamplingPolicy:
@@ -134,7 +109,11 @@ async def _run() -> int:
     # work. They are separate TASKS so that a stall in the sweep — which is
     # seconds of numpy — cannot delay an ack.
     tasks = [
-        asyncio.create_task(run(config, _record_only, stop=stop), name="worker"),
+        # The REAL sweep. Until #131 this was `_record_only`, a handler that
+        # did no domain work at all — so a submitted request was recorded as
+        # processed and produced nothing, and the vertical slice stopped at the
+        # second hop.
+        asyncio.create_task(run(config, sweep_handler(), stop=stop), name="worker"),
         asyncio.create_task(
             run_relay(RelayConfig(nats_url=nats_url, dsn=dsn), stop=stop), name="relay"
         ),

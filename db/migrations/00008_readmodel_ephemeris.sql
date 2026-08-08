@@ -16,9 +16,9 @@
 -- clipping them in Go. It is also what makes the fold idempotent for free —
 -- the primary key is the identity of the fact.
 --
--- The cost is row count, and it is affordable: twelve satellites sampled every
--- ten seconds is about 104k rows per day, and the FEASIBILITY stream retains
--- 72 hours. See docs/decisions/0016-ephemeris-sampling-and-horizon.md.
+-- The cost is row count, and it is affordable: the nine seeded satellites
+-- sampled every ten seconds is about 78k rows per day, and the FEASIBILITY
+-- stream retains 72 hours. See docs/decisions/0016-ephemeris-sampling-and-horizon.md.
 
 -- +goose Up
 

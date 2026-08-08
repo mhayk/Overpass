@@ -9,10 +9,15 @@ time, and something has to lose.
 
 **What this shows today, and what it does not.** The planner is M2. So a run
 right now demonstrates ingress → outbox → feasibility: requests accepted,
-persisted with their idempotency keys, published exactly once, and swept for
-access windows. The de-confliction those windows feed is the part that arrives
-with the planner, and the scenario below is built so that it will contend the
-moment it does, rather than needing to be rewritten then.
+persisted with their idempotency keys, published exactly once, swept against the
+real constellation with SGP4, and projected as candidate opportunities the globe
+can draw. The de-confliction those candidates feed is the part that arrives with
+the planner, and the scenario below is built so that it will contend the moment
+it does, rather than needing to be rewritten then.
+
+That claim was false until #131 and is worth stating precisely because of it:
+the worker recorded every request as processed and computed nothing, so a demo
+run produced ingress and silence.
 
 Idempotent. Every request carries a deterministic Idempotency-Key derived from
 the scenario, so a second run replays rather than duplicating — which is worth
