@@ -111,8 +111,9 @@ distributed trace.
 | M1-22 | ADR-0013 — parallel agent execution model | `type/adr` `type/docs` `risk/low` |
 | M1-23 | Cold-start gate is a required check that cannot report on most PRs | `type/bug` `area/ci` `risk/medium` |
 | M1-24 | Enforce the ADR-0013 path-ownership rule in CI | `type/chore` `area/ci` `risk/medium` |
+| M1-25 | `Makefile` hardcodes `DATABASE_URL`'s port while compose reads `.env` | `type/bug` `area/infra` `risk/medium` |
 
-M1-21 to M1-24 are not in the original decomposition. All four descend from
+M1-21 to M1-25 are not in the original decomposition. The first four descend from
 [ADR-0013](decisions/0013-parallel-agent-execution-in-worktrees.md), which decided
 how M1 is executed concurrently — and then, in checking its own premise, kept
 turning things up:
@@ -125,6 +126,20 @@ turning things up:
 - **M1-24** — the ADR's path-ownership rule is stated and unenforced, which the
   ADR itself lists as a cost. #81 is the argument for closing it: a CI gate nobody
   had watched work did not work.
+
+**M1-25** has a different origin and is worth keeping separate. It is not an
+ADR-0013 consequence — it is a defect found by using the repo on a machine where
+5433 was already taken, which is the case `.env.example` documents and nothing
+tested. `docker-compose.yml` reads `POSTGRES_PORT` from `.env`; the `Makefile`
+hardcoded 5433 and read nothing, so `make migrate` pointed at a different
+project's Postgres and was stopped only by password authentication.
+
+It belongs in the same family as M1-23 for the reason that matters: **CI could
+not have caught either.** CI has no `.env`, so `POSTGRES_PORT` is unset, compose
+falls back to 5433, and everything agrees. Both are defects reachable only in
+configurations the gates never enter — which is the argument for the cold-start
+gate running on a clean machine and, now, for not writing the same default in two
+places.
 
 **M1-01 and M1-21 are prerequisites, not parallel tracks.** M1-21 blocks M1-16 —
 `web` renders what `plan-gateway` serves, and with no contract between them those
