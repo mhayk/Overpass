@@ -38,13 +38,61 @@ def spans() -> Iterator[InMemorySpanExporter]:
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
 
-    previous = trace.get_tracer_provider()
+    previous = _snapshot_provider()
     # setup() with an empty endpoint installs the propagator and no exporter,
     # which is exactly what a test wants: real propagation, no network.
     telemetry.setup(endpoint="")
     trace._TRACER_PROVIDER = provider
     yield exporter
+    _restore_provider(previous)
+
+
+def _snapshot_provider() -> trace.TracerProvider | None:
+    """The global provider SLOT, not what the API resolves it to.
+
+    `trace.get_tracer_provider()` is the wrong thing to capture here, and this
+    is the whole bug. When no provider has been set it returns the module-level
+    `ProxyTracerProvider` *without assigning it* — the slot stays None. Writing
+    that proxy back into the slot produces a state the API never creates on its
+    own: a proxy whose `get_tracer` delegates to `_TRACER_PROVIDER`, which is
+    now the same proxy. Every later `trace.get_tracer()` in the process recurses
+    until the stack runs out.
+
+    Reading the private `_TRACER_PROVIDER` is unpleasant and is the honest thing
+    to do: the fixture already writes to it, and a save/restore pair that reads
+    one thing and writes another is not a pair.
+    """
+    return trace._TRACER_PROVIDER
+
+
+def _restore_provider(previous: trace.TracerProvider | None) -> None:
+    """Put the slot back exactly as it was — usually None."""
     trace._TRACER_PROVIDER = previous
+
+
+def test_restoring_the_provider_leaves_the_opentelemetry_api_usable() -> None:
+    """The fixture above must not poison the global for every later test.
+
+    It does not test tracing. It tests the SAVE AND RESTORE, because that is
+    what broke: `get_tracer_provider()` returns the module-level
+    ProxyTracerProvider WITHOUT assigning it, and assigning that proxy back into
+    `trace._TRACER_PROVIDER` makes the proxy delegate to itself. Every
+    subsequent `trace.get_tracer()` anywhere in the process then recurses until
+    the stack ends.
+
+    The blast radius was the whole suite: test_worker runs after test_telemetry
+    alphabetically, and four of its tests died on a RecursionError raised inside
+    the OpenTelemetry API — pointing at nothing that had anything to do with the
+    worker. It only stayed hidden because CI ran neither module (#133).
+    """
+    saved = _snapshot_provider()
+    telemetry.setup(endpoint="")
+    trace._TRACER_PROVIDER = TracerProvider()
+    _restore_provider(saved)
+
+    # The assertion is simply that the API still works. A provider restored into
+    # a state the API itself never produces is not a restore.
+    trace.get_tracer("post-restore smoke test")
 
 
 def test_a_consumer_span_joins_the_producers_trace(spans: InMemorySpanExporter) -> None:

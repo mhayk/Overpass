@@ -246,7 +246,43 @@ jobs:
   python:
     name: python — ruff, mypy, pytest
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
+
+    # A real Postgres and a real broker, for the same reason the go job has
+    # them, and because for a long time this job had neither.
+    #
+    # Four modules in this suite guard on OVERPASS_TEST_DSN and
+    # OVERPASS_TEST_NATS — the idempotency ledger, the outbox relay, the
+    # worker's ack ordering, the ephemeris sweep. Those are exactly the four
+    # things whose correctness is ABOUT a database and a broker, and without
+    # the services they all skipped while the job stayed green. A skip is not a
+    # pass and pytest's exit code cannot tell them apart, which is why
+    # OVERPASS_REQUIRE_INTEGRATION below turns a missing variable into a hard
+    # error rather than twelve quiet skips. See #133.
+    services:
+      postgres:
+        image: postgis/postgis:16-3.4
+        env:
+          POSTGRES_USER: overpass
+          POSTGRES_PASSWORD: overpass
+          POSTGRES_DB: overpass
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U overpass -d overpass"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      OVERPASS_TEST_DSN: postgres://overpass:overpass@localhost:5432/overpass
+      # OVERPASS_TEST_NATS, not OVERPASS_TEST_NATS_URL. The go job sets the
+      # _URL spelling for its own tests; every Python test reads this one, and
+      # the two are not interchangeable — a mismatch here is silent, because
+      # the tests respond by skipping.
+      OVERPASS_TEST_NATS: nats://127.0.0.1:4222
+      OVERPASS_REQUIRE_INTEGRATION: "1"
+
     steps:
       - uses: actions/checkout@v4
 
@@ -279,10 +315,97 @@ jobs:
         working-directory: services/feasibility
         run: uv run mypy --strict .
 
+      # goose through the image compose already builds, not `go install`.
+      # This job has no Go toolchain and should not grow one to apply a
+      # migration — and using the same runner as the stack means CI and a
+      # laptop cannot drift about which tool applied the schema.
+      - name: Prepare the database
+        if: steps.exists.outputs.ready == 'true'
+        run: |
+          set -euo pipefail
+          export PGPASSWORD=overpass
+          psql -h localhost -U overpass -d overpass -v ON_ERROR_STOP=1             -f deploy/postgres/init/01-extensions.sql
+          docker build -q -t overpass-ci-goose ./deploy/migrate
+          docker run --rm --network host -v "$PWD/db/migrations:/migrations:ro"             overpass-ci-goose             -dir /migrations postgres "$OVERPASS_TEST_DSN?sslmode=disable" up
+
+      # Migrated is not enough. The ephemeris sweep reads reference.tle_sets and
+      # reference.satellites, so its tests need the CONSTELLATION, not just the
+      # tables it lives in — and an empty reference schema makes them fail with
+      # "the constellation is not seeded" rather than skip, which is how this
+      # step came to exist. The go job needs none of this; its tests build the
+      # rows they read.
+      #
+      # Offline, from the frozen snapshot, per ADR-0011 — the same seeder the
+      # compose stack runs, so CI and a laptop see the same twelve satellites.
+      - name: Seed the constellation
+        if: steps.exists.outputs.ready == 'true'
+        run: |
+          set -euo pipefail
+          DATABASE_URL="$OVERPASS_TEST_DSN" scripts/seed.sh
+
+      # A step, not a service container, for the reason the go job records:
+      # JetStream needs --jetstream on the command line and a service container
+      # has no way to pass one.
+      - name: Start NATS with JetStream
+        if: steps.exists.outputs.ready == 'true'
+        run: |
+          set -euo pipefail
+          docker run -d --name overpass-ci-nats-python --network host             nats:2.10-alpine --jetstream --http_port=8222 --name=overpass-ci-nats-python
+          for _ in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:8222/healthz >/dev/null; then
+              echo "broker healthy"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "the broker never became healthy"
+          docker logs overpass-ci-nats-python
+          exit 1
+
+      # The worker binds a PRE-DECLARED durable consumer and exits if it is
+      # missing — deliberately, so two services cannot race to create the same
+      # one with different settings. Without this step every worker test fails
+      # on a consumer that does not exist.
+      - name: Apply the NATS topology
+        if: steps.exists.outputs.ready == 'true'
+        run: |
+          set -euo pipefail
+          docker run --rm --network host -v "$PWD/deploy/nats:/init"             natsio/nats-box:0.14.3             sh -c "NATS_URL=nats://127.0.0.1:4222 sh /init/init.sh"
+
+      # -rs, so a skip states its reason in the log and the step below can read
+      # it. ONE run, not two: these tests publish to and consume from a real
+      # stream, and running them twice in a job leaves the second run reading
+      # the first one's messages — measured, as "15 acks outstanding" against a
+      # local broker that had accumulated state.
       - name: pytest
         if: steps.exists.outputs.ready == 'true'
         working-directory: services/feasibility
-        run: uv run pytest --cov --cov-report=term-missing --cov-report=xml
+        run: |
+          set -euo pipefail
+          uv run pytest -rs --cov --cov-report=term-missing --cov-report=xml             | tee /tmp/pytest.txt
+
+      # The check that this job did what it now claims to.
+      #
+      # pytest exits 0 whether a test passed or skipped, so a service container
+      # quietly removed a year from now would leave this job green having proved
+      # nothing — which is exactly the state #133 found it in. The conftest gate
+      # catches a missing variable; this catches the other half, a module that
+      # skips for a reason of its own while the services are up.
+      #
+      # Named modules rather than a count: a count drifts every time somebody
+      # adds a test, and drifts silently downward when somebody removes one.
+      - name: The integration-backed tests actually ran
+        if: steps.exists.outputs.ready == 'true'
+        run: |
+          set -euo pipefail
+          for module in test_idempotency test_relay test_worker test_ephemeris_sweep; do
+            if grep -qE "^SKIPPED.*$module" /tmp/pytest.txt; then
+              echo "::error::$module skipped; its service is not reachable and this job proved nothing"
+              grep -E "^SKIPPED.*$module" /tmp/pytest.txt
+              exit 1
+            fi
+          done
+          echo "all four integration-backed modules ran"
 
       # Lints the repo-level Python (the contract tooling) regardless, so those
       # scripts do not quietly rot while waiting for the service to exist.
