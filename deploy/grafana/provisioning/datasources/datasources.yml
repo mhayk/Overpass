@@ -4,8 +4,25 @@ datasources:
   - name: Prometheus
     type: prometheus
     access: proxy
+    uid: prometheus
     url: http://prometheus:9090
     isDefault: true
     jsonData:
       timeInterval: 10s
       httpMethod: POST
+
+  - name: Tempo
+    type: tempo
+    access: proxy
+    uid: tempo
+    url: http://tempo:3200
+    jsonData:
+      # Jump from a trace to the metrics around it. The service graph needs
+      # span metrics, which arrive with M3-06; the link is declared now so the
+      # datasource does not need editing then.
+      tracesToMetrics:
+        datasourceUid: prometheus
+      serviceMap:
+        datasourceUid: prometheus
+      nodeGraph:
+        enabled: true
