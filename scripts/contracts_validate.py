@@ -167,7 +167,19 @@ def check_fixtures(registry: Registry) -> None:
             if validator is None:
                 fail(f"{rel}", f"no schema named {event}.schema.json")
                 continue
-            errors = sorted(validator.iter_errors(json.loads(fixture.read_text())))
+            # Sorted by JSON path, not by the ValidationError itself.
+            #
+            # jsonschema's ValidationError defines no total ordering, so a bare
+            # sorted() raises TypeError the moment a fixture produces TWO
+            # errors. Every fixture happened to produce at most one until the
+            # planner examples were added, so the crash sat here unnoticed —
+            # and it crashes the whole run rather than failing one fixture,
+            # which would have looked like a broken script rather than a broken
+            # contract.
+            errors = sorted(
+                validator.iter_errors(json.loads(fixture.read_text())),
+                key=lambda e: (list(map(str, e.path)), e.message),
+            )
             if expectation == "valid":
                 if errors:
                     detail = "\n".join(
