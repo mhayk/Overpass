@@ -27,9 +27,11 @@ import (
 	"github.com/mhayk/overpass/services/planner/internal/adapter/httpapi"
 	"github.com/mhayk/overpass/services/planner/internal/adapter/logging"
 	"github.com/mhayk/overpass/services/planner/internal/adapter/natsmsg"
+	"github.com/mhayk/overpass/services/planner/internal/adapter/outbox"
 	"github.com/mhayk/overpass/services/planner/internal/adapter/postgres"
 	"github.com/mhayk/overpass/services/planner/internal/adapter/wire"
 	"github.com/mhayk/overpass/services/planner/internal/app"
+	"github.com/mhayk/overpass/services/planner/internal/domain"
 )
 
 func main() {
@@ -75,9 +77,43 @@ func run(ctx context.Context) error {
 	// has nothing to corrupt, and refusing to start would take the probe
 	// endpoint down with it, replacing a service that reports itself unready
 	// with one that is simply absent. Unready and observable beats gone.
+	// The round trigger starts REGARDLESS of the broker, unlike the projector.
+	//
+	// It reads Postgres and writes Postgres — the outbox is what defers the
+	// publish — so a broker outage does not stop rounds being opened and
+	// recorded. They queue in planning.outbox and go out when the relay
+	// reconnects, which is the entire point of ADR-0006. A trigger that refused
+	// to run without a broker would turn a publishing problem into a planning
+	// problem.
+	trigger, err := app.NewTrigger(postgres.NewRounds(pool), app.TriggerConfig{
+		Policy: domain.TriggerPolicy{
+			QuietPeriod:      cfg.QuietPeriod,
+			StalenessCeiling: cfg.StalenessCeiling,
+		},
+		BucketDuration:   cfg.BucketDuration,
+		HorizonAhead:     cfg.HorizonAhead,
+		SweepLimit:       cfg.SweepLimit,
+		AllocationPolicy: cfg.AllocationPolicy,
+	}, log.With(slog.String("component", "trigger")))
+	if err != nil {
+		// A misconfigured firing rule is a startup failure, not a warning. A
+		// ceiling below the quiet period still plans — it just silently never
+		// debounces — and a system that has quietly lost half its rule is worse
+		// than one that refused to start.
+		return err
+	}
+
 	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if runErr := trigger.Run(ctx, 0, cfg.SweepInterval); runErr != nil {
+			log.Error("trigger stopped", slog.Any("error", runErr))
+		}
+	}()
+
 	if closeProjector, projErr := startProjector(ctx, cfg, pool, log, &wg); projErr != nil {
-		log.Warn("projector not started; the planner's inputs will not advance",
+		log.Warn("projector and relay not started; inputs will not advance and rounds will not publish",
 			slog.Any("error", projErr))
 	} else {
 		defer closeProjector()
@@ -118,6 +154,16 @@ func startProjector(
 		defer wg.Done()
 		if runErr := projector.Run(ctx, 0, cfg.IdleWait); runErr != nil {
 			log.Error("projector stopped", slog.Any("error", runErr))
+		}
+	}()
+
+	relay := outbox.New(pool, outbox.NewNATSPublisher(js), outbox.DefaultConfig(),
+		log.With(slog.String("component", "relay")))
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if runErr := relay.Run(ctx, 0); runErr != nil {
+			log.Error("relay stopped", slog.Any("error", runErr))
 		}
 	}()
 

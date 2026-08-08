@@ -26,6 +26,27 @@ type Config struct {
 	FetchBatch      int
 	FetchWait       time.Duration
 	IdleWait        time.Duration
+
+	// The ADR-0014 firing rule. Values, not constants in an ADR: naming
+	// specific numbers before M3 has measured anything would be the
+	// prediction-dressed-as-decision that ADR-0007 avoids. The RELATION between
+	// them is the invariant, and domain.TriggerPolicy.Validate enforces it.
+	QuietPeriod      time.Duration
+	StalenessCeiling time.Duration
+
+	// BucketDuration must divide 24h evenly or "UTC-aligned" is a lie — see
+	// domain.ValidBucketDuration. Three hours matches ADR-0016's ephemeris
+	// buckets, so a plan and the track it is flown against tile identically.
+	BucketDuration time.Duration
+	HorizonAhead   time.Duration
+	SweepInterval  time.Duration
+	SweepLimit     int
+
+	// AllocationPolicy is which strategy a round announces. ADR-0007 defers the
+	// default to the M2-13 benchmark, so it is configuration and the round
+	// records it — which is what lets a committed plan be attributed to a
+	// strategy after the fact.
+	AllocationPolicy string
 }
 
 // Load reads and validates the environment.
@@ -40,6 +61,11 @@ func Load() (Config, error) {
 		DatabaseURL: os.Getenv("DATABASE_URL"),
 		NATSURL:     env("NATS_URL", "nats://localhost:4222"),
 		LogLevel:    env("LOG_LEVEL", "info"),
+		// GREEDY_BY_BID is the naive baseline and is deliberately NOT a claim
+		// about what the default should be. ADR-0007 names the default on
+		// benchmark evidence; until then the planner runs the policy whose
+		// behaviour is easiest to reason about when something looks wrong.
+		AllocationPolicy: env("ALLOCATION_POLICY", "GREEDY_BY_BID"),
 	}
 
 	if strings.TrimSpace(cfg.DatabaseURL) == "" {
@@ -58,6 +84,35 @@ func Load() (Config, error) {
 	}
 	if cfg.FetchBatch, err = positiveInt("FETCH_BATCH", 32); err != nil {
 		problems = append(problems, err.Error())
+	}
+	if cfg.QuietPeriod, err = duration("ROUND_QUIET_PERIOD", 5*time.Second); err != nil {
+		problems = append(problems, err.Error())
+	}
+	if cfg.StalenessCeiling, err = duration("ROUND_STALENESS_CEILING", 60*time.Second); err != nil {
+		problems = append(problems, err.Error())
+	}
+	if cfg.BucketDuration, err = duration("BUCKET_DURATION", 3*time.Hour); err != nil {
+		problems = append(problems, err.Error())
+	}
+	if cfg.HorizonAhead, err = duration("PLANNING_HORIZON", 24*time.Hour); err != nil {
+		problems = append(problems, err.Error())
+	}
+	if cfg.SweepInterval, err = duration("SWEEP_INTERVAL", time.Second); err != nil {
+		problems = append(problems, err.Error())
+	}
+	if cfg.SweepLimit, err = positiveInt("SWEEP_LIMIT", 64); err != nil {
+		problems = append(problems, err.Error())
+	}
+
+	switch cfg.AllocationPolicy {
+	case "GREEDY_BY_BID", "GREEDY_BY_VALUE_DENSITY", "VICKREY_SEALED_BID", "EXACT_DP":
+	default:
+		// The four the contract enumerates. A policy name the schema rejects
+		// would produce an invalid round event at publish time, which is much
+		// further from the mistake than startup is.
+		problems = append(problems, fmt.Sprintf(
+			"ALLOCATION_POLICY %q is not one of GREEDY_BY_BID, GREEDY_BY_VALUE_DENSITY, VICKREY_SEALED_BID, EXACT_DP",
+			cfg.AllocationPolicy))
 	}
 
 	switch cfg.LogLevel {
