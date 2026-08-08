@@ -1,0 +1,54 @@
+# Tempo — the trace backend behind Grafana.
+#
+# Brought forward from #50. The collector previously sent traces to the debug
+# exporter with a note deferring a real backend, which was the right call while
+# there was only one service to trace. M1-20 changes that: the point of the
+# issue is that ONE trace spans an HTTP ingress in Go, an outbox publish, and a
+# Python consumer, and there is no way to see that in a log line.
+#
+# Local storage on a volume. Tempo can front S3 and that is what a real
+# deployment would do; here it would be one more thing to stand up before a
+# reviewer sees a trace, and ADR-0005 already settled that this stack optimises
+# for a laptop.
+
+stream_over_http_enabled: true
+
+server:
+  http_listen_port: 3200
+  grpc_listen_port: 9095
+  log_level: warn
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+ingester:
+  # Short, on purpose. The default holds a trace in memory for minutes before
+  # it is queryable, and a demo where the trace appears five minutes after the
+  # request is a demo nobody waits for. It is also what makes the end-to-end
+  # test in M1-20 finish in seconds rather than time out.
+  max_block_duration: 5m
+  complete_block_timeout: 10s
+  trace_idle_period: 5s
+
+compactor:
+  compaction:
+    # A local stack that has been running for a week does not need last
+    # Tuesday's traces, and unbounded growth on a developer's disk is rude.
+    block_retention: 24h
+
+storage:
+  trace:
+    backend: local
+    wal:
+      path: /var/tempo/wal
+    local:
+      path: /var/tempo/blocks
+
+usage_report:
+  reporting_enabled: false

@@ -1,9 +1,12 @@
 # OpenTelemetry Collector pipeline.
 #
-# Services export here over OTLP; the collector batches, and re-exposes metrics
-# for Prometheus to scrape. Traces currently go to the debug exporter — a real
-# trace backend (Tempo or Jaeger) lands with issue #50, when there is enough of
-# a pipeline for an end-to-end trace to be worth looking at.
+# Services export here over OTLP; the collector batches, re-exposes metrics for
+# Prometheus to scrape, and forwards traces to Tempo.
+#
+# Tempo arrived with M1-20 rather than #50 as originally planned. The point of
+# M1-20 is that ONE trace spans an HTTP ingress in Go, an outbox publish, and a
+# Python consumer — and there is no way to demonstrate that against a debug
+# exporter, which prints spans and cannot show you they belong together.
 
 receivers:
   otlp:
@@ -41,6 +44,14 @@ exporters:
   debug:
     verbosity: basic
 
+  # Traces to Tempo. Everything goes through the collector rather than services
+  # exporting to Tempo directly: one place to add sampling, redaction or a
+  # second backend, and services that need to know about exactly one endpoint.
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+
   prometheus:
     endpoint: 0.0.0.0:8889
     # Keep OTel resource attributes as labels so metrics can be sliced by
@@ -66,7 +77,10 @@ service:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, resource, batch]
-      exporters: [debug]
+      # debug stays alongside Tempo. When a trace does not appear in Grafana the
+      # first question is whether it reached the collector at all, and the
+      # collector's own log is the cheapest possible answer.
+      exporters: [debug, otlp/tempo]
     metrics:
       receivers: [otlp]
       processors: [memory_limiter, resource, batch]
