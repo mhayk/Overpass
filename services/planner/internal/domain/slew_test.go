@@ -387,3 +387,57 @@ func TestRollAuthorityIsCheckedSeparately(t *testing.T) {
 		t.Error("beyond the limit on the left was accepted")
 	}
 }
+
+func TestSatelliteProfileValidation(t *testing.T) {
+	good := domain.SatelliteProfile{Agility: agility(), DutyCycleBudgetS: 600}
+	if err := good.Validate(); err != nil {
+		t.Fatalf("the baseline profile must be valid: %v", err)
+	}
+
+	tests := []struct {
+		name    string
+		profile domain.SatelliteProfile
+		want    string
+	}{
+		{"unusable agility", domain.SatelliteProfile{
+			Agility: domain.Agility{SlewRateDegS: 0, MaxRollDeg: 45}, DutyCycleBudgetS: 600,
+		}, "slew rate"},
+		{"no power budget", domain.SatelliteProfile{
+			Agility: agility(), DutyCycleBudgetS: 0,
+		}, "duty-cycle budget"},
+		{"negative power budget", domain.SatelliteProfile{
+			Agility: agility(), DutyCycleBudgetS: -1,
+		}, "duty-cycle budget"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.profile.Validate()
+			if err == nil {
+				t.Fatalf("accepted %s", tt.name)
+			}
+			if !errors.Is(err, domain.ErrInvalid) {
+				t.Errorf("does not wrap ErrInvalid: %v", err)
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("error %q does not name %q", err, tt.want)
+			}
+		})
+	}
+}
+
+// When roll is absent AND the geometry is unusable, the failure must surface
+// rather than resolving to a zero attitude — a zero roll is nadir, which is a
+// perfectly plausible-looking answer and completely wrong.
+func TestAttitudeForPropagatesADerivationFailure(t *testing.T) {
+	got, err := domain.AttitudeFor(nil, 0, 570, domain.LookRight, "STRIPMAP")
+	if err == nil {
+		t.Fatalf("unusable geometry produced attitude %+v", got)
+	}
+	if !errors.Is(err, domain.ErrInvalid) {
+		t.Errorf("does not wrap ErrInvalid: %v", err)
+	}
+	if got.RollDeg != 0 || got.Mode != "" {
+		t.Errorf("a failed derivation returned %+v; a partially-filled attitude invites use", got)
+	}
+}

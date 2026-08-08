@@ -67,6 +67,31 @@ func (a Agility) Validate() error {
 	return nil
 }
 
+// SatelliteProfile is everything the planner needs to know about one
+// spacecraft to schedule against it.
+//
+// One value rather than two reads. The round resolves it once per satellite and
+// then consults it for every candidate and every pairwise transition, so
+// splitting agility from the power budget would be two round trips on the hot
+// path for one conceptual lookup.
+type SatelliteProfile struct {
+	Agility Agility
+	// DutyCycleBudgetS is the per-ORBIT imaging allowance. See dutycycle.go for
+	// why per orbit rather than per bucket.
+	DutyCycleBudgetS float64
+}
+
+// Validate refuses a profile the planner cannot schedule against.
+func (p SatelliteProfile) Validate() error {
+	if err := p.Agility.Validate(); err != nil {
+		return err
+	}
+	if p.DutyCycleBudgetS <= 0 {
+		return fmt.Errorf("%w: duty-cycle budget must be positive, got %v s", ErrInvalid, p.DutyCycleBudgetS)
+	}
+	return nil
+}
+
 // Attitude is the pointing state an acquisition requires.
 type Attitude struct {
 	RollDeg float64
