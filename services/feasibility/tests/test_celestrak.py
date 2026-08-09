@@ -12,6 +12,7 @@ import httpx
 import pytest
 import respx
 
+from feasibility.resilience import Breaker, State
 from feasibility.tle import CelestrakClient, CelestrakError
 
 GP_URL = "https://celestrak.org/NORAD/elements/gp.php"
@@ -86,3 +87,53 @@ def test_fetch_many_issues_one_request_per_object() -> None:
     route = respx.get(GP_URL).mock(return_value=httpx.Response(200, text=BODY))
     CelestrakClient().fetch_many([39634, 41456, 62261])
     assert route.call_count == 3
+
+
+# --- the breaker (#51) -------------------------------------------------------
+
+
+@respx.mock
+def test_a_dependency_that_keeps_failing_stops_being_called() -> None:
+    """The claim #51 makes: the caller degrades rather than queueing.
+
+    `fetch_many` is one request per satellite, so an upstream that hangs costs
+    the full timeout PER SATELLITE. After the third consecutive failure the
+    breaker refuses outright, and the caller reaches its frozen snapshot in
+    milliseconds instead of minutes.
+    """
+    route = respx.get(url__startswith=CelestrakClient.base_url).mock(
+        return_value=httpx.Response(503)
+    )
+    client = CelestrakClient(breaker=Breaker(threshold=3, cooldown_s=60))
+
+    for _ in range(3):
+        with pytest.raises(CelestrakError):
+            client.fetch_by_catalog_number(25544)
+    assert route.call_count == 3
+
+    with pytest.raises(CelestrakError, match="skipping Celestrak"):
+        client.fetch_by_catalog_number(25544)
+
+    # The number that matters: the fourth call never reached the network.
+    assert route.call_count == 3, "an open breaker still called the upstream it had given up on"
+    assert client.breaker.state is State.OPEN
+
+
+@respx.mock
+def test_an_empty_answer_is_a_data_problem_and_does_not_trip_the_breaker() -> None:
+    """Celestrak answers an unmatched query with 200 and "No GP data found".
+
+    That is a query nobody will ever match, not an upstream fault. Counting it
+    as one would open the breaker against a perfectly healthy dependency and
+    take the real satellites down with it.
+    """
+    respx.get(url__startswith=CelestrakClient.base_url).mock(
+        return_value=httpx.Response(200, text="No GP data found")
+    )
+    client = CelestrakClient(breaker=Breaker(threshold=2, cooldown_s=60))
+
+    for _ in range(3):
+        with pytest.raises(CelestrakError):
+            client.fetch_by_catalog_number(99999)
+
+    assert client.breaker.state is State.CLOSED

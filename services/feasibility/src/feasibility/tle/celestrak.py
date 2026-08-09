@@ -11,11 +11,12 @@ reference tests never touch this class.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import httpx
 
+from feasibility.resilience import Breaker, BreakerOpenError
 from feasibility.tle.element_set import ElementSet, TleFormatError, parse_catalogue
 
 if TYPE_CHECKING:
@@ -42,6 +43,19 @@ class CelestrakClient:
     timeout_s: float = 10.0
     user_agent: str = "overpass-feasibility/0.1 (+https://github.com/mhayk/Overpass)"
 
+    breaker: Breaker = field(default_factory=Breaker)
+    """Trips after three consecutive failures (#51).
+
+    `fetch_many` makes one request per satellite, so an upstream that hangs
+    costs `timeout_s` PER SATELLITE — ten seconds each across a constellation of
+    tens is minutes of a service that looks stuck at startup. The breaker turns
+    everything after the third failure into an immediate refusal, and the caller
+    reaches its frozen snapshot promptly instead of eventually.
+
+    Shared across calls by construction: it is the client that has an opinion
+    about the upstream, not any single fetch.
+    """
+
     def fetch_by_name(self, name: str) -> list[ElementSet]:
         """Fetch every catalogued object whose name contains `name`."""
         return self._fetch({"NAME": name, "FORMAT": "tle"})
@@ -63,7 +77,14 @@ class CelestrakClient:
             out.extend(self.fetch_by_catalog_number(norad_id))
         return out
 
-    def _fetch(self, params: dict[str, str]) -> list[ElementSet]:
+    def _request(self, params: dict[str, str]) -> httpx.Response:
+        """One HTTP call, with every transport failure shaped as a CelestrakError.
+
+        Split out so the breaker wraps the NETWORK call and nothing else. An
+        empty-but-valid answer is a data problem, not an upstream fault, and
+        counting it as one would trip the breaker on a query that will never
+        match however healthy Celestrak is.
+        """
         try:
             response = httpx.get(
                 self.base_url,
@@ -76,6 +97,18 @@ class CelestrakClient:
         except httpx.HTTPError as exc:
             msg = f"fetching {params} from Celestrak failed: {exc}"
             raise CelestrakError(msg) from exc
+        return response
+
+    def _fetch(self, params: dict[str, str]) -> list[ElementSet]:
+        try:
+            response = self.breaker.call(lambda: self._request(params))
+        except BreakerOpenError as refused:
+            # Reported as a CelestrakError so every caller's fallback path is
+            # unchanged, with the reason preserved: "gave up on it" and "it
+            # failed again" look identical in a log otherwise, and they call for
+            # different actions.
+            msg = f"skipping Celestrak for {params}: {refused}"
+            raise CelestrakError(msg) from refused
 
         body = response.text.strip()
 
