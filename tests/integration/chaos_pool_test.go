@@ -90,6 +90,11 @@ func TestIngressRefusesRatherThanHangsWhenTheDatabaseIsUnreachable(t *testing.T)
 	}
 
 	body := chaosRequestBody(t)
+	// Counted before and after, rather than "no rows in the last two minutes".
+	// The window version passed alone and failed in CI the moment a
+	// neighbouring test submitted successfully as the same customer — it was
+	// asserting about the database rather than about this submission.
+	rowsBefore := requestRowsFor(t, traceCustomerID)
 	status, elapsed := submitStatus(t, api, uuid.NewString(), body)
 
 	if status == http.StatusAccepted || status == http.StatusOK {
@@ -107,9 +112,8 @@ func TestIngressRefusesRatherThanHangsWhenTheDatabaseIsUnreachable(t *testing.T)
 
 	// Nothing half-written. The submission and its outbox row commit together,
 	// so a refused request must leave neither.
-	if got := rowCount(t, `SELECT count(*) FROM tasking.tasking_requests WHERE customer_id = $1
-	                        AND submitted_at > now() - interval '2 minutes'`, traceCustomerID); got != 0 {
-		t.Errorf("%d request rows written by a submission that was refused", got)
+	if got := requestRowsFor(t, traceCustomerID); got != rowsBefore {
+		t.Errorf("request rows went from %d to %d across a submission that was refused", rowsBefore, got)
 	}
 
 	// And it recovers on its own once the database is reachable again — no
@@ -127,6 +131,11 @@ func TestIngressRefusesRatherThanHangsWhenTheDatabaseIsUnreachable(t *testing.T)
 		t.Fatalf("ingress never recovered after the database became reachable again; last status %d\n%s",
 			lastCode, api.logs.String())
 	}
+}
+
+func requestRowsFor(t *testing.T, customerID string) int {
+	t.Helper()
+	return rowCount(t, `SELECT count(*) FROM tasking.tasking_requests WHERE customer_id = $1`, customerID)
 }
 
 // submitStatus posts one request and reports the status and how long it took.
