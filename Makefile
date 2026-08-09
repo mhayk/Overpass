@@ -236,7 +236,8 @@ test-e2e: ## Playwright end-to-end tests against the full stack
 
 .PHONY: benchmark
 benchmark: ## Run the allocation policy benchmark and regenerate the report
-	@echo "not yet implemented — issue #45 (M2-13)"
+	cd services/planner && go run ./cmd/benchmark -out ../../docs/policy-benchmark.md
+	@echo "wrote docs/policy-benchmark.md"
 
 .PHONY: loadtest
 loadtest: ## Run the k6 suite with thresholds as gates
