@@ -228,10 +228,6 @@ test-web: ## Frontend unit tests
 coverage: ## Enforce coverage thresholds (80% overall, 95% planner and geometry)
 	@$(ROOT)/scripts/coverage-gate.sh
 
-.PHONY: test-integration
-test-integration: ## Integration tests against real Postgres and NATS (Testcontainers)
-	@echo "not yet implemented — issue #30 (M1-18)"
-
 .PHONY: test-e2e
 test-e2e: ## Playwright end-to-end tests against the full stack
 	@echo "not yet implemented — issue #58 (M4-08)"
@@ -250,12 +246,15 @@ loadtest: ## Run the k6 suite with thresholds as gates
 ## Operations
 
 .PHONY: dlq-inspect
-dlq-inspect: ## List dead-lettered messages (STREAM=<name>)
-	@echo "not yet implemented — issue #47 (M3-02)"
+dlq-inspect: ## List dead-lettered messages (STREAM=<name>, or none for depth)
+	@$(ROOT)/scripts/dlq-inspect.sh $(STREAM)
 
 .PHONY: dlq-replay
-dlq-replay: ## Replay a dead-lettered message (STREAM=<name> EVENT_ID=<uuid>)
-	@echo "not yet implemented — issue #47 (M3-02)"
+dlq-replay: ## Replay a dead-lettered message (STREAM=<name> EVENT_ID=<uuid> | SEQ=<n>)
+	@if [ -z "$(STREAM)" ]; then echo "usage: make dlq-replay STREAM=DLQ_TASKING EVENT_ID=<uuid>"; exit 2; fi
+	@if [ -n "$(EVENT_ID)" ]; then $(ROOT)/scripts/dlq-replay.sh $(STREAM) --event-id $(EVENT_ID); \
+	elif [ -n "$(SEQ)" ]; then $(ROOT)/scripts/dlq-replay.sh $(STREAM) --seq $(SEQ); \
+	else echo "give EVENT_ID=<uuid> or, for a dead letter with no id, SEQ=<n>"; exit 2; fi
 
 ## Tooling
 

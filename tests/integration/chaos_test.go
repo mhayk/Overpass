@@ -52,8 +52,14 @@ func TestDuplicatesInjectedAtEveryHopLeaveTheEndStateIdentical(t *testing.T) {
 	// ---- Hop 1: the HTTP ingress. The same body, the same Idempotency-Key,
 	// submitted twice — a client retrying a request whose response it lost.
 	key := uuid.NewString()
-	first := submitChaosRequest(t, api, key)
-	second := submitChaosRequest(t, api, key)
+	// The bytes are built ONCE and sent twice. Building them per call made the
+	// window start move with the clock, so a pair of submissions that straddled
+	// a second boundary sent two different bodies under one key — which the API
+	// correctly rejects with a 409, failing a test that believed it was
+	// retrying. Rare, real, and observed in CI.
+	body := chaosRequestBody(t)
+	first := submitChaosRequest(t, api, key, body)
+	second := submitChaosRequest(t, api, key, body)
 	if first != second {
 		t.Fatalf("a retried submission created a second request: %s then %s", first, second)
 	}
@@ -113,13 +119,17 @@ func TestDuplicatesInjectedAtEveryHopLeaveTheEndStateIdentical(t *testing.T) {
 	}
 }
 
-// submitChaosRequest posts the sweep request with a caller-owned Idempotency-Key,
-// so the test can submit the same logical request twice.
-func submitChaosRequest(t *testing.T, api *service, idempotencyKey string) string {
+// chaosRequestBody encodes the sweep request once.
+//
+// Once, because the window start comes from the clock: a body rebuilt for the
+// second submission is a DIFFERENT body whenever the two calls fall either side
+// of a second boundary, and the whole point of hop 1 is that the same bytes
+// arrive twice under one Idempotency-Key.
+func chaosRequestBody(t *testing.T) []byte {
 	t.Helper()
 
 	start := time.Now().UTC().Truncate(time.Second).Add(time.Minute)
-	body := map[string]any{
+	encoded, err := json.Marshal(map[string]any{
 		"customer_id":     traceCustomerID,
 		"target_name":     "Svalbard",
 		"target":          map[string]any{"type": "Point", "coordinates": []float64{svalbardLon, svalbardLat}},
@@ -127,11 +137,17 @@ func submitChaosRequest(t *testing.T, api *service, idempotencyKey string) strin
 		"priority_tier":   "BEST_EFFORT",
 		"bid_credits":     0,
 		"requested_modes": []string{"STRIPMAP", "SPOTLIGHT"},
-	}
-	encoded, err := json.Marshal(body)
+	})
 	if err != nil {
 		t.Fatalf("encoding the request: %v", err)
 	}
+	return encoded
+}
+
+// submitChaosRequest posts the sweep request with a caller-owned Idempotency-Key,
+// so the test can submit the same logical request twice.
+func submitChaosRequest(t *testing.T, api *service, idempotencyKey string, encoded []byte) string {
+	t.Helper()
 
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost,
 		api.baseURL+"/v1/tasking-requests", strings.NewReader(string(encoded)))

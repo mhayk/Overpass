@@ -34,6 +34,15 @@ scrape_configs:
     static_configs:
       - targets: ["otel-collector:8888"]
 
+  # The broker itself, through prometheus-nats-exporter. Stream depth is the
+  # one signal no service can report: a dead letter is a message no consumer
+  # will touch, so only the broker knows how many are waiting.
+  - job_name: nats
+    static_configs:
+      - targets: ["nats-exporter:7777"]
+        labels:
+          tier: infrastructure
+
   # Application services, added as they are built (M1+). Prometheus tolerates
   # targets that do not resolve yet — they report as down, which is accurate.
   - job_name: overpass-services

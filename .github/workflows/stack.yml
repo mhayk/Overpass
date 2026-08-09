@@ -182,6 +182,16 @@ jobs:
           echo "alert rules loaded: $rules"
           [ "$rules" -ge 4 ] || { echo "::error::alert rules did not load"; exit 1; }
 
+          # The DLQ alert reads a per-stream gauge that only exists when the
+          # exporter is started with `-jsz all`. Without it the container comes
+          # up healthy, logs "No metrics specified. Defaulting to varz", serves
+          # metrics — and publishes nothing about JetStream, so the alert can
+          # never fire. Observed doing exactly that before this probe existed.
+          curl -sf http://localhost:7777/metrics \
+            | grep -q 'jetstream_stream_total_messages{.*stream_name="DLQ_TASKING"' \
+            || { echo "::error::the nats exporter publishes no JetStream stream depth; the DLQ alert cannot fire"; exit 1; }
+          echo "broker stream depth is scrapeable"
+
       # #166: the application services must come up from a cold build too.
       # A separate budget from the 300-second infrastructure claim: this one
       # pays for four image builds (three multi-stage Go, one npm ci + next

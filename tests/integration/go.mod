@@ -13,6 +13,8 @@ go 1.25.7
 
 replace github.com/mhayk/overpass/gen/go => ../../gen/go
 
+replace github.com/mhayk/overpass/lib/go/consume => ../../lib/go/consume
+
 replace github.com/mhayk/overpass/services/tasking-api => ../../services/tasking-api
 
 replace github.com/mhayk/overpass/services/plan-gateway => ../../services/plan-gateway
@@ -20,6 +22,7 @@ replace github.com/mhayk/overpass/services/plan-gateway => ../../services/plan-g
 require (
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.10.0
+	github.com/mhayk/overpass/lib/go/consume v0.0.0-00010101000000-000000000000
 	github.com/nats-io/nats.go v1.52.0
 	github.com/pressly/goose/v3 v3.27.3
 	github.com/testcontainers/testcontainers-go v0.44.0
