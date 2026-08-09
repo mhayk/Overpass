@@ -91,6 +91,24 @@ func (p *Projector) handle(ctx context.Context, m port.Message) {
 			slog.String("decision", decision.String()),
 			slog.Any("error", err))
 		if decision == consume.Terminate {
+			// Publish, then Term. If the publish fails, Nak (ADR-0017): the
+			// whole delivery retries, folding and dead-lettering both, and
+			// both are idempotent. Terminating anyway would drop a payload
+			// this service is the only holder of.
+			reason := consume.ReasonExhausted
+			if permanent {
+				reason = consume.ReasonContract
+			}
+			if dlqErr := p.source.Deadletter(ctx, m, reason); dlqErr != nil {
+				p.log.Error("dead-lettering failed; naking rather than dropping the payload",
+					slog.String("event_id", m.EventID),
+					slog.Any("error", dlqErr))
+				if nakErr := p.source.Nak(ctx, m); nakErr != nil {
+					p.log.Warn("nak failed", slog.Any("error", nakErr))
+				}
+				return
+			}
+			p.Metrics.Deadlettered()
 			p.Metrics.Terminated()
 			if termErr := p.source.Term(ctx, m); termErr != nil {
 				p.log.Warn("term failed", slog.Any("error", termErr))

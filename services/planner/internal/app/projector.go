@@ -137,6 +137,22 @@ func (p *Projector) DrainOnce(ctx context.Context) (Stats, error) {
 				slog.Any("error", err),
 			)
 			if decision == consume.Terminate {
+				// Publish, then Term. If the publish fails, Nak (ADR-0017):
+				// the whole delivery retries, handling and dead-lettering
+				// both, and both are idempotent. Terminating anyway would be
+				// the drop this mechanism exists to prevent, with a metric
+				// attached to make it look handled.
+				if dlqErr := p.source.Deadletter(ctx, m, terminalReason(permanent)); dlqErr != nil {
+					p.log.Error("dead-lettering failed; naking rather than dropping the payload",
+						slog.String("event_id", m.EventID),
+						slog.Any("error", dlqErr),
+					)
+					if nakErr := p.source.Nak(ctx, m); nakErr != nil {
+						return stats, fmt.Errorf("naking %s after a failed dead letter: %w", m.EventID, nakErr)
+					}
+					continue
+				}
+				p.Metrics.Deadlettered()
 				p.Metrics.Terminated()
 				if termErr := p.source.Term(ctx, m); termErr != nil {
 					return stats, fmt.Errorf("terminating %s: %w", m.EventID, termErr)
@@ -170,6 +186,22 @@ func (p *Projector) DrainOnce(ctx context.Context) (Stats, error) {
 		p.Metrics.AckAfter(time.Since(received))
 	}
 	return stats, nil
+}
+
+// terminalReason names the error class for the DLQ header an operator triages
+// on. The two cases are genuinely different incidents: a refused payload is a
+// bug or a bad producer, an exhausted retry is a dependency that was down for
+// five deliveries.
+//
+// Permanent maps to "contract" rather than "decode" because the planner cannot
+// tell the two apart: a decode failure and a failed domain guard both arrive
+// wrapped in domain.ErrInvalid, and inventing the distinction from the error
+// string would be a lie with a constant's authority.
+func terminalReason(permanent bool) string {
+	if permanent {
+		return consume.ReasonContract
+	}
+	return consume.ReasonExhausted
 }
 
 type outcome int

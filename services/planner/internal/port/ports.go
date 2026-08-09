@@ -54,6 +54,16 @@ type MessageSource interface {
 	// attempt of a failure retrying has not fixed. Distinct from Ack — the
 	// work did NOT land — and from Nak — nobody wants it again.
 	Term(ctx context.Context, m Message) error
+	// Deadletter hands the message to its DLQ subject, with the terminal error
+	// class as the reason. Called BEFORE Term, and a failure means Nak rather
+	// than Term (ADR-0017): a Term without a landed dead letter is the silent
+	// loss the DLQ exists to prevent.
+	//
+	// The reason is all the application supplies. Everything else on the wire —
+	// the trace context, the delivery count, the consumer name — is transport
+	// detail the adapter already holds, and routing it through this port would
+	// put the transport back into the interface that exists to keep it out.
+	Deadletter(ctx context.Context, m Message, reason string) error
 }
 
 // RequestReceived mirrors tasking.request.received.v1, reduced to what

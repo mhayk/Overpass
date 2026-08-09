@@ -180,32 +180,105 @@ def handle_one(
         return Outcome.FAILED_RETRYABLE
 
 
-async def _settle(msg: Msg, outcome: Outcome, delivered_count: int = 1) -> None:
+def _delivered_count(msg: Msg) -> int:
+    """The broker's delivery counter, or 0 when the metadata will not parse.
+
+    Zero is not a guess. The count lives in the metadata, and the only caller
+    that sees a parse failure dead-letters with reason ``metadata`` — which is
+    what tells an operator the number is missing rather than wrong.
+    """
+    try:
+        return msg.metadata.num_delivered or 1
+    except Exception:
+        # Any metadata failure means "unknown", whatever its shape. Narrowing
+        # this would be guessing at the client's error taxonomy in the one place
+        # the client has already proven unreliable.
+        return 0
+
+
+async def _dead_letter(
+    js: consume.DlqPublisher,
+    msg: Msg,
+    *,
+    reason: str,
+    event_id: str,
+    delivered: int,
+) -> bool:
+    """Publish the dead letter. False means the caller must nak, not term.
+
+    The ordering (ADR-0017): publish, THEN term; if the publish fails, nak. A
+    term without a landed dead letter is the silent loss the DLQ exists to
+    prevent, and a nak retries the whole delivery — handling and dead-lettering
+    both — which is safe because both are idempotent.
+    """
+    try:
+        await consume.publish_dead_letter(
+            js,
+            consume.DeadLetter(
+                subject=msg.subject,
+                payload=msg.data,
+                reason=reason,
+                consumer=CONSUMER,
+                delivered=delivered,
+                event_id=event_id,
+                traceparent=(msg.headers or {}).get(consume.HEADER_TRACEPARENT, ""),
+            ),
+        )
+    except Exception:
+        log.exception("dead-lettering %s failed; naking rather than dropping it", msg.subject)
+        return False
+    return True
+
+
+async def _settle(
+    js: consume.DlqPublisher,
+    msg: Msg,
+    delivery: Delivery,
+    outcome: Outcome,
+    metrics: consume.Metrics,
+) -> None:
     """Tell the broker what happened. Called only after the transaction ended."""
-    if outcome is Outcome.FAILED_RETRYABLE:
-        # Retry until the LAST delivery, then terminate DELIBERATELY (#48). A
-        # lapsed max_deliver is a silent drop; a term has the log line below
-        # and a metric. Permanent failures never reach here — they are
-        # FAILED_TERMINAL, publish their refusal, and ack.
-        if (
-            consume.on_failure(permanent=False, delivered=delivered_count, max_deliver=_MAX_DELIVER)
-            is consume.Decision.TERMINATE
-        ):
-            log.error(
-                "terminating after %d deliveries; retrying has not fixed it",
-                delivered_count,
-            )
-            await msg.term()
-            return
-        await msg.nak(delay=_NAK_DELAY_S)
-    else:
+    if outcome is not Outcome.FAILED_RETRYABLE:
         # PROCESSED, DUPLICATE and FAILED_TERMINAL all ack.
         #
         # DUPLICATE acks because the work is already done and leaving it unacked
         # would redeliver it forever. FAILED_TERMINAL acks because the refusal
         # has been published and the answer is final — a term() would say we
-        # never handled it, which is not what happened.
+        # never handled it, which is not what happened. Nor is it dead-lettered:
+        # a published refusal is completed work, not a loss.
         await msg.ack()
+        return
+
+    # Retry until the LAST delivery, then terminate DELIBERATELY (#48). A lapsed
+    # max_deliver is a silent drop; a term has the log line below and a metric.
+    # Permanent failures never reach here — they are FAILED_TERMINAL, publish
+    # their refusal, and ack.
+    if (
+        consume.on_failure(
+            permanent=False, delivered=delivery.delivered_count, max_deliver=_MAX_DELIVER
+        )
+        is not consume.Decision.TERMINATE
+    ):
+        await msg.nak(delay=_NAK_DELAY_S)
+        return
+
+    log.error(
+        "terminating after %d deliveries; retrying has not fixed it",
+        delivery.delivered_count,
+    )
+    kept = await _dead_letter(
+        js,
+        msg,
+        reason=consume.REASON_EXHAUSTED,
+        event_id=delivery.event_id,
+        delivered=delivery.delivered_count,
+    )
+    if not kept:
+        await msg.nak(delay=_NAK_DELAY_S)
+        return
+    metrics.deadlettered += 1
+    metrics.terminated += 1
+    await msg.term()
 
 
 async def run(
@@ -258,12 +331,28 @@ async def run(
                         delivery = delivery_from(msg)
                     except NonRetryableError:
                         # Unparseable envelope. Nothing to dedup on and nothing
-                        # to refuse about, so drop it rather than redeliver it
-                        # five times.
+                        # to refuse about, so it stops here rather than being
+                        # redelivered five times — but the bytes are kept (#49).
+                        # This is the message an operator most needs to see:
+                        # something upstream is publishing garbage, and the
+                        # payload is the only evidence of what.
                         log.exception("undeliverable message on %s", msg.subject)
-                        await msg.term()
                         settled += 1
-                        metrics.terminated += 1
+                        if await _dead_letter(
+                            js,
+                            msg,
+                            reason=consume.REASON_DECODE,
+                            # There is no envelope to take an id from; the
+                            # header is the only place one could be, and an
+                            # absent one is tolerated by design.
+                            event_id=(msg.headers or {}).get(consume.HEADER_MSG_ID, ""),
+                            delivered=_delivered_count(msg),
+                        ):
+                            metrics.deadlettered += 1
+                            metrics.terminated += 1
+                            await msg.term()
+                        else:
+                            await msg.nak(delay=_NAK_DELAY_S)
                         continue
 
                     # The consumer span wraps the work AND the settle, so the
@@ -292,14 +381,9 @@ async def run(
                             # retryable failure is an expected state of this
                             # system rather than a fault of this span.
                             span.set_status(Status(StatusCode.ERROR, "retryable failure"))
-                        await _settle(msg, outcome, delivery.delivered_count)
+                        await _settle(js, msg, delivery, outcome, metrics)
                     settled += 1
                     metrics.record(outcome, delivery.delivered_count, time.monotonic() - received)
-                    if (
-                        outcome is Outcome.FAILED_RETRYABLE
-                        and delivery.delivered_count >= _MAX_DELIVER
-                    ):
-                        metrics.terminated += 1
     finally:
         await client.drain()
 
