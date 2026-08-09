@@ -59,6 +59,29 @@ rather than reading about it:
   usually exercise a restart while claiming to exercise a kill. When the window
   is missed anyway, the test says so in its output rather than passing quietly.
 
+## Outbound waits, audited
+
+#51 asks for "timeouts on every outbound call, no unbounded waits anywhere".
+Audited rather than asserted — every outbound path, and what actually bounds it:
+
+| Path | Bound | How it is set |
+| --- | --- | --- |
+| Submit → Postgres | 5s | `SUBMIT_TIMEOUT`, added for #50 — before it, an exhausted pool held the request open forever |
+| Readiness → Postgres | 2s | `READINESS_TIMEOUT` |
+| Outbox relay → JetStream | 5s | An explicit context over the whole publish |
+| Consumer fetch → JetStream | per service | A derived context on every `Fetch`; an idle stream is a timeout, not a failure |
+| Celestrak → HTTP | 10s per call, and a breaker after three failures | `timeout_s` plus `feasibility.resilience.Breaker` |
+| Shutdown | `SHUTDOWN_TIMEOUT` | A deadline on `context.Background()`, which is the one correct use of it here |
+
+The finding worth keeping: **an unoptioned JetStream publish was never
+unbounded, but its bound was not the one the call site suggested.** nats.go
+waits `defaultRequestWait` (5s) and retries `DefaultPubRetryAttempts` (2) more
+times with `DefaultPubRetryWait` (250ms) between — about fifteen seconds per
+message, multiplied by the batch the relay is draining. Read out of the
+library's source rather than its documentation. It is now one explicit context
+over the whole call, retries included, because a relay's job when the broker is
+slow is to give up quickly and leave the rows for the next tick.
+
 ## What each scenario had to be taught
 
 None of these worked the first time, and the reasons are the useful part.

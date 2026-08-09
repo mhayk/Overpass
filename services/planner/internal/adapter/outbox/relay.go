@@ -57,6 +57,22 @@ type NATSPublisher struct{ js nats.JetStreamContext }
 // NewNATSPublisher wraps a JetStream context.
 func NewNATSPublisher(js nats.JetStreamContext) *NATSPublisher { return &NATSPublisher{js: js} }
 
+// publishTimeout bounds one publish, explicitly.
+//
+// AUDITED, not assumed (#51). An unoptioned PublishMsg is NOT unbounded — but
+// its bound is the library's, and it is not the five seconds a reader would
+// guess from the call site: nats.go waits defaultRequestWait (5s) and retries
+// DefaultPubRetryAttempts (2) more times with DefaultPubRetryWait (250ms)
+// between, so a stalled broker holds this call for roughly fifteen seconds per
+// message. The relay drains batches, so that is fifteen seconds MULTIPLIED BY
+// the batch size before the loop notices anything is wrong.
+//
+// Stated here instead. The number is deliberately close to the library's single
+// attempt: the outbox is the reason a broker outage does not refuse customer
+// traffic, so the relay's job when the broker is slow is to give up quickly and
+// leave the rows for the next tick — not to hold a connection hoping.
+const publishTimeout = 5 * time.Second
+
 // Publish sends one message with its headers intact.
 func (p *NATSPublisher) Publish(subject string, data []byte, headers map[string]string) error {
 	msg := nats.NewMsg(subject)
@@ -64,7 +80,18 @@ func (p *NATSPublisher) Publish(subject string, data []byte, headers map[string]
 	for k, v := range headers {
 		msg.Header.Set(k, v)
 	}
-	if _, err := p.js.PublishMsg(msg); err != nil {
+	// A deadline over the WHOLE call, retries included. nats.AckWait would
+	// bound one attempt and leave the total as attempts x wait, which is the
+	// same implicit arithmetic this constant exists to remove.
+	//
+	// context.Background() rather than a caller's context: this interface does
+	// not carry one, and the bound here is about the broker rather than about
+	// the caller's lifetime — shutdown is handled by the loop that calls this,
+	// which stops fetching rows.
+	ctx, cancel := context.WithTimeout(context.Background(), publishTimeout)
+	defer cancel()
+
+	if _, err := p.js.PublishMsg(msg, nats.Context(ctx)); err != nil {
 		return fmt.Errorf("publishing to %s: %w", subject, err)
 	}
 	return nil
