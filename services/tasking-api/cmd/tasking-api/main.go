@@ -119,7 +119,7 @@ func run(ctx context.Context) error {
 
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           httpapi.New(health, submitter, log).Routes(),
+		Handler:           httpapi.New(health, submitter, cfg.SubmitTimeout, log).Routes(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

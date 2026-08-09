@@ -25,6 +25,7 @@ type Config struct {
 	NATSURL          string
 	LogLevel         string
 	ShutdownTimeout  time.Duration
+	SubmitTimeout    time.Duration
 	ReadinessTimeout time.Duration
 
 	OTLPEndpoint     string
@@ -59,6 +60,11 @@ func Load() (Config, error) {
 	var err error
 	if cfg.ShutdownTimeout, err = duration("SHUTDOWN_TIMEOUT", 15*time.Second); err != nil {
 		problems = append(problems, err.Error())
+	}
+	// Five seconds: long enough that a busy-but-working database still answers,
+	// short enough that an exhausted pool refuses rather than accumulates.
+	if cfg.SubmitTimeout, err = duration("SUBMIT_TIMEOUT", 5*time.Second); err != nil {
+		return Config{}, err
 	}
 	if cfg.ReadinessTimeout, err = duration("READINESS_TIMEOUT", 2*time.Second); err != nil {
 		problems = append(problems, err.Error())

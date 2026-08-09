@@ -71,7 +71,7 @@ func submitServer(t *testing.T, store *fakeStore) http.Handler {
 	submitter := app.NewSubmitService(
 		store, fixedClock{submitNow}, domain.ConfiguredSensors(), domain.DefaultValidationPolicy(),
 	)
-	return httpapi.New(health, submitter, logger).Routes()
+	return httpapi.New(health, submitter, 5*time.Second, logger).Routes()
 }
 
 const validBody = `{
@@ -368,5 +368,48 @@ func TestDifferentKeysCreateDifferentRequests(t *testing.T) {
 
 	if store.saved != 2 {
 		t.Fatalf("two distinct keys produced %d requests", store.saved)
+	}
+}
+
+// blockingStore never answers, which is what an exhausted connection pool looks
+// like from the handler: the acquire simply does not return.
+type blockingStore struct{ fakeStore }
+
+func (b *blockingStore) Save(
+	ctx context.Context, _ port.IdempotencyClaim, _ port.StoredRequest, _ port.OutboxEvent,
+) (port.Replay, error) {
+	<-ctx.Done()
+	return port.Replay{}, ctx.Err()
+}
+
+// A submission that cannot reach the database must be REFUSED, not held.
+//
+// #50's acceptance criterion is that ingress degrades to 503 under pool
+// exhaustion. Without a deadline on the submit path the handler waits for a
+// connection that is not coming, the client's socket stays open, and the
+// symptom is a service that looks alive and answers nothing — the failure mode
+// an operator finds hardest to attribute, because every dashboard is green and
+// the request count simply stops.
+//
+// 503 is already the mapping for a failed submission; what was missing is
+// something that makes the attempt fail at all.
+func TestASubmissionThatCannotReachTheDatabaseIsRefusedNotHeld(t *testing.T) {
+	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	health := app.NewHealthService("test", time.Second)
+	submitter := app.NewSubmitService(
+		&blockingStore{}, fixedClock{submitNow}, domain.ConfiguredSensors(), domain.DefaultValidationPolicy(),
+	)
+	handler := httpapi.New(health, submitter, 200*time.Millisecond, logger).Routes()
+
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() { done <- post(t, handler, validBody) }()
+
+	select {
+	case rec := <-done:
+		if rec.Code != http.StatusServiceUnavailable {
+			t.Fatalf("status = %d, want 503 — a request that never reached the database must not be accepted", rec.Code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the handler never answered; ingress hangs instead of degrading, which is the failure mode #50 asks about")
 	}
 }
