@@ -13,9 +13,16 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/mhayk/overpass/lib/go/consume"
+
 	"github.com/mhayk/overpass/services/planner/internal/domain"
 	"github.com/mhayk/overpass/services/planner/internal/port"
 )
+
+// maxDeliver mirrors deploy/nats/init.sh for the planner's two consumers. The
+// poison decision needs it to terminate the LAST attempt deliberately instead
+// of letting the broker's counter lapse into a silent drop.
+const maxDeliver = 5
 
 // Subjects this projector acts on.
 //
@@ -51,6 +58,9 @@ type Projector struct {
 	decoder     port.Decoder
 	projections port.Projections
 	log         *slog.Logger
+
+	// Metrics is exported so main can serve it and M3-06 can scrape it.
+	Metrics consume.Metrics
 
 	// consumerFor maps a stream to the dedup ledger partition it writes.
 	consumerFor map[string]string
@@ -94,36 +104,55 @@ func (p *Projector) DrainOnce(ctx context.Context) (Stats, error) {
 	}
 
 	for _, m := range messages {
+		received := time.Now()
+		if m.Delivered > 1 {
+			// The early-warning line: climbing redeliveries with flat
+			// throughput is poison or a dying dependency, visible before
+			// max_deliver makes it a loss.
+			p.Metrics.Redelivered()
+		}
+
 		outcome, err := p.fold(ctx, m)
 		switch {
 		case err != nil:
 			stats.Failed++
-			// Nak, not Ack. The message goes back for redelivery and, past the
-			// consumer's max-deliver, into the DLQ that M0-06 provisioned for
-			// exactly this. Acking a failure would drop the event silently, and
-			// a silently dropped opportunity is a customer whose request never
-			// competes in any round.
-			//
-			// This is deliberately the same response for a payload that can
-			// never succeed (a malformed event) and one that may (an unknown
-			// customer, whose reference row might still arrive). Distinguishing
-			// them would mean the projector deciding which failures are
-			// permanent, and the max-deliver limit already bounds the cost of
-			// being wrong about that. M3-02 owns the DLQ and its replay.
+			// The M2 position — Nak everything, let max_deliver bound the cost
+			// of being wrong — is replaced by the #48 decision the lib makes
+			// explicit: a PERMANENT failure (malformed payload, contract
+			// violation — anything wrapping domain.ErrInvalid) terminates on
+			// its first delivery, because rerunning a deterministic failure
+			// buys nothing but latency for the messages behind it. Everything
+			// else retries until the LAST delivery, then terminates
+			// DELIBERATELY: a lapsed max_deliver is a silent drop, a Term has
+			// this log line and a metric.
+			permanent := IsInvalid(err)
+			decision := consume.OnFailure(permanent, m.Delivered, maxDeliver)
 			p.log.Error("fold failed",
 				slog.String("stream", m.Stream),
 				slog.String("subject", m.Subject),
 				slog.String("event_id", m.EventID),
+				slog.Uint64("delivered", m.Delivered),
+				slog.Bool("permanent", permanent),
+				slog.String("decision", decision.String()),
 				slog.Any("error", err),
 			)
+			if decision == consume.Terminate {
+				p.Metrics.Terminated()
+				if termErr := p.source.Term(ctx, m); termErr != nil {
+					return stats, fmt.Errorf("terminating %s: %w", m.EventID, termErr)
+				}
+				continue
+			}
 			if nakErr := p.source.Nak(ctx, m); nakErr != nil {
 				return stats, fmt.Errorf("naking %s: %w", m.EventID, nakErr)
 			}
 			continue
 		case outcome == outcomeApplied:
 			stats.Applied++
+			p.Metrics.Processed()
 		case outcome == outcomeDuplicate:
 			stats.Duplicate++
+			p.Metrics.Duplicate()
 			p.log.Debug("already processed",
 				slog.String("consumer", p.consumerFor[m.Stream]),
 				slog.String("event_id", m.EventID),
@@ -138,6 +167,7 @@ func (p *Projector) DrainOnce(ctx context.Context) (Stats, error) {
 		if ackErr := p.source.Ack(ctx, m); ackErr != nil {
 			return stats, fmt.Errorf("acking %s: %w", m.EventID, ackErr)
 		}
+		p.Metrics.AckAfter(time.Since(received))
 	}
 	return stats, nil
 }
@@ -164,7 +194,9 @@ func (p *Projector) fold(ctx context.Context, m port.Message) (outcome, error) {
 	case SubjectRequestReceived:
 		event, err := p.decoder.RequestReceived(m.Payload)
 		if err != nil {
-			return outcomeIgnored, fmt.Errorf("decoding %s: %w", m.Subject, err)
+			// A payload that does not decode will not decode on redelivery
+			// either: permanent, by construction.
+			return outcomeIgnored, fmt.Errorf("decoding %s: %w: %w", m.Subject, domain.ErrInvalid, err)
 		}
 		if invalid := event.Snapshot.Validate(); invalid != nil {
 			return outcomeIgnored, invalid
@@ -178,7 +210,7 @@ func (p *Projector) fold(ctx context.Context, m port.Message) (outcome, error) {
 	case SubjectOpportunities:
 		event, err := p.decoder.Opportunities(m.Payload)
 		if err != nil {
-			return outcomeIgnored, fmt.Errorf("decoding %s: %w", m.Subject, err)
+			return outcomeIgnored, fmt.Errorf("decoding %s: %w: %w", m.Subject, domain.ErrInvalid, err)
 		}
 		for i, candidate := range event.Candidates {
 			if invalid := candidate.Validate(); invalid != nil {

@@ -129,12 +129,13 @@ func convert(stream string, m *nats.Msg) (port.Message, error) {
 		return port.Message{}, fmt.Errorf("reading metadata: %w", err)
 	}
 	return port.Message{
-		Stream:   stream,
-		Sequence: meta.Sequence.Stream,
-		Subject:  m.Subject,
-		EventID:  m.Header.Get("Nats-Msg-Id"),
-		Payload:  m.Data,
-		EventAt:  eventAt(m.Header, meta.Timestamp),
+		Stream:    stream,
+		Sequence:  meta.Sequence.Stream,
+		Subject:   m.Subject,
+		EventID:   m.Header.Get("Nats-Msg-Id"),
+		Payload:   m.Data,
+		EventAt:   eventAt(m.Header, meta.Timestamp),
+		Delivered: meta.NumDelivered,
 	}, nil
 }
 
@@ -179,6 +180,15 @@ func (s *Source) Nak(_ context.Context, m port.Message) error {
 		return err
 	}
 	return raw.Nak()
+}
+
+// Term stops delivery on purpose. See port.MessageSource.
+func (s *Source) Term(_ context.Context, m port.Message) error {
+	raw, err := s.claim(m)
+	if err != nil {
+		return err
+	}
+	return raw.Term()
 }
 
 // claim takes the handle out of the map, so a double ack is a loud error rather

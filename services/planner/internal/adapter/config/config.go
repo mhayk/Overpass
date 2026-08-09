@@ -44,6 +44,12 @@ type Config struct {
 	SweepInterval  time.Duration
 	SweepLimit     int
 
+	// LedgerRetention is how long processed_events rows are kept. The lib
+	// refuses any value inside the redelivery horizon, so misconfiguring this
+	// low fails at cleanup time with an explanation instead of silently
+	// reprocessing late redeliveries as new.
+	LedgerRetention time.Duration
+
 	// AllocationPolicy is which strategy a round announces. ADR-0007 defers the
 	// default to the M2-13 benchmark, so it is configuration and the round
 	// records it — which is what lets a committed plan be attributed to a
@@ -107,6 +113,9 @@ func Load() (Config, error) {
 		problems = append(problems, err.Error())
 	}
 	if cfg.SweepLimit, err = positiveInt("SWEEP_LIMIT", 64); err != nil {
+		problems = append(problems, err.Error())
+	}
+	if cfg.LedgerRetention, err = duration("LEDGER_RETENTION", 168*time.Hour); err != nil {
 		problems = append(problems, err.Error())
 	}
 
