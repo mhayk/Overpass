@@ -2,6 +2,7 @@ package integration_test
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"strings"
 	"testing"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/nats-io/nats.go"
 )
 
 // Ingress with the database out of reach.
@@ -161,4 +163,47 @@ func submitStatus(t *testing.T, api *service, key string, body []byte) (int, tim
 	}
 	defer resp.Body.Close() //nolint:errcheck // status is all this needs
 	return resp.StatusCode, elapsed
+}
+
+// A broker that accepts the connection and never answers must not hold the
+// relay for longer than its own stated bound.
+//
+// This is the audit's finding made executable (#51). An unoptioned JetStream
+// publish is not unbounded, but its bound is the library's and it is not the
+// five seconds a reader would guess: nats.go waits 5s and retries twice with
+// 250ms between, so a stalled broker holds one publish for roughly fifteen
+// seconds — multiplied by the batch the relay is draining.
+func TestAPublishToASilentBrokerGivesUpWithinItsBudget(t *testing.T) {
+	// A listener that completes the TCP handshake and then says nothing. Not a
+	// closed port: a refused connection fails instantly and would prove the
+	// opposite of what this asks.
+	silent, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("opening the silent listener: %v", err)
+	}
+	defer silent.Close() //nolint:errcheck // test teardown
+	go func() {
+		for {
+			conn, acceptErr := silent.Accept()
+			if acceptErr != nil {
+				return
+			}
+			// Held open, deliberately unanswered.
+			t.Cleanup(func() { _ = conn.Close() }) //nolint:errcheck // teardown
+		}
+	}()
+
+	// The client's own connect timeout bounds this half; the assertion is that
+	// SOMETHING does, promptly, rather than the call hanging on a broker that
+	// looks reachable.
+	start := time.Now()
+	_, err = nats.Connect("nats://"+silent.Addr().String(), nats.Timeout(2*time.Second))
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("connecting to a silent listener succeeded; the test is not testing what it thinks")
+	}
+	if elapsed > 10*time.Second {
+		t.Errorf("the client waited %s on a silent broker; something on this path is unbounded", elapsed)
+	}
 }
