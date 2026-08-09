@@ -45,6 +45,11 @@ rather than reading about it:
   is an FNV-32a hash, so it is negative about half the time, and querying
   `pg_locks` with the signed value fails to encode rather than returning zero
   rows. A test that got this wrong would silently watch the wrong lock.
+- **The lock is released when Postgres NOTICES the client is gone**, on the
+  backend's next socket operation — not at the moment of the kill. Asserting it
+  synchronously passed on a laptop and failed in CI with the lock still held
+  1.13 seconds after the process died. The test now waits, with a bound tight
+  enough that "eventually" still means something an operator could rely on.
 - **The kill has to be aimed, not timed.** The test polls `pg_locks` every
   millisecond and kills the instant the lock appears. A sleep would land either
   side of a round that takes a few tens of milliseconds, and the test would

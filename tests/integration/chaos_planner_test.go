@@ -181,10 +181,18 @@ func TestAPlannerKilledHoldingTheLockLeavesNoHalfPlannedBucket(t *testing.T) {
 		t.Logf("the bucket's lock was never observed: this run exercised a restart, not a kill")
 	}
 
-	// The lock died with the process. Nothing released it; nothing could have.
-	if got := holdersOf(t, class, obj); got != 0 {
-		t.Fatalf("%d sessions still hold the bucket's lock after the planner died — "+
-			"the satellite is now unplannable until someone notices", got)
+	// The lock dies with the process. Nothing releases it; nothing can.
+	//
+	// Waited for rather than asserted instantly, and the difference is a real
+	// property rather than test hygiene: Postgres releases the lock when it
+	// NOTICES the client is gone, which happens on the backend's next socket
+	// operation and not at the moment of the kill. Measured — asserting it
+	// synchronously passed locally and failed in CI with the lock still held
+	// 1.13s in. The bound stays tight, because "eventually, some minutes later"
+	// would not be a guarantee an operator could rely on.
+	if !waitFor(30*time.Second, func() bool { return holdersOf(t, class, obj) == 0 }) {
+		t.Fatalf("the bucket's lock is still held 30s after the planner died — " +
+			"the satellite is now unplannable until someone notices")
 	}
 
 	second, err := start(env.plannerBin, "planner", plannerEnv())
