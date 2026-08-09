@@ -90,8 +90,11 @@ func (t *Trigger) buildPlan(
 		plan.Acquisitions[i].AcquisitionID = uuid.NewString()
 	}
 
+	planID := uuid.NewString()
+	markSuperseded(&plan, inputs, planID)
+
 	commit := &port.PlanCommit{
-		PlanID:               uuid.NewString(),
+		PlanID:               planID,
 		RoundID:              round.RoundID,
 		SupersedesPlanID:     inputs.LivePlanID,
 		SupersededRowVersion: inputs.LivePlanRowVersion,
@@ -147,6 +150,53 @@ func ensureConservation(plan *domain.Plan, problem domain.Problem, competed []st
 					"it stays in contention for later ones",
 			})
 		}
+	}
+}
+
+// markSuperseded rewrites the outcome for every request that held a slot in
+// the plan being replaced and is absent from this one.
+//
+// SUPERSEDED wins over whatever competitive reason the policy produced, because
+// it is the truthful description of what the customer experiences: they HAD a
+// slot and the re-plan dropped them. The competitive detail — the shortfall,
+// the budget numbers — stays in the explanation, so "why did the re-plan drop
+// me?" is still answerable; the code names the event, the numbers name the
+// cause.
+//
+// A holder that is not even in the candidate ledger any more — its options
+// expired since the plan it won a place in — gets an event APPENDED. That is
+// beyond the round's announced conservation set, deliberately: the ledger
+// promises outcomes for who competed, and this promise is older, made when the
+// plan committed.
+func markSuperseded(plan *domain.Plan, inputs port.RoundInputs, planID string) {
+	if inputs.LivePlanID == nil || len(inputs.LivePlanHolders) == 0 {
+		return
+	}
+	winners := map[string]bool{}
+	for _, a := range plan.Acquisitions {
+		winners[a.RequestID] = true
+	}
+	reported := map[string]int{}
+	for i, u := range plan.Unfulfilled {
+		reported[u.RequestID] = i
+	}
+
+	for _, holder := range inputs.LivePlanHolders {
+		if winners[holder] {
+			continue // still flying; nothing was lost
+		}
+		if i, ok := reported[holder]; ok {
+			plan.Unfulfilled[i].ReasonCode = domain.ReasonSuperseded
+			plan.Unfulfilled[i].Detail.SupersededByPlanID = planID
+			continue
+		}
+		plan.Unfulfilled = append(plan.Unfulfilled, domain.Unfulfilment{
+			RequestID:  holder,
+			ReasonCode: domain.ReasonSuperseded,
+			Explanation: "held an acquisition in the replaced plan; the re-plan did not include it " +
+				"and no current candidates remain",
+			Detail: domain.RefusalDetail{SupersededByPlanID: planID},
+		})
 	}
 }
 

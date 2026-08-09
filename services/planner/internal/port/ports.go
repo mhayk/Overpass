@@ -193,6 +193,14 @@ type RoundInputs struct {
 	// NextPlanVersion is the version this round's plan would carry. Dense per
 	// bucket, so a gap means a round committed and was rolled back.
 	NextPlanVersion int
+
+	// LivePlanHolders are the requests holding ACTIVE acquisitions on the live
+	// plan. A holder the new plan does not include gets a SUPERSEDED
+	// unfulfilment — losing a won slot silently is the worst possible customer
+	// experience and the easiest bug to write, so the set is read explicitly
+	// rather than inferred from the candidate ledger, which a holder may have
+	// aged out of.
+	LivePlanHolders []string
 }
 
 // Round is one opened allocation round, ready to record and announce.

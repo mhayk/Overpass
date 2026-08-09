@@ -205,3 +205,158 @@ func TestAFullRoundAllocatesAndAnnounces(t *testing.T) {
 		t.Errorf("%d plans after a clean re-sweep, want 1 — the bucket refired with nothing new", plans)
 	}
 }
+
+// THE #42 ACCEPTANCE TEST: rapid re-planning converges and never leaves
+// orphaned acquisitions. Three rounds over one bucket as candidates keep
+// arriving; after each, exactly one plan's acquisitions are ACTIVE and every
+// other row is SUPERSEDED with a timestamp.
+func TestRapidReplanningConverges(t *testing.T) {
+	p := pool(t)
+	ctx := context.Background()
+
+	satellite := fmt.Sprintf("SAT-RR%d", time.Now().UnixNano()%100000)
+	seedSatellite(t, p, satellite)
+	if _, err := p.Exec(ctx,
+		`UPDATE reference.satellites SET duty_cycle_budget_s = 70 WHERE satellite_id = $1`,
+		satellite); err != nil {
+		t.Fatalf("configuring: %v", err)
+	}
+	customer := fmt.Sprintf("cust-%d", time.Now().UnixNano())
+	seedCustomer(t, p, customer)
+	projections := postgres.NewProjections(p)
+
+	accessStart := time.Now().UTC().Add(2 * time.Hour).Truncate(time.Second)
+	arrive := func(bid int64) string {
+		requestID := uuid.NewString()
+		snapshot := snapshotEvent(uuid.NewString(), requestID, customer)
+		snapshot.Snapshot.BidCredits = bid
+		snapshot.Snapshot.WindowStart = accessStart.Add(-time.Hour)
+		snapshot.Snapshot.WindowEnd = accessStart.Add(6 * time.Hour)
+		snapshot.Snapshot.SubmittedAt = time.Now().UTC().Add(-time.Hour)
+		if _, err := projections.ProjectSnapshot(ctx, port.ConsumerLifecycle, snapshot); err != nil {
+			t.Fatalf("snapshot: %v", err)
+		}
+		event := candidateEvent(uuid.NewString(), requestID, satellite, uuid.NewString())
+		event.Candidates[0].AccessStart = accessStart
+		event.Candidates[0].AccessEnd = accessStart.Add(20 * time.Minute)
+		event.Candidates[0].AcquisitionDurationS = 30
+		event.Candidates[0].DutyCycleCostS = 30
+		event.Candidates[0].GeometryJSON = []byte(
+			`{"incidence_angle_deg":30,"look_side":"RIGHT","squint_angle_deg":0.1,"slant_range_km":570.51,"elevation_angle_deg":55.2}`)
+		if _, err := projections.ProjectCandidates(ctx, port.ConsumerOpportunities, event); err != nil {
+			t.Fatalf("candidate: %v", err)
+		}
+		return requestID
+	}
+
+	trigger, err := app.NewTrigger(postgres.NewRounds(p), app.TriggerConfig{
+		Policy:         domain.TriggerPolicy{QuietPeriod: time.Nanosecond, StalenessCeiling: time.Hour},
+		BucketDuration: 3 * time.Hour,
+		HorizonAhead:   24 * time.Hour,
+		SweepLimit:     16,
+		Allocator:      allocation.GreedyByBid{},
+		Fairness:       domain.DefaultFairness(),
+	}, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("wiring: %v", err)
+	}
+
+	// Round 1: one modest request wins. Round 2: a richer arrival displaces it
+	// (budget fits two 30s acquisitions, but the windows force contention —
+	// budget 70 fits two, so make three arrivals total so someone always
+	// loses). Round 3: richer still.
+	first := arrive(100)
+	if _, sweepErr := trigger.SweepOnce(ctx); sweepErr != nil {
+		t.Fatalf("round 1: %v", sweepErr)
+	}
+	second := arrive(500)
+	if _, sweepErr := trigger.SweepOnce(ctx); sweepErr != nil {
+		t.Fatalf("round 2: %v", sweepErr)
+	}
+	third := arrive(900)
+	if _, sweepErr := trigger.SweepOnce(ctx); sweepErr != nil {
+		t.Fatalf("round 3: %v", sweepErr)
+	}
+	_, _, _ = first, second, third
+
+	// Versions are dense and monotone.
+	var versions []int
+	rows, err := p.Query(ctx, `
+		SELECT plan_version FROM planning.collection_plans
+		WHERE satellite_id = $1 ORDER BY plan_version
+	`, satellite)
+	if err != nil {
+		t.Fatalf("reading plans: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var v int
+		if err := rows.Scan(&v); err != nil {
+			t.Fatalf("scanning: %v", err)
+		}
+		versions = append(versions, v)
+	}
+	if len(versions) != 3 {
+		t.Fatalf("%d plans, want 3 — a round did not fire or did not commit", len(versions))
+	}
+	for i, v := range versions {
+		if v != i+1 {
+			t.Fatalf("versions = %v, want dense 1,2,3", versions)
+		}
+	}
+
+	// Exactly one plan's acquisitions are ACTIVE, and it is the NEWEST.
+	var activePlans int
+	if err := p.QueryRow(ctx, `
+		SELECT count(DISTINCT a.plan_id) FROM planning.acquisitions a
+		JOIN planning.collection_plans c ON c.plan_id = a.plan_id
+		WHERE c.satellite_id = $1 AND a.status = 'ACTIVE'
+	`, satellite).Scan(&activePlans); err != nil {
+		t.Fatalf("counting active plans: %v", err)
+	}
+	if activePlans != 1 {
+		t.Fatalf("%d plans hold ACTIVE acquisitions, want exactly 1 — the previous plans were not released", activePlans)
+	}
+	var newestIsActive bool
+	if err := p.QueryRow(ctx, `
+		SELECT bool_and(c.plan_version = (
+			SELECT max(plan_version) FROM planning.collection_plans WHERE satellite_id = $1
+		))
+		FROM planning.acquisitions a
+		JOIN planning.collection_plans c ON c.plan_id = a.plan_id
+		WHERE c.satellite_id = $1 AND a.status = 'ACTIVE'
+	`, satellite).Scan(&newestIsActive); err != nil {
+		t.Fatalf("checking the active plan: %v", err)
+	}
+	if !newestIsActive {
+		t.Fatal("an OLDER plan still holds ACTIVE acquisitions")
+	}
+
+	// No orphans: every superseded row carries its timestamp, none dangles.
+	var orphans int
+	if err := p.QueryRow(ctx, `
+		SELECT count(*) FROM planning.acquisitions a
+		JOIN planning.collection_plans c ON c.plan_id = a.plan_id
+		WHERE c.satellite_id = $1 AND a.status = 'SUPERSEDED' AND a.superseded_at IS NULL
+	`, satellite).Scan(&orphans); err != nil {
+		t.Fatalf("counting orphans: %v", err)
+	}
+	if orphans != 0 {
+		t.Errorf("%d superseded acquisitions have no superseded_at", orphans)
+	}
+
+	// And displaced holders were TOLD: at least one SUPERSEDED event exists for
+	// this satellite's requests.
+	var supersededEvents int
+	if err := p.QueryRow(ctx, `
+		SELECT count(*) FROM planning.outbox
+		WHERE event_type = 'planning.request.unfulfilled.v1'
+		  AND payload->'data'->>'reason_code' = 'SUPERSEDED'
+		  AND payload->'data'->>'request_id' IN ($1, $2, $3)
+	`, first, second, third).Scan(&supersededEvents); err != nil {
+		t.Fatalf("counting superseded events: %v", err)
+	}
+	if supersededEvents == 0 {
+		t.Error("no SUPERSEDED event was ever emitted; a displaced holder lost a won slot silently")
+	}
+}

@@ -93,6 +93,11 @@ type RefusalDetail struct {
 
 	// For DEADLINE_PASSED.
 	Deadline time.Time
+
+	// For SUPERSEDED: the plan that replaced the one this request held a slot
+	// in. ADR-0012 retained the superseded rows precisely so this reference has
+	// something to point at.
+	SupersededByPlanID string
 }
 
 // REASON PRECEDENCE, defined once and tested, because when several constraints
