@@ -169,8 +169,15 @@ jobs:
       - name: Observability is wired
         run: |
           set -euo pipefail
-          curl -sf http://localhost:9090/-/healthy   > /dev/null && echo "prometheus healthy"
-          curl -sf http://localhost:3001/api/health  > /dev/null && echo "grafana healthy"
+          # `curl && echo` cannot fail this step: a command left of && is
+          # exempt from set -e, so a dead service was skipped silently (#150,
+          # demonstrated wrongly passing). Probes must fail by themselves.
+          curl -sf http://localhost:9090/-/healthy   > /dev/null \
+            || { echo "::error::prometheus is not healthy"; exit 1; }
+          echo "prometheus healthy"
+          curl -sf http://localhost:3001/api/health  > /dev/null \
+            || { echo "::error::grafana is not healthy"; exit 1; }
+          echo "grafana healthy"
           rules=$(curl -sf http://localhost:9090/api/v1/rules | grep -o '"name":"[A-Za-z]*"' | wc -l)
           echo "alert rules loaded: $rules"
           [ "$rules" -ge 4 ] || { echo "::error::alert rules did not load"; exit 1; }
@@ -189,10 +196,17 @@ jobs:
         run: |
           set -euo pipefail
           ./scripts/stack-up.sh
+          # Same set -e exemption as above: these probes were decorative until
+          # #150 — a stack with only the feasibility container up passed this
+          # step. Each probe now fails the gate itself, naming the service.
           for port in 8080 8083 8084; do
-            curl -sf "http://localhost:$port/readyz" > /dev/null && echo "readyz on $port"
+            curl -sf "http://localhost:$port/readyz" > /dev/null \
+              || { echo "::error::no readyz on :$port"; exit 1; }
+            echo "readyz on $port"
           done
-          curl -sf http://localhost:3000/ > /dev/null && echo "web serving"
+          curl -sf http://localhost:3000/ > /dev/null \
+            || { echo "::error::web is not serving on :3000"; exit 1; }
+          echo "web serving"
           docker compose logs feasibility | grep -q "feasibility worker starting" \
             || { echo "::error::the feasibility worker never started"; exit 1; }
 
