@@ -23,7 +23,7 @@ import nats
 import psycopg
 import pytest
 
-from feasibility.messaging import CONSUMER, Delivery, WorkerConfig, run
+from feasibility.messaging import CONSUMER, Delivery, WorkerConfig, consume, run, worker
 from feasibility.messaging.idempotency import NonRetryableError
 
 if TYPE_CHECKING:
@@ -258,6 +258,59 @@ async def test_a_transient_failure_is_redelivered_then_succeeds(
             "SELECT count(*) FROM feasibility._worker_results WHERE event_id = %s", (event_id,)
         )
         assert cur.fetchone()[0] == 1  # type: ignore[index]
+
+
+async def test_a_failure_that_never_heals_is_terminated_on_the_last_delivery(
+    connection: psycopg.Connection[Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The #48 poison decision, against the real broker.
+
+    Without it, the broker's max_deliver counter lapses and the message
+    disappears with no log line and no metric — a silent drop. With it, the
+    LAST attempt terms deliberately: the consumer ends with nothing pending
+    and the termination is counted where an operator can alarm on it.
+    """
+    # The real 5s nak delay would make five attempts take half a minute of
+    # wall-clock sleeping; the delay's length is not what is under test.
+    monkeypatch.setattr(worker, "_NAK_DELAY_S", 0.2)
+
+    event_id = str(uuid.uuid4())
+    await publish(envelope(event_id, str(uuid.uuid4())), count=1)
+
+    attempts = {"n": 0}
+
+    def always_failing(delivery: Delivery) -> Callable[[psycopg.Cursor[Any]], None]:
+        def handler(cursor: psycopg.Cursor[Any]) -> None:
+            attempts["n"] += 1
+            msg = "still broken"
+            raise RuntimeError(msg)
+
+        return handler
+
+    metrics = consume.Metrics()
+    for _ in range(6):
+        await run(config(), always_failing, max_batches=1, metrics=metrics)
+        await asyncio.sleep(0.5)  # let the nak delay lapse between batches
+
+    assert attempts["n"] == 5, "every delivery the broker allows must be attempted"
+    assert metrics.terminated == 1
+    assert metrics.redeliveries == 4
+
+    client = await nats.connect(servers=[_nats_url()])
+    try:
+        info = await client.jetstream().consumer_info("TASKING", CONSUMER)
+        assert info.num_pending == 0, "a terminated message must not be left pending"
+    finally:
+        await client.drain()
+
+    # Nothing was ever committed, and the ledger holds no claim — a later
+    # manual replay of this event would be processed as new, which is right.
+    with connection.cursor() as cur:
+        cur.execute(
+            "SELECT count(*) FROM feasibility.processed_events WHERE event_id = %s", (event_id,)
+        )
+        assert cur.fetchone()[0] == 0  # type: ignore[index]
 
 
 async def test_an_unparseable_envelope_is_terminated_not_retried(
