@@ -111,6 +111,8 @@ func addrVar(name string) string {
 		return "TASKING_API_ADDR"
 	case "plan-gateway":
 		return "PLAN_GATEWAY_ADDR"
+	case "planner":
+		return "PLANNER_ADDR"
 	default:
 		return "HTTP_ADDR"
 	}

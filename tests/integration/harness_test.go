@@ -35,6 +35,10 @@ type stack struct {
 
 	taskingAPIBin  string
 	planGatewayBin string
+	// plannerBin exists for the chaos suite: the planner is the only service
+	// that takes an advisory lock, and #50's central claim is about what
+	// happens to that lock when the process holding it dies.
+	plannerBin string
 
 	// tempoOTLP is where services export spans; tempoQuery is where the test
 	// reads them back. Empty when Tempo did not start.
@@ -172,6 +176,9 @@ func boot(ctx context.Context) (*stack, func(), error) {
 		return nil, teardown, err
 	}
 	if built.planGatewayBin, err = build(root, "plan-gateway", "plan-gateway"); err != nil {
+		return nil, teardown, err
+	}
+	if built.plannerBin, err = build(root, "planner", "planner"); err != nil {
 		return nil, teardown, err
 	}
 
