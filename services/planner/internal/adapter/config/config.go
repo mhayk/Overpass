@@ -68,11 +68,10 @@ func Load() (Config, error) {
 		DatabaseURL: os.Getenv("DATABASE_URL"),
 		NATSURL:     env("NATS_URL", "nats://localhost:4222"),
 		LogLevel:    env("LOG_LEVEL", "info"),
-		// GREEDY_BY_BID is the naive baseline and is deliberately NOT a claim
-		// about what the default should be. ADR-0007 names the default on
-		// benchmark evidence; until then the planner runs the policy whose
-		// behaviour is easiest to reason about when something looks wrong.
-		AllocationPolicy: env("ALLOCATION_POLICY", "GREEDY_BY_BID"),
+		// The default ADR-0007 names on benchmark evidence: worst class 98.0%
+		// of optimal against the baseline's 85.7%, 54 ms at the contract's
+		// 5 000-candidate cap. docs/policy-benchmark.md carries the numbers.
+		AllocationPolicy: env("ALLOCATION_POLICY", "GREEDY_BY_VALUE_DENSITY"),
 	}
 
 	if strings.TrimSpace(cfg.DatabaseURL) == "" {

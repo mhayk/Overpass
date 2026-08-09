@@ -31,6 +31,11 @@ func TestDefaultsApplyWhenOnlyTheRequiredValueIsSet(t *testing.T) {
 	if cfg.FetchBatch != 32 {
 		t.Errorf("FetchBatch = %d", cfg.FetchBatch)
 	}
+	// The default ADR-0007 accepted on the benchmark's numbers. Changing it is
+	// a decision that needs new evidence, not a config tweak.
+	if cfg.AllocationPolicy != "GREEDY_BY_VALUE_DENSITY" {
+		t.Errorf("AllocationPolicy = %q, want the ADR-0007 default", cfg.AllocationPolicy)
+	}
 	if cfg.ShutdownTimeout != 15*time.Second {
 		t.Errorf("ShutdownTimeout = %s", cfg.ShutdownTimeout)
 	}
