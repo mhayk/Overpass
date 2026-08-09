@@ -134,6 +134,24 @@ type BucketQuery struct {
 	Limit int
 }
 
+// JoinableCandidate is one candidate joined to its request's snapshot — the
+// raw rows a round allocates from, before fairness scores them.
+//
+// Raw rather than ScoredCandidate, because scoring is domain work the adapter
+// must not do: effective value depends on the fairness configuration and the
+// round's clock, neither of which belongs in SQL.
+type JoinableCandidate struct {
+	domain.Candidate
+
+	CustomerID   string
+	PriorityTier string
+	BidCredits   int64
+	SubmittedAt  time.Time
+	// Deadline is upper(request_window): the instant the acquisition must have
+	// FINISHED by.
+	Deadline time.Time
+}
+
 // RoundInputs is the candidate set as it stood UNDER THE LOCK.
 //
 // Re-read inside the locked transaction rather than carried in from the sweep.
@@ -150,8 +168,23 @@ type RoundInputs struct {
 	// nor an unfulfilment, so listing it would fail the contract's conservation
 	// test.
 	CandidateRequestIDs []string
-	DutyCycleBudgetS    float64
-	LivePlanID          *string
+
+	// Joinable are the candidates a policy may allocate — the ones behind
+	// CandidateRequestIDs, with their request facts attached.
+	Joinable []JoinableCandidate
+
+	// Profile is the satellite's agility and power budget, read in the same
+	// transaction so the plan is explicable against the numbers it actually
+	// used.
+	Profile domain.SatelliteProfile
+
+	// AgeRounds counts, per request, the rounds in this bucket that have
+	// already considered it. An observability figure for the unfulfilment
+	// event, NOT an input to fairness — ageing is by time, and the M2-09 commit
+	// records why.
+	AgeRounds        map[string]int
+	DutyCycleBudgetS float64
+	LivePlanID       *string
 	// LivePlanRowVersion is what the live plan's row_version was when this
 	// round read it, under the lock. The supersession update is guarded on it,
 	// so a plan touched by anybody in between aborts the round rather than

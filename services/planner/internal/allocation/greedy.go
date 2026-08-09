@@ -79,12 +79,17 @@ func allocateGreedily(problem domain.Problem, less func(a, b domain.ScoredCandid
 	// A request usually has several candidates. It gets at most one
 	// acquisition, and exactly one outcome — so the refusal remembered is the
 	// one from its BEST candidate, which is the answer to "why did I lose?"
-	// rather than "why did the last option I did not want also fail?".
+	// rather than "why did the last option I did not want also fail?". The
+	// best candidate is also what the frontend ghosts on the timeline.
 	firstRefusal := map[string]domain.Refusal{}
+	bestCandidate := map[string]domain.ScoredCandidate{}
 	customerOf := map[string]string{}
 
 	for _, candidate := range ordered {
 		customerOf[candidate.RequestID] = candidate.CustomerID
+		if current, seen := bestCandidate[candidate.RequestID]; !seen || candidate.EffectiveValue > current.EffectiveValue {
+			bestCandidate[candidate.RequestID] = candidate
+		}
 
 		if schedule.HasRequest(candidate.RequestID) {
 			continue // already won a slot; do not image the same target twice
@@ -115,11 +120,17 @@ func allocateGreedily(problem domain.Problem, less func(a, b domain.ScoredCandid
 
 	plan := domain.Plan{Acquisitions: schedule.Acquisitions()}
 	for requestID, refusal := range firstRefusal {
+		best := bestCandidate[requestID]
 		plan.Unfulfilled = append(plan.Unfulfilled, domain.Unfulfilment{
 			RequestID:   requestID,
 			CustomerID:  customerOf[requestID],
 			ReasonCode:  refusal.ReasonCode,
 			Explanation: refusal.Explanation,
+			Detail:      refusal.Detail,
+			// The loser's own value, so the event can show the gap and not just
+			// its existence.
+			OwnValueCredits:           int64(best.EffectiveValue),
+			BestRejectedOpportunityID: best.OpportunityID,
 		})
 	}
 	// Sorted, because map iteration order would make the same input produce a

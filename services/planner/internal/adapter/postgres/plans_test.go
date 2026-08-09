@@ -25,6 +25,9 @@ import (
 
 func acquisition(requestID, opportunityID, customerID string, start time.Time, d time.Duration) domain.ScheduledAcquisition {
 	return domain.ScheduledAcquisition{
+		// App-side now, matching buildPlan: the event carries the id, so the
+		// row cannot invent its own.
+		AcquisitionID:       uuid.NewString(),
 		OpportunityID:       opportunityID,
 		RequestID:           requestID,
 		CustomerID:          customerID,
