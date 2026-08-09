@@ -1,17 +1,16 @@
 # 0007 — Choose the allocation algorithm by measurement behind a policy interface, rather than committing to one algorithm
 
-- **Status:** proposed
-- **Date:** 2026-08-08
+- **Status:** accepted
+- **Date:** 2026-08-08, accepted 2026-08-09 with the M2-13 numbers
 - **Deciders:** Mhayk Whandson
 
-> **This ADR is deliberately incomplete.** Every section below is settled except
-> [Measured results](#measured-results), which is a placeholder until M2-13 (#45)
-> runs. The default policy is named there on evidence, and the status flips to
-> `accepted` at that point. An allocation ADR written before the benchmark would
-> be a prediction dressed as a decision, and #46 says so in its own acceptance
-> criteria. It is written now, ahead of that, because M2-04 through M2-08 need
-> the problem statement and the interface boundary fixed before they can be
-> built — not because the answer is already known.
+> Written 2026-08-08 as `proposed`, with the measured-results section an
+> explicit placeholder, because M2-04 through M2-08 needed the problem statement
+> and the interface boundary before they could be built. Accepted 2026-08-09,
+> when M2-13 (#45) produced the numbers below. The expectation recorded on day
+> one — that `GreedyByValueDensity` would be the default — survived contact with
+> the measurement, which is worth exactly as much as it would have been worth to
+> see it fail.
 
 ## Context and problem statement
 
@@ -206,18 +205,36 @@ than dressed up as a technical objection.
 
 ### Measured results
 
-> **Placeholder — filled by M2-13 (#45).**
->
-> This section will carry, from `docs/policy-benchmark.md`: plan value, requests
-> fulfilled, satellite utilisation, runtime, and optimality ratio against
-> `ExactDP` for each policy across the generated scenario classes, plus the
-> scenario class each heuristic handles worst.
->
-> **The default policy is named here, on those numbers.** The expectation going
-> in is `GreedyByValueDensity`, and recording that expectation now is deliberate:
-> if the benchmark contradicts it, that disagreement is the most interesting
-> result this milestone can produce and it should be visible rather than
-> retrofitted.
+From [`docs/policy-benchmark.md`](../policy-benchmark.md), seeded and
+regenerable with `make benchmark`. Ratios are against **proven** optima only:
+74 of 96 instances were solved exactly, and the report names which — the
+unsolved ones cluster in the *uncontended* classes, where everything is
+feasible and the branch-and-bound's incumbent never prunes, which is the
+opposite of intuition and stated because a reviewer would ask.
+
+| finding | number |
+| --- | --- |
+| `GreedyByValueDensity`, worst class | **98.0%** of optimal |
+| `GreedyByBid`, worst class | **85.7%** — the same class where density scores 98.8% |
+| every heuristic, every uncontended class | 99–100% |
+| `VickreySealedBid` ratios | identical to `GreedyByBid` in all eight classes |
+| runtime at the 5 000-candidate cap | bid 39 ms, density 54 ms, Vickrey 137 ms |
+| plan value at 5 000 candidates | density 141 373 vs bid 105 492 |
+
+**The default policy is `GreedyByValueDensity`**, on three of those numbers.
+Its worst class is thirteen points better than the baseline's worst — and it is
+the *same* class, contended with dispersed geometry, which is precisely where a
+tasking system earns its keep. Its 54 ms at the contract's candidate cap sits
+fifteen-fold inside the round's 800 ms p95 budget. And nothing beats it
+anywhere: the baseline never exceeds it in any class, which the
+no-heuristic-beats-optimal test would have caught as a bug if it had.
+
+Two findings worth keeping beside the decision. Vickrey matching the baseline
+in every class confirms by data that second-price clearing changes what winners
+*pay* and never who wins — so choosing it would be choosing a pricing story,
+not plan value. And the uncontended classes flattening every policy to ~100%
+says the whole comparison only matters under contention, which is the regime
+the fairness model and the debounce were built for anyway.
 
 ### Consequences
 
@@ -267,10 +284,11 @@ than dressed up as a technical objection.
 
 ### Confirmation
 
-- **The interface earns itself** if the benchmark changes anyone's mind. If
-  `GreedyByValueDensity` is the default, the numbers are unsurprising, and no
-  decision anywhere in the repo cites the comparison, then four policies bought a
-  chart and one would have done.
+- **The interface earns itself** if the benchmark changes anyone's mind. The
+  honest verdict now the numbers exist: the expectation held, but the numbers
+  are load-bearing anyway — 85.7% versus 98.0% in the worst class is the
+  difference between an assertion and a defence, and the Vickrey result was
+  not predictable from the code.
 - **The ground truth holds:** on every instance `ExactDP` solves within its limit,
   no heuristic reports a higher plan value (M2-08, #40). A failure of this test is
   a constraint bug, not a scoring bug, and it is the check the whole arrangement
