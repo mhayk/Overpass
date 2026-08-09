@@ -3,8 +3,9 @@
 Written continuously, not retrofitted at the end. Retrofitted honesty reads as
 retrofitted.
 
-Covers M0 only so far. Updated as later milestones land — including when the
-answer is unflattering.
+Covered M0 at first writing; the M2 section below was added the day the
+milestone closed. Updated as later milestones land — including when the answer
+is unflattering.
 
 ---
 
@@ -158,3 +159,97 @@ visibly.
 
 If the strategy works, M1 and M2 will produce specific, citable examples of it
 catching something. If it does not, that goes here too.
+
+---
+
+# M2 — the planner
+
+Eighteen issues, twenty-two pull requests, one live demo. Written the day the
+milestone closed, while the failures were still embarrassing rather than
+anecdotal.
+
+## What worked
+
+### Demonstrating every check failing before trusting it passing
+
+The M0 rule — a gate never seen failing is not known to work — was applied
+mechanically in M2, and it earned its keep every single time. The advisory-lock
+test was mutated by deleting the lock; the roll derivation by substituting the
+naive roll≈incidence approximation; the duty-cycle ledger by permitting
+overdrafts; the Vickrey pricing by charging first-price; the property suite by
+removing the successor-slew check, which also demonstrated shrinking (277
+shrinks down to two candidates with values 1 and 2). None of those mutations
+found a bug. What they found was *which assertion fires and what it says* — and
+twice the answer was "the wrong one", which is how the ground-truth test gained
+its per-policy feasibility attribution and the #163 e2e gained its
+zero-failed-rounds assertion.
+
+### The exact solver as an oracle, and rewriting it before testing it
+
+The single highest-value hour of the milestone was noticing — before running
+anything — that include/exclude over a fixed candidate order under-reports the
+optimum, because feasibility depends on the ordering the check fixes. An exact
+solver wrong in that direction poisons everything downstream: a heuristic can
+"beat" it without violating anything, and the strongest test in the planner
+fires on a solver bug while pointing at a policy. The rewrite to
+sequence enumeration cost twenty minutes. Debugging the false positive later
+would have cost a day, and trust in the benchmark permanently.
+
+### Deciding semantics against the frozen contract, not against intuition
+
+Three decisions were forced by reading published schemas closely rather than
+assuming: `REPLAN` is not orthogonal to the other trigger values (resolved via
+`supersedes_plan_id`'s own wording); held candidates must not appear in
+`candidate_request_ids` (the conservation ledger's definition decides it); and
+the Vickrey "contested slot" cannot be an opportunity, because an opportunity
+belongs to exactly one request — the contention is over sensor time. The third
+one contradicted the option I had myself proposed, preview and all. The
+contracts were better designed than my summaries of them.
+
+## What didn't work, and what it cost
+
+### Per-partition invariants were assumed to compose. They do not.
+
+The worst defect of the milestone shipped through twenty-two green PRs, 96
+proven-optimal comparisons, a six-invariant property suite, and full-stack
+integration tests — and was found in the first five minutes of running the real
+demo: one request held **five** ACTIVE acquisitions across four satellites.
+"At most one acquisition per request" was enforced per round, tested per round,
+property-tested per round. Every test ran one satellite. The global claim was
+composed from per-partition claims by *nobody*.
+
+Cost: two more PRs (a deferred exclusion constraint as backstop, a read-time
+filter as mechanism) and the harness rework their coupling forced. Lesson,
+stated so it survives: **when the invariant's scope is bigger than the lock's
+scope, no per-lock test can establish it — the demo is a test layer, not a
+formality.** The property suite now has a named gap: it generates one satellite.
+
+### The benchmark's first run blew its budget for the wrong suspect
+
+Two minutes in, the obvious suspect was Vickrey's quadratic pricing at 5 000
+candidates. Wrong: the heuristics finish 5 000 candidates in under 150 ms, and
+the cost was pathological *exact-solver* instances against a generous timeout —
+in the **uncontended** classes, where everything is feasible and the incumbent
+never prunes. The probe that disproved the guess took five minutes and changed
+the fix from "cap the pricing pass" (wrong) to "cap the timeout and report the
+solved counts" (right). Measure before optimising, even under time pressure —
+*especially* the guess that feels obvious.
+
+### Infrastructure debt compounds silently until a demo calls it in
+
+The compose file has promised application-service entries since M0 and none
+exist (#166). That cost nothing for eight weeks of PR-shaped work and then
+dominated the demo session: four hand-started containers, a Docker
+Desktop/WSL2 networking subtlety, and a validation that is not reproducible by
+`make demo` alone. Scope cuts that repeat across PRs are not cuts; they are a
+queue.
+
+## The honest summary, updated
+
+The M0 summary said the model's output is only as good as the verification
+harness around it. M2 sharpens that: the harness itself has a scope, and the
+most dangerous defects live exactly at its boundary. Everything inside the
+harness's reach was caught before merge — every mutation, every constraint,
+every conservation gap. The one defect that reached the demo was the one whose
+scope no single test's fixture covered. The demo is where harness boundaries
+become visible; run it earlier than feels necessary.
