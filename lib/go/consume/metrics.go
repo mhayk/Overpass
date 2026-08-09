@@ -21,6 +21,7 @@ type Metrics struct {
 	duplicates   int64
 	redeliveries int64
 	terminated   int64
+	deadlettered int64
 	ackTotal     time.Duration
 	ackCount     int64
 	ackMax       time.Duration
@@ -32,6 +33,11 @@ type Snapshot struct {
 	Duplicates   int64
 	Redeliveries int64
 	Terminated   int64
+	// Deadlettered counts terminal failures whose payload reached a DLQ
+	// stream. Terminated minus Deadlettered is the number of messages this
+	// consumer dropped without keeping a copy — which should be zero, and is
+	// the reason the two are separate counters rather than one.
+	Deadlettered int64
 	// AckLatencyMean and AckLatencyMax cover receive-to-ack, which bounds how
 	// long a crash window can silently redeliver.
 	AckLatencyMean time.Duration
@@ -50,6 +56,9 @@ func (m *Metrics) Redelivered() { m.count(&m.redeliveries) }
 
 // Terminated records a deliberate Term.
 func (m *Metrics) Terminated() { m.count(&m.terminated) }
+
+// Deadlettered records a terminal failure whose payload landed in a DLQ stream.
+func (m *Metrics) Deadlettered() { m.count(&m.deadlettered) }
 
 // AckAfter records receive-to-ack latency for one delivery.
 func (m *Metrics) AckAfter(d time.Duration) {
@@ -71,6 +80,7 @@ func (m *Metrics) Snapshot() Snapshot {
 		Duplicates:    m.duplicates,
 		Redeliveries:  m.redeliveries,
 		Terminated:    m.terminated,
+		Deadlettered:  m.deadlettered,
 		AckLatencyMax: m.ackMax,
 	}
 	if m.ackCount > 0 {

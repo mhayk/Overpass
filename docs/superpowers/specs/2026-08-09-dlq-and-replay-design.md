@@ -32,10 +32,29 @@ type DeadLetter struct {
     Reason      string // terminal error class, e.g. "decode", "contract", "exhausted"
     Delivered   uint64 // Overpass-Dlq-Delivery-Count
     Consumer    string // Overpass-Dlq-Consumer
+    FailedAt    time.Time // zero means now
 }
 
-func Deadletter(ctx context.Context, js nats.JetStreamContext, d DeadLetter) error
+// Publisher is the one method Deadletter needs. map[string][]string is
+// nats.Header's underlying type, so an adapter converts with nats.Header(h).
+type Publisher interface {
+    Publish(ctx context.Context, subject string, header map[string][]string, payload []byte) error
+}
+
+func Deadletter(ctx context.Context, pub Publisher, d DeadLetter) error
 ```
+
+**As built, the signature takes a `Publisher`, not a `nats.JetStreamContext`.**
+The sketch above originally took the JetStream context, which would have put a
+NATS import into a module whose `go.mod` says, in as many words, that it has
+none — the transport belongs to each service's adapter, and the module stays
+testable without a broker. The two-line interface keeps that boundary and keeps
+what actually matters — the subject mapping, the header set, the refusals — in
+one place, which is all ADR-0017's "one implementation" driver asked for. The
+Python half mirrors it with a `DlqPublisher` `Protocol`, which the real
+`nats.js.JetStreamContext` satisfies structurally; the function there is
+`publish_dead_letter`, since `dead_letter` beside a `DeadLetter` dataclass reads
+as a typo.
 
 Headers written: the four `Overpass-Dlq-*` from the contract plus
 `Overpass-Dlq-Failed-At` (stamped inside `Deadletter` from the clock),
