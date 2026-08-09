@@ -360,3 +360,97 @@ func TestRapidReplanningConverges(t *testing.T) {
 		t.Error("no SUPERSEDED event was ever emitted; a displaced holder lost a won slot silently")
 	}
 }
+
+// THE #163 TEST: a request with candidates on TWO satellites wins on one and is
+// excluded from the other's round — one ACTIVE acquisition globally, which is
+// what SPEC §7.1 says and what the first full-stack demo showed was not
+// happening.
+func TestARequestWinsOnExactlyOneSatellite(t *testing.T) {
+	p := pool(t)
+	ctx := context.Background()
+
+	satelliteA := fmt.Sprintf("SAT-XA%d", time.Now().UnixNano()%100000)
+	satelliteB := fmt.Sprintf("SAT-XB%d", time.Now().UnixNano()%100000+1)
+	seedSatellite(t, p, satelliteA)
+	seedSatellite(t, p, satelliteB)
+	customer := fmt.Sprintf("cust-%d", time.Now().UnixNano())
+	seedCustomer(t, p, customer)
+	projections := postgres.NewProjections(p)
+
+	accessStart := time.Now().UTC().Add(3 * time.Hour).Truncate(time.Second)
+	requestID := uuid.NewString()
+	snapshot := snapshotEvent(uuid.NewString(), requestID, customer)
+	snapshot.Snapshot.WindowStart = accessStart.Add(-time.Hour)
+	snapshot.Snapshot.WindowEnd = accessStart.Add(6 * time.Hour)
+	snapshot.Snapshot.SubmittedAt = time.Now().UTC().Add(-time.Hour)
+	if _, err := projections.ProjectSnapshot(ctx, port.ConsumerLifecycle, snapshot); err != nil {
+		t.Fatalf("snapshot: %v", err)
+	}
+	for _, satellite := range []string{satelliteA, satelliteB} {
+		event := candidateEvent(uuid.NewString(), requestID, satellite, uuid.NewString())
+		event.Candidates[0].AccessStart = accessStart
+		event.Candidates[0].AccessEnd = accessStart.Add(10 * time.Minute)
+		event.Candidates[0].GeometryJSON = []byte(
+			`{"incidence_angle_deg":30,"look_side":"RIGHT","squint_angle_deg":0.1,"slant_range_km":570.51,"elevation_angle_deg":55.2}`)
+		if _, err := projections.ProjectCandidates(ctx, port.ConsumerOpportunities, event); err != nil {
+			t.Fatalf("candidate on %s: %v", satellite, err)
+		}
+	}
+
+	trigger, err := app.NewTrigger(postgres.NewRounds(p), app.TriggerConfig{
+		Policy:         domain.TriggerPolicy{QuietPeriod: time.Nanosecond, StalenessCeiling: time.Hour},
+		BucketDuration: 3 * time.Hour,
+		HorizonAhead:   24 * time.Hour,
+		SweepLimit:     16,
+		Allocator:      allocation.GreedyByBid{},
+		Fairness:       domain.DefaultFairness(),
+	}, slog.New(slog.NewJSONHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("wiring: %v", err)
+	}
+
+	// Two sweeps, so both satellites' rounds definitely run — the second
+	// satellite's round may fire in either sweep depending on ordering, and
+	// after the first award the filter must exclude the request.
+	//
+	// ZERO FAILED ROUNDS is the assertion that separates the filter from the
+	// backstop. Without the read filter, 00011's constraint still holds the
+	// invariant — by ABORTING the second satellite's round at COMMIT, which
+	// then retries against a bucket that stays dirty. The filter is what makes
+	// exclusion a quiet skip instead of a permanent abort-and-retry loop on
+	// the system's serialisation point, and a mutation removing it fails here.
+	for range 2 {
+		stats, sweepErr := trigger.SweepOnce(ctx)
+		if sweepErr != nil {
+			t.Fatalf("sweeping: %v", sweepErr)
+		}
+		if stats.Failed != 0 {
+			t.Fatalf("a sweep failed %d rounds; the backstop is doing the filter's job the expensive way", stats.Failed)
+		}
+	}
+
+	var active int
+	if err := p.QueryRow(ctx, `
+		SELECT count(*) FROM planning.acquisitions
+		WHERE request_id = $1 AND status = 'ACTIVE'
+	`, requestID).Scan(&active); err != nil {
+		t.Fatalf("counting: %v", err)
+	}
+	if active != 1 {
+		t.Fatalf("the request holds %d ACTIVE acquisitions across two satellites, want exactly 1 — the same target imaged twice", active)
+	}
+
+	// And the losing satellite's round did not report it unfulfilled either:
+	// served elsewhere is neither a win here nor a loss here.
+	var unfulfilled int
+	if err := p.QueryRow(ctx, `
+		SELECT count(*) FROM planning.outbox
+		WHERE event_type = 'planning.request.unfulfilled.v1'
+		  AND payload->'data'->>'request_id' = $1
+	`, requestID).Scan(&unfulfilled); err != nil {
+		t.Fatalf("counting events: %v", err)
+	}
+	if unfulfilled != 0 {
+		t.Errorf("%d unfulfilment events for a request that WON; being served elsewhere is not a loss", unfulfilled)
+	}
+}

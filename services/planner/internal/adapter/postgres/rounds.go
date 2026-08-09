@@ -213,7 +213,22 @@ func (r *Rounds) readInputs(ctx context.Context, tx pgx.Tx, key domain.RoundKey,
 		SELECT
 			count(*),
 			coalesce(
-				array_agg(DISTINCT c.request_id) FILTER (WHERE s.request_id IS NOT NULL),
+				array_agg(DISTINCT c.request_id) FILTER (
+					WHERE s.request_id IS NOT NULL
+					  -- Must agree with the joinable query below: a request
+					  -- served elsewhere (#163) is excluded from the ledger the
+					  -- same way a held one is, and for the same reason — it
+					  -- can become neither an acquisition nor an unfulfilment
+					  -- in THIS round.
+					  AND NOT EXISTS (
+						SELECT 1
+						FROM planning.acquisitions a
+						JOIN planning.collection_plans p ON p.plan_id = a.plan_id
+						WHERE a.request_id = c.request_id
+						  AND a.status = 'ACTIVE'
+						  AND NOT (p.satellite_id = $1 AND lower(p.bucket) = $2)
+					  )
+				),
 				'{}'
 			)::text[]
 		FROM planning.candidate_opportunities c
@@ -244,6 +259,25 @@ func (r *Rounds) readInputs(ctx context.Context, tx pgx.Tx, key domain.RoundKey,
 		WHERE c.satellite_id = $1
 		  AND lower(c.access_window) >= $2
 		  AND lower(c.access_window) <  $3
+		  -- #163: a request already SERVED elsewhere does not compete here. The
+		  -- per-round Schedule enforces one-acquisition-per-request within one
+		  -- plan; this is what makes it hold ACROSS (satellite, bucket)
+		  -- partitions, which the first full-stack demo showed it did not — one
+		  -- request, five ACTIVE acquisitions on four satellites.
+		  --
+		  -- THIS bucket's own live plan is exempt, deliberately: ADR-0014's
+		  -- whole-bucket recompute requires the bucket's holders to recompete
+		  -- from scratch, and their ACTIVE rows are demoted in the same
+		  -- transaction that commits the replacement. 00011's deferred
+		  -- constraint is the backstop if two rounds race past this read.
+		  AND NOT EXISTS (
+			SELECT 1
+			FROM planning.acquisitions a
+			JOIN planning.collection_plans p ON p.plan_id = a.plan_id
+			WHERE a.request_id = c.request_id
+			  AND a.status = 'ACTIVE'
+			  AND NOT (p.satellite_id = $1 AND lower(p.bucket) = $2)
+		  )
 		ORDER BY c.opportunity_id
 	`, key.SatelliteID, key.BucketStart, bucketEnd)
 	if err != nil {
