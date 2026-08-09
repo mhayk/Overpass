@@ -227,14 +227,100 @@ func (r *Rounds) readInputs(ctx context.Context, tx pgx.Tx, key domain.RoundKey,
 		return port.RoundInputs{}, fmt.Errorf("reading candidates for %s: %w", key, err)
 	}
 
-	// The budget the round allocates against, recorded rather than recomputed
-	// later: a satellite's configured budget can change, and a round must stay
-	// explicable against the number it actually used.
-	if err := tx.QueryRow(ctx,
-		`SELECT duty_cycle_budget_s FROM reference.satellites WHERE satellite_id = $1`,
-		key.SatelliteID).Scan(&inputs.DutyCycleBudgetS); err != nil {
-		return port.RoundInputs{}, fmt.Errorf("reading the duty-cycle budget for %s: %w", key.SatelliteID, err)
+	// The joinable rows themselves — the join is the same one, made at read
+	// time exactly as ADR-0015 designed: a candidate with no snapshot is held,
+	// which here means it simply does not appear.
+	rows, err := tx.Query(ctx, `
+		SELECT
+			c.opportunity_id::text, c.request_id::text, c.satellite_id, c.mode,
+			lower(c.access_window), upper(c.access_window),
+			c.acquisition_duration_s, c.orbit_number,
+			c.geometry::text, ST_AsGeoJSON(c.footprint),
+			c.duty_cycle_cost_s, c.quality_score,
+			s.customer_id, s.priority_tier, s.bid_credits,
+			s.submitted_at, upper(s.request_window)
+		FROM planning.candidate_opportunities c
+		JOIN planning.request_snapshots s ON s.request_id = c.request_id
+		WHERE c.satellite_id = $1
+		  AND lower(c.access_window) >= $2
+		  AND lower(c.access_window) <  $3
+		ORDER BY c.opportunity_id
+	`, key.SatelliteID, key.BucketStart, bucketEnd)
+	if err != nil {
+		return port.RoundInputs{}, fmt.Errorf("reading joinable candidates for %s: %w", key, err)
 	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			jc        port.JoinableCandidate
+			geometry  string
+			footprint string
+		)
+		if err := rows.Scan(
+			&jc.OpportunityID, &jc.RequestID, &jc.SatelliteID, &jc.Mode,
+			&jc.AccessStart, &jc.AccessEnd,
+			&jc.AcquisitionDurationS, &jc.OrbitNumber,
+			&geometry, &footprint,
+			&jc.DutyCycleCostS, &jc.QualityScore,
+			&jc.CustomerID, &jc.PriorityTier, &jc.BidCredits,
+			&jc.SubmittedAt, &jc.Deadline,
+		); err != nil {
+			return port.RoundInputs{}, fmt.Errorf("scanning a joinable candidate: %w", err)
+		}
+		jc.GeometryJSON = []byte(geometry)
+		jc.FootprintGeoJSON = []byte(footprint)
+		inputs.Joinable = append(inputs.Joinable, jc)
+	}
+	if err := rows.Err(); err != nil {
+		return port.RoundInputs{}, fmt.Errorf("reading joinable candidates: %w", err)
+	}
+
+	// How many rounds in this bucket already considered each request. Counted
+	// from the round ledger via the array rather than a new table — 00009 said
+	// this is what the GIN-able column is for. Prior rounds only: this round
+	// has not been recorded yet, and the event's "has now lost" adds one at
+	// build time.
+	ageRows, ageErr := tx.Query(ctx, `
+		SELECT u.request_id::text, count(*)
+		FROM planning.rounds r
+		CROSS JOIN LATERAL unnest(r.candidate_request_ids) AS u(request_id)
+		WHERE r.satellite_id = $1 AND lower(r.bucket) = $2
+		GROUP BY u.request_id
+	`, key.SatelliteID, key.BucketStart)
+	if ageErr != nil {
+		return port.RoundInputs{}, fmt.Errorf("counting prior rounds for %s: %w", key, ageErr)
+	}
+	defer ageRows.Close()
+	inputs.AgeRounds = map[string]int{}
+	for ageRows.Next() {
+		var requestID string
+		var count int
+		if scanErr := ageRows.Scan(&requestID, &count); scanErr != nil {
+			return port.RoundInputs{}, fmt.Errorf("scanning a round count: %w", scanErr)
+		}
+		inputs.AgeRounds[requestID] = count
+	}
+	if rowsErr := ageRows.Err(); rowsErr != nil {
+		return port.RoundInputs{}, fmt.Errorf("reading round counts: %w", rowsErr)
+	}
+
+	// The whole profile in the same transaction, so the plan is explicable
+	// against the numbers it actually used — a satellite's configuration can
+	// change between rounds.
+	if err := tx.QueryRow(ctx, `
+		SELECT duty_cycle_budget_s, slew_rate_deg_s, settle_time_s, mode_transition_s, max_roll_deg
+		FROM reference.satellites WHERE satellite_id = $1
+	`, key.SatelliteID).Scan(
+		&inputs.Profile.DutyCycleBudgetS,
+		&inputs.Profile.Agility.SlewRateDegS,
+		&inputs.Profile.Agility.SettleTimeS,
+		&inputs.Profile.Agility.ModeTransitionS,
+		&inputs.Profile.Agility.MaxRollDeg,
+	); err != nil {
+		return port.RoundInputs{}, fmt.Errorf("reading the profile for %s: %w", key.SatelliteID, err)
+	}
+	inputs.DutyCycleBudgetS = inputs.Profile.DutyCycleBudgetS
 
 	if err := tx.QueryRow(ctx, `
 		SELECT plan_id::text, row_version FROM planning.collection_plans
@@ -360,7 +446,7 @@ func commitPlan(ctx context.Context, tx pgx.Tx, round port.Round, plan port.Plan
 				slew_time_from_previous_s, gap_from_previous_s, duty_cycle_cost_s,
 				awarded_value_credits, clearing_price_credits, status
 			) VALUES (
-				gen_random_uuid(), $1, $2, $3, $4,
+				$16, $1, $2, $3, $4,
 				$5, $6, tstzrange($7, $8, '[)'), $9, ST_GeomFromGeoJSON($10),
 				$11, $12, $13,
 				$14, $15, 'ACTIVE'
@@ -370,6 +456,7 @@ func commitPlan(ctx context.Context, tx pgx.Tx, round port.Round, plan port.Plan
 			round.Key.SatelliteID, a.Mode, a.Start, a.End, a.GeometryJSON, string(a.FootprintGeoJSON),
 			a.SlewFromPreviousS, a.GapFromPreviousS, a.DutyCycleCostS,
 			a.AwardedValueCredits, a.ClearingPriceCredits,
+			a.AcquisitionID,
 		)
 	}
 	results := tx.SendBatch(ctx, batch)

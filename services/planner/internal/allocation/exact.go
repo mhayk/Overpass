@@ -306,6 +306,12 @@ func (s *exactSearch) bestPlan(problem domain.Problem) domain.Plan {
 	// Everyone who competed and did not win lost to a better OVERALL plan.
 	// LOST_TO_HIGHER_VALUE is the truthful code: the exact solver did not
 	// refuse them for a constraint, it found a combination worth more.
+	best := map[string]domain.ScoredCandidate{}
+	for _, c := range problem.Candidates {
+		if current, ok := best[c.RequestID]; !ok || c.EffectiveValue > current.EffectiveValue {
+			best[c.RequestID] = c
+		}
+	}
 	seen := map[string]bool{}
 	for _, c := range problem.Candidates {
 		if won[c.RequestID] || seen[c.RequestID] {
@@ -313,10 +319,12 @@ func (s *exactSearch) bestPlan(problem domain.Problem) domain.Plan {
 		}
 		seen[c.RequestID] = true
 		plan.Unfulfilled = append(plan.Unfulfilled, domain.Unfulfilment{
-			RequestID:   c.RequestID,
-			CustomerID:  c.CustomerID,
-			ReasonCode:  domain.ReasonLostToHigherValue,
-			Explanation: "excluded from the optimal plan; including it would have lowered total plan value",
+			RequestID:                 c.RequestID,
+			CustomerID:                c.CustomerID,
+			ReasonCode:                domain.ReasonLostToHigherValue,
+			Explanation:               "excluded from the optimal plan; including it would have lowered total plan value",
+			OwnValueCredits:           int64(best[c.RequestID].EffectiveValue),
+			BestRejectedOpportunityID: best[c.RequestID].OpportunityID,
 		})
 	}
 	sort.Slice(plan.Unfulfilled, func(i, j int) bool {

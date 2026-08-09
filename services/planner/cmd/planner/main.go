@@ -12,6 +12,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -30,6 +31,7 @@ import (
 	"github.com/mhayk/overpass/services/planner/internal/adapter/outbox"
 	"github.com/mhayk/overpass/services/planner/internal/adapter/postgres"
 	"github.com/mhayk/overpass/services/planner/internal/adapter/wire"
+	"github.com/mhayk/overpass/services/planner/internal/allocation"
 	"github.com/mhayk/overpass/services/planner/internal/app"
 	"github.com/mhayk/overpass/services/planner/internal/domain"
 )
@@ -85,15 +87,20 @@ func run(ctx context.Context) error {
 	// reconnects, which is the entire point of ADR-0006. A trigger that refused
 	// to run without a broker would turn a publishing problem into a planning
 	// problem.
+	allocator, err := allocatorFor(cfg.AllocationPolicy)
+	if err != nil {
+		return err
+	}
 	trigger, err := app.NewTrigger(postgres.NewRounds(pool), app.TriggerConfig{
 		Policy: domain.TriggerPolicy{
 			QuietPeriod:      cfg.QuietPeriod,
 			StalenessCeiling: cfg.StalenessCeiling,
 		},
-		BucketDuration:   cfg.BucketDuration,
-		HorizonAhead:     cfg.HorizonAhead,
-		SweepLimit:       cfg.SweepLimit,
-		AllocationPolicy: cfg.AllocationPolicy,
+		BucketDuration: cfg.BucketDuration,
+		HorizonAhead:   cfg.HorizonAhead,
+		SweepLimit:     cfg.SweepLimit,
+		Allocator:      allocator,
+		Fairness:       cfg.Fairness,
 	}, log.With(slog.String("component", "trigger")))
 	if err != nil {
 		// A misconfigured firing rule is a startup failure, not a warning. A
@@ -122,6 +129,27 @@ func run(ctx context.Context) error {
 	serveErr := httpapi.Serve(ctx, server, cfg.ShutdownTimeout, log)
 	wg.Wait()
 	return serveErr
+}
+
+// allocatorFor maps the configured name onto a policy. The names are the
+// contract enum, which config.Load has already validated against.
+func allocatorFor(name string) (domain.AllocationPolicy, error) {
+	switch name {
+	case "GREEDY_BY_BID":
+		return allocation.GreedyByBid{}, nil
+	case "GREEDY_BY_VALUE_DENSITY":
+		return allocation.GreedyByValueDensity{}, nil
+	case "VICKREY_SEALED_BID":
+		return allocation.VickreySealedBid{}, nil
+	case "EXACT_DP":
+		// Legal but loud: the exact solver refuses rounds beyond its size
+		// limit, so running it in production means large rounds allocate
+		// nothing. It exists as a configured option for the benchmark and the
+		// demo, not for real traffic.
+		return allocation.NewExactDP(), nil
+	default:
+		return nil, fmt.Errorf("unknown allocation policy %q", name)
+	}
 }
 
 func startProjector(

@@ -63,10 +63,59 @@ type Placement struct {
 
 // Refusal says which constraint bound, so the unfulfilment reason is a fact
 // rather than a guess.
+//
+// The Detail carries NUMBERS, never only a message string. Strings cannot be
+// aggregated, charted or acted on; a shortfall a customer can act on has to be
+// a number, and the why-panel is built from these fields rather than from
+// parsing prose.
 type Refusal struct {
 	ReasonCode  string
 	Explanation string
+	Detail      RefusalDetail
 }
+
+// RefusalDetail is the structured half of a refusal, mirroring the explanation
+// object of planning.request.unfulfilled.v1. Zero values mean "not applicable
+// to this reason", matching the contract where every field is optional.
+type RefusalDetail struct {
+	// For LOST_TO_HIGHER_VALUE: who took the time, and by how much.
+	WinningRequestID      string
+	WinningValueCredits   int64
+	BlockingAcquisitionID string
+
+	// For BLOCKED_BY_SLEW_CONSTRAINT: the manoeuvre against the room.
+	RequiredSlewS float64
+	AvailableGapS float64
+
+	// For DUTY_CYCLE_EXHAUSTED: the budget against the ask.
+	DutyCycleRemainingS float64
+	DutyCycleRequiredS  float64
+
+	// For DEADLINE_PASSED.
+	Deadline time.Time
+}
+
+// REASON PRECEDENCE, defined once and tested, because when several constraints
+// bind at once, reporting one at random makes the explanation untrustworthy —
+// and an explanation nobody trusts is worse than none.
+//
+//	1. DEADLINE_PASSED        — nothing can fix it; checked before neighbours
+//	                            because it holds regardless of them.
+//	2. BLOCKED_BY_SLEW (roll) — the manoeuvre itself is beyond the spacecraft;
+//	                            competition is irrelevant to a candidate that
+//	                            could never be flown.
+//	3. LOST_TO_HIGHER_VALUE   — a free interval of the right size never existed,
+//	                            because committed acquisitions occupy it. The
+//	                            time went to someone else.
+//	4. BLOCKED_BY_SLEW (gap)  — a free interval existed, but the slew in and
+//	                            out does not fit it. This is the
+//	                            sequence-dependent cost made visible, and the
+//	                            contract's own definition of the code.
+//	5. DUTY_CYCLE_EXHAUSTED   — the candidate could be PLACED; only the orbit's
+//	                            budget refuses it. Checked last deliberately:
+//	                            an exhausted budget reported for a candidate
+//	                            that could never have been placed anyway would
+//	                            name the wrong constraint.
 
 // Acquisitions returns the schedule in time order.
 func (s *Schedule) Acquisitions() []ScheduledAcquisition {
@@ -96,7 +145,8 @@ func (s *Schedule) TryPlace(c ScoredCandidate) (Placement, Refusal, bool) {
 
 	if s.HasRequest(c.RequestID) {
 		// At most one acquisition per request — do not image the same target
-		// twice. Enforced here so no policy has to remember it.
+		// twice. Enforced here so no policy has to remember it. Policies treat
+		// this as "skip", not as a loss; a request that won is never a loser.
 		return Placement{}, Refusal{
 			ReasonCode:  ReasonLostToHigherValue,
 			Explanation: fmt.Sprintf("request already scheduled as opportunity %s", s.byRequest[c.RequestID]),
@@ -111,6 +161,7 @@ func (s *Schedule) TryPlace(c ScoredCandidate) (Placement, Refusal, bool) {
 			ReasonCode: ReasonBlockedBySlew,
 			Explanation: fmt.Sprintf("requires %.2f° of roll, beyond the spacecraft's %.2f°",
 				c.Attitude.RollDeg, s.profile.Agility.MaxRollDeg),
+			Detail: RefusalDetail{RequiredSlewS: s.profile.Agility.SlewTime(Attitude{Mode: c.Mode}, c.Attitude).Seconds()},
 		}, false
 	}
 
@@ -122,6 +173,7 @@ func (s *Schedule) TryPlace(c ScoredCandidate) (Placement, Refusal, bool) {
 			ReasonCode: ReasonDeadlinePassed,
 			Explanation: fmt.Sprintf("earliest finish %s is after the deadline %s",
 				c.AccessStart.Add(duration).Format(time.RFC3339), c.Deadline.Format(time.RFC3339)),
+			Detail: RefusalDetail{Deadline: c.Deadline},
 		}, false
 	}
 
@@ -147,12 +199,7 @@ func (s *Schedule) TryPlace(c ScoredCandidate) (Placement, Refusal, bool) {
 
 	start, ok := s.earliestFeasibleStart(c, duration, latestStart)
 	if !ok {
-		return Placement{}, Refusal{
-			ReasonCode: ReasonBlockedBySlew,
-			Explanation: fmt.Sprintf(
-				"no start in [%s, %s] leaves room for the slew to and from its neighbours",
-				c.AccessStart.Format(time.RFC3339), latestStart.Format(time.RFC3339)),
-		}, false
+		return Placement{}, s.competitiveRefusal(c, duration, latestStart), false
 	}
 
 	// Duty cycle last, because it is the only constraint whose refusal depends
@@ -163,6 +210,10 @@ func (s *Schedule) TryPlace(c ScoredCandidate) (Placement, Refusal, bool) {
 		return Placement{}, Refusal{
 			ReasonCode:  ReasonDutyCycle,
 			Explanation: short.String(),
+			Detail: RefusalDetail{
+				DutyCycleRemainingS: short.RemainingS,
+				DutyCycleRequiredS:  short.RequiredS,
+			},
 		}, false
 	}
 
@@ -194,6 +245,16 @@ func (s *Schedule) Commit(p Placement) error {
 		return err
 	}
 
+	// The schema caps awarded_value_credits at 100 000 000. Effective value can
+	// legitimately exceed it — a bid at the cap times tier and ageing
+	// multipliers — and an award the database refuses is a plan that cannot
+	// commit. Saturating is honest: the award IS the effective value, up to
+	// what the contract can carry.
+	awarded := int64(p.Candidate.EffectiveValue)
+	if awarded > MaxBidCredits {
+		awarded = MaxBidCredits
+	}
+
 	s.placed = append(s.placed, ScheduledAcquisition{
 		OpportunityID:       p.Candidate.OpportunityID,
 		RequestID:           p.Candidate.RequestID,
@@ -206,7 +267,7 @@ func (s *Schedule) Commit(p Placement) error {
 		DutyCycleCostS:      p.Candidate.DutyCycleCostS,
 		SlewFromPreviousS:   p.SlewFromPreviousS,
 		GapFromPreviousS:    p.GapFromPreviousS,
-		AwardedValueCredits: int64(p.Candidate.EffectiveValue),
+		AwardedValueCredits: awarded,
 		FootprintGeoJSON:    p.Candidate.FootprintGeoJSON,
 		GeometryJSON:        p.Candidate.GeometryJSON,
 		QualityScore:        p.Candidate.QualityScore,
@@ -271,6 +332,123 @@ func (s *Schedule) earliestFeasibleStart(c ScoredCandidate, duration time.Durati
 		}
 	}
 	return time.Time{}, false
+}
+
+// competitiveRefusal separates the two ways neighbours refuse a candidate,
+// which the contract defines as DIFFERENT codes:
+//
+//	LOST_TO_HIGHER_VALUE — no free interval of the candidate's duration exists
+//	at all: committed acquisitions occupy the time. The slot went to someone
+//	else, and "bid more" is the actionable answer.
+//
+//	BLOCKED_BY_SLEW — a big enough free interval EXISTS, but the slew in and
+//	out consumes it. The sequence-dependent setup cost made visible, and "no
+//	amount of bidding fixes geometry" is the honest answer.
+//
+// The distinction is computed, not guessed: the same gap scan runs again with
+// slew set to zero. If the candidate fits without slew and not with it, slew
+// bound; if it does not fit even then, occupancy did.
+func (s *Schedule) competitiveRefusal(c ScoredCandidate, duration time.Duration, latestStart time.Time) Refusal {
+	if blocker, fitsWithoutSlew := s.wouldFitWithoutSlew(c, duration, latestStart); !fitsWithoutSlew {
+		return Refusal{
+			ReasonCode: ReasonLostToHigherValue,
+			Explanation: fmt.Sprintf("every start in [%s, %s] is occupied by committed acquisitions",
+				c.AccessStart.Format(time.RFC3339), latestStart.Format(time.RFC3339)),
+			Detail: RefusalDetail{
+				WinningRequestID:      blocker.RequestID,
+				WinningValueCredits:   blocker.AwardedValueCredits,
+				BlockingAcquisitionID: blocker.OpportunityID,
+			},
+		}
+	}
+
+	// Slew bound: report the closest miss, so "required against available" is a
+	// pair of real numbers about a real gap rather than a summary of nothing.
+	required, available, blocker := s.closestSlewMiss(c, duration, latestStart)
+	return Refusal{
+		ReasonCode: ReasonBlockedBySlew,
+		Explanation: fmt.Sprintf("needs %.1fs of slew where the closest gap offers %.1fs",
+			required, available),
+		Detail: RefusalDetail{
+			RequiredSlewS:         required,
+			AvailableGapS:         available,
+			BlockingAcquisitionID: blocker,
+		},
+	}
+}
+
+// wouldFitWithoutSlew re-runs the gap scan with a zero slew function. Returns
+// the acquisition overlapping the candidate's window when nothing fits — the
+// winner the time went to.
+func (s *Schedule) wouldFitWithoutSlew(c ScoredCandidate, duration time.Duration, latestStart time.Time) (ScheduledAcquisition, bool) {
+	for i := 0; i <= len(s.placed); i++ {
+		earliest := c.AccessStart
+		if i > 0 && s.placed[i-1].End.After(earliest) {
+			earliest = s.placed[i-1].End
+		}
+		latest := latestStart
+		if i < len(s.placed) {
+			if before := s.placed[i].Start.Add(-duration); before.Before(latest) {
+				latest = before
+			}
+		}
+		if !earliest.After(latest) {
+			return ScheduledAcquisition{}, true
+		}
+	}
+	// Nothing fits even slew-free: the window is occupied. Blame the committed
+	// acquisition covering the candidate's earliest legal start — the concrete
+	// thing sitting where this candidate wanted to be.
+	for _, a := range s.placed {
+		if !a.End.Before(c.AccessStart) && !a.Start.After(latestStart.Add(duration)) {
+			return a, false
+		}
+	}
+	if len(s.placed) > 0 {
+		return s.placed[0], false
+	}
+	return ScheduledAcquisition{}, false
+}
+
+// closestSlewMiss finds the gap where the slew deficit was smallest, and
+// reports its numbers.
+func (s *Schedule) closestSlewMiss(c ScoredCandidate, duration time.Duration, latestStart time.Time) (requiredS, availableS float64, blockerID string) {
+	bestDeficit := -1.0
+
+	for i := 0; i <= len(s.placed); i++ {
+		var slewIn, slewOut time.Duration
+		gapStart := c.AccessStart
+		if i > 0 {
+			slewIn = s.profile.Agility.SlewTime(s.placed[i-1].Attitude, c.Attitude)
+			if s.placed[i-1].End.After(gapStart) {
+				gapStart = s.placed[i-1].End
+			}
+		}
+		gapEnd := latestStart.Add(duration)
+		if i < len(s.placed) {
+			slewOut = s.profile.Agility.SlewTime(c.Attitude, s.placed[i].Attitude)
+			if s.placed[i].Start.Before(gapEnd) {
+				gapEnd = s.placed[i].Start
+			}
+		}
+
+		available := gapEnd.Sub(gapStart).Seconds()
+		required := (slewIn + duration + slewOut).Seconds()
+		if available < 0 {
+			continue
+		}
+		deficit := required - available
+		if deficit > 0 && (bestDeficit < 0 || deficit < bestDeficit) {
+			bestDeficit = deficit
+			requiredS, availableS = required, available
+			if i > 0 {
+				blockerID = s.placed[i-1].OpportunityID
+			} else if i < len(s.placed) {
+				blockerID = s.placed[i].OpportunityID
+			}
+		}
+	}
+	return requiredS, availableS, blockerID
 }
 
 func (s *Schedule) predecessorOf(start time.Time) (ScheduledAcquisition, bool) {

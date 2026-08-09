@@ -74,6 +74,10 @@ type Plan struct {
 
 // ScheduledAcquisition is one winner, with the placement the policy chose.
 type ScheduledAcquisition struct {
+	// AcquisitionID is assigned by the application layer before commit, not by
+	// the database, because the plan.committed event carries it and the event
+	// is built before the INSERT runs.
+	AcquisitionID string
 	OpportunityID string
 	RequestID     string
 	CustomerID    string
@@ -114,6 +118,20 @@ type Unfulfilment struct {
 	CustomerID  string
 	ReasonCode  string
 	Explanation string
+
+	// Detail is the structured half — numbers a customer can act on, per the
+	// contract's explanation object.
+	Detail RefusalDetail
+
+	// OwnValueCredits is this request's effective value, shown next to the
+	// winner's so the customer sees the size of the gap rather than only its
+	// existence.
+	OwnValueCredits int64
+
+	// BestRejectedOpportunityID is the strongest candidate this request had.
+	// The frontend renders it as a ghost on the timeline, so the de-confliction
+	// decision is visible rather than only its result.
+	BestRejectedOpportunityID string
 }
 
 // Reason codes, mirroring planning.request.unfulfilled.v1.

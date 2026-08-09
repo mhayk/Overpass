@@ -27,11 +27,15 @@ type Trigger struct {
 	horizonAhead   time.Duration
 	sweepLimit     int
 
-	// allocationPolicy is the AllocationPolicy name the round announces.
-	// ADR-0007 defers the DEFAULT to the M2-13 benchmark, so this is
-	// configuration rather than a constant, and the round records which one ran
-	// so a committed plan is attributable to a strategy after the fact.
-	allocationPolicy string
+	// allocator is the AllocationPolicy the round runs. ADR-0007 defers the
+	// DEFAULT to the M2-13 benchmark, so which one is configuration, and the
+	// round records the name so a committed plan is attributable to a strategy
+	// after the fact.
+	allocator domain.AllocationPolicy
+
+	// fairness turns snapshots into the effective value policies compete on.
+	// It runs HERE, once per round, so no policy ever sees a priority tier.
+	fairness domain.Fairness
 
 	// now is injected so the firing rule can be driven to any instant in tests
 	// without sleeping. The rule is entirely about clocks; testing it by waiting
@@ -41,12 +45,13 @@ type Trigger struct {
 
 // TriggerConfig is what Trigger needs to run.
 type TriggerConfig struct {
-	Policy           domain.TriggerPolicy
-	BucketDuration   time.Duration
-	HorizonAhead     time.Duration
-	SweepLimit       int
-	AllocationPolicy string
-	Now              func() time.Time
+	Policy         domain.TriggerPolicy
+	BucketDuration time.Duration
+	HorizonAhead   time.Duration
+	SweepLimit     int
+	Allocator      domain.AllocationPolicy
+	Fairness       domain.Fairness
+	Now            func() time.Time
 }
 
 // NewTrigger wires the round trigger, refusing a configuration that cannot
@@ -64,19 +69,26 @@ func NewTrigger(rounds port.Rounds, cfg TriggerConfig, log *slog.Logger) (*Trigg
 	if cfg.HorizonAhead <= 0 {
 		return nil, fmt.Errorf("%w: horizon must be positive, got %s", domain.ErrInvalid, cfg.HorizonAhead)
 	}
+	if cfg.Allocator == nil {
+		return nil, fmt.Errorf("%w: no allocation policy configured", domain.ErrInvalid)
+	}
+	if err := cfg.Fairness.Validate(); err != nil {
+		return nil, err
+	}
 	now := cfg.Now
 	if now == nil {
 		now = func() time.Time { return time.Now().UTC() }
 	}
 	return &Trigger{
-		rounds:           rounds,
-		policy:           cfg.Policy,
-		log:              log,
-		bucketDuration:   cfg.BucketDuration,
-		horizonAhead:     cfg.HorizonAhead,
-		sweepLimit:       cfg.SweepLimit,
-		allocationPolicy: cfg.AllocationPolicy,
-		now:              now,
+		rounds:         rounds,
+		policy:         cfg.Policy,
+		log:            log,
+		bucketDuration: cfg.BucketDuration,
+		horizonAhead:   cfg.HorizonAhead,
+		sweepLimit:     cfg.SweepLimit,
+		allocator:      cfg.Allocator,
+		fairness:       cfg.Fairness,
+		now:            now,
 	}, nil
 }
 
@@ -160,6 +172,15 @@ func (t *Trigger) open(ctx context.Context, state domain.BucketState, decision d
 			if inputs.CandidateOpportunityCount == 0 {
 				return port.RoundOutcome{}, port.ErrSkipRound
 			}
+			// No JOINABLE candidates — everything on the table is held, waiting
+			// for its request snapshot. Skipping matters beyond economy: the
+			// round would commit an EMPTY plan built on no information, and if
+			// a live plan exists, whole-bucket recompute would supersede it
+			// with nothing. Held candidates are a fact to wait out, not
+			// evidence the bucket emptied.
+			if len(inputs.Joinable) == 0 {
+				return port.RoundOutcome{}, port.ErrSkipRound
+			}
 
 			round := port.Round{
 				RoundID:       uuid.NewString(),
@@ -168,7 +189,7 @@ func (t *Trigger) open(ctx context.Context, state domain.BucketState, decision d
 				Key:           inputs.Key,
 				BucketEnd:     inputs.BucketEnd,
 				Trigger:       decision.Trigger,
-				Policy:        t.allocationPolicy,
+				Policy:        t.allocator.Name(),
 				// The count is of everything on the table; the ids are only
 				// those that can actually compete. See readInputs.
 				CandidateOpportunityCount: inputs.CandidateOpportunityCount,
@@ -189,10 +210,15 @@ func (t *Trigger) open(ctx context.Context, state domain.BucketState, decision d
 			if err != nil {
 				return port.RoundOutcome{}, err
 			}
-			// No Plan. M2-01 opens the decision boundary and announces what was
-			// on the table; allocating is M2-05 onward, and the commit path is
-			// already in place for it.
-			return port.RoundOutcome{Round: round, RoundPayload: payload}, nil
+
+			// THE ROUND NOW ALLOCATES. Policy, plan, events — all built here,
+			// inside the locked transaction, so what commits is exactly what
+			// was decided against the state the lock saw.
+			plan, err := t.buildPlan(round, inputs, now, t.log)
+			if err != nil {
+				return port.RoundOutcome{}, err
+			}
+			return port.RoundOutcome{Round: round, RoundPayload: payload, Plan: plan}, nil
 		})
 	if err != nil {
 		return false, err
