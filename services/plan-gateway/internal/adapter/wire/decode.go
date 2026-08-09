@@ -25,7 +25,11 @@ import (
 )
 
 // ErrMalformed marks a payload that cannot be understood.
-var ErrMalformed = errors.New("malformed payload")
+//
+// An alias of the port sentinel since #48: the projector needs to classify
+// malformed as PERMANENT without importing this adapter, and two distinct
+// sentinels for one fact is how errors.Is quietly stops matching.
+var ErrMalformed = port.ErrMalformed
 
 // Decoder maps contract events onto the projector's types.
 type Decoder struct{}

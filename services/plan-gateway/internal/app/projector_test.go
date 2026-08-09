@@ -227,9 +227,10 @@ func (p *recordingProjection) Reset(context.Context) error { return nil }
 
 // countingSource records acks and naks and hands out scripted batches.
 type countingSource struct {
-	batches [][]port.Message
-	fetchAt int
-	failNth int // 1-based; the nth Next call returns an error
+	terminated []string
+	batches    [][]port.Message
+	fetchAt    int
+	failNth    int // 1-based; the nth Next call returns an error
 
 	acked []uint64
 	naked []uint64
@@ -258,6 +259,11 @@ func (s *countingSource) Next(context.Context) ([]port.Message, error) {
 
 func (s *countingSource) Ack(_ context.Context, m port.Message) error {
 	s.acked = append(s.acked, m.Sequence)
+	return nil
+}
+
+func (s *countingSource) Term(_ context.Context, m port.Message) error {
+	s.terminated = append(s.terminated, m.EventID)
 	return nil
 }
 
@@ -540,4 +546,78 @@ func TestEventAtComesFromTheEnvelopesOccurredAt(t *testing.T) {
 	if got := projection.advance[0].LastEventAt; !got.Equal(occurred) {
 		t.Fatalf("cursor stamped %s, want the envelope's occurred_at %s", got, occurred)
 	}
+}
+
+// #48: a malformed payload is PERMANENT — terminated on the first delivery,
+// not redelivered ten times. The demo's poison "hello" messages spent an hour
+// doing exactly that at this consumer.
+func TestAMalformedPayloadIsTerminatedOnFirstDelivery(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	poison := msg("FEASIBILITY", "feasibility.opportunities.computed.v1", 9, `{"hello":"world"}`)
+	poison.Delivered = 1
+	source := &countingSource{batches: [][]port.Message{{poison}}, cancel: cancel}
+	projector := newProjector(source, newRecording())
+
+	if err := projector.Run(ctx); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	if len(source.terminated) != 1 {
+		t.Fatalf("terminated %v, want the poison Termed once", source.terminated)
+	}
+	if len(source.naked) != 0 {
+		t.Errorf("naked %v — ten redeliveries of a deterministic failure buy nothing", source.naked)
+	}
+	if projector.Metrics.Snapshot().Terminated != 1 {
+		t.Error("no Terminated metric; the drop would be invisible to M3-06")
+	}
+}
+
+// A transient failure still retries, and its redelivery is counted — the
+// early-warning line M3-06 alarms on.
+func TestATransientFailureNaksAndCountsTheRedelivery(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	// A VALID payload against a projection that fails: transient by
+	// classification, since nothing wraps ErrMalformed.
+	transient := msg("TASKING", app.SubjectRequestReceived, 3, envelopeFor(t, app.SubjectRequestReceived, eventAt))
+	transient.Delivered = 2 // already a redelivery
+	source := &countingSource{batches: [][]port.Message{{transient}}, cancel: cancel}
+	projector := newProjector(source, &failingProjection{})
+
+	if err := projector.Run(ctx); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	if len(source.naked) != 1 || len(source.terminated) != 0 {
+		t.Errorf("naked %v terminated %v, want one Nak — a database failure is transient",
+			source.naked, source.terminated)
+	}
+	if projector.Metrics.Snapshot().Redeliveries != 1 {
+		t.Error("the redelivery left no metric")
+	}
+}
+
+// The LAST delivery of a transient failure terminates deliberately: a lapsed
+// max_deliver pages nobody, a Term has a log line and a metric.
+func TestTheLastTransientDeliveryTerms(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	last := msg("TASKING", app.SubjectRequestReceived, 4, envelopeFor(t, app.SubjectRequestReceived, eventAt))
+	last.Delivered = 10 // deploy/nats/init.sh: gateway max_deliver
+	source := &countingSource{batches: [][]port.Message{{last}}, cancel: cancel}
+	projector := newProjector(source, &failingProjection{})
+
+	if err := projector.Run(ctx); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	if len(source.terminated) != 1 {
+		t.Errorf("terminated %v, want the deliberate Term on the final attempt", source.terminated)
+	}
+}
+
+// failingProjection fails every fold with a transient-shaped error.
+type failingProjection struct{ recordingProjection }
+
+func (f *failingProjection) ProjectRequestReceived(context.Context, port.RequestReceived) error {
+	return errors.New("connection refused")
 }

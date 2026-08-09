@@ -19,6 +19,13 @@ import (
 // conflate them.
 var ErrNotFound = errors.New("not found")
 
+// ErrMalformed marks a payload that cannot be understood — and therefore never
+// will be: a payload that does not decode will not decode on redelivery
+// either. Declared HERE rather than in the wire adapter for the same reason
+// ErrNotFound is: the projector classifies failures as permanent or transient,
+// and it may not import the adapter to learn the sentinel.
+var ErrMalformed = errors.New("malformed payload")
+
 // Projection folds events into read models.
 //
 // One method per event shape rather than a generic Apply(any), because the
@@ -179,6 +186,9 @@ type Message struct {
 	EventID  string
 	EventAt  time.Time
 	Payload  []byte
+	// Delivered is the broker's delivery counter, 1 on the first attempt. The
+	// poison decision reads it.
+	Delivered uint64
 }
 
 // MessageSource hands the projector one message at a time.
@@ -189,6 +199,9 @@ type MessageSource interface {
 	Next(ctx context.Context) ([]Message, error)
 	Ack(ctx context.Context, m Message) error
 	Nak(ctx context.Context, m Message) error
+	// Term stops delivery on purpose: poison, or the final attempt of a
+	// failure retrying has not fixed.
+	Term(ctx context.Context, m Message) error
 }
 
 // Reads serves the REST endpoints.
