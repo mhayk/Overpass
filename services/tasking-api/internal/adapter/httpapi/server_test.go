@@ -31,7 +31,7 @@ func serve(t *testing.T, probes ...stubProbe) http.Handler {
 	t.Helper()
 	logger := slog.New(slog.NewJSONHandler(io.Discard, nil))
 	svc := app.NewHealthService("test-version", time.Second, toPorts(probes)...)
-	return httpapi.New(svc, nil, logger).Routes()
+	return httpapi.New(svc, nil, 5*time.Second, logger).Routes()
 }
 
 func TestLivenessIsAlwaysOKEvenWhenPostgresIsDown(t *testing.T) {
@@ -119,7 +119,7 @@ func TestEveryLogLineCarriesTheCorrelationId(t *testing.T) {
 
 	req := httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/readyz", nil)
 	req.Header.Set(httpapi.CorrelationHeader, "trace-me")
-	httpapi.New(svc, nil, logger).Routes().ServeHTTP(httptest.NewRecorder(), req)
+	httpapi.New(svc, nil, 5*time.Second, logger).Routes().ServeHTTP(httptest.NewRecorder(), req)
 
 	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
 	if len(lines) == 0 || lines[0] == "" {

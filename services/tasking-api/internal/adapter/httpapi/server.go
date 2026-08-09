@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -19,11 +20,26 @@ type Server struct {
 	health    *app.HealthService
 	submitter *app.SubmitService
 	log       *slog.Logger
+
+	// submitTimeout bounds how long one submission may spend reaching the
+	// database. Without it, an exhausted connection pool holds every request
+	// open indefinitely: the service looks alive, answers nothing, and the
+	// request count simply stops — the failure mode hardest to attribute,
+	// because every dashboard stays green.
+	//
+	// A refusal is recoverable and a hang is not, which is the same argument
+	// `unavailable` already makes about a request that could not be stored.
+	submitTimeout time.Duration
 }
 
 // New builds the router.
-func New(health *app.HealthService, submitter *app.SubmitService, log *slog.Logger) *Server {
-	return &Server{health: health, submitter: submitter, log: log}
+func New(
+	health *app.HealthService,
+	submitter *app.SubmitService,
+	submitTimeout time.Duration,
+	log *slog.Logger,
+) *Server {
+	return &Server{health: health, submitter: submitter, submitTimeout: submitTimeout, log: log}
 }
 
 // Routes returns the fully wired handler.

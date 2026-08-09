@@ -3,7 +3,6 @@ package integration_test
 import (
 	"context"
 	"hash/fnv"
-	"strings"
 	"testing"
 	"time"
 
@@ -46,30 +45,22 @@ func plannableBucket(t *testing.T, candidates int) (satelliteID string, bucketSt
 	t.Helper()
 	ctx := context.Background()
 
-	// Upper case: reference.satellites enforces ^[A-Z0-9][A-Z0-9_-]{0,31}$,
-	// which is the same rule the contract's satellite_id pattern states.
-	satelliteID = "CHAOS-" + strings.ToUpper(uuid.NewString()[:8])
+	satelliteID = seedChaosSatellite(t)
 	requestID = uuid.NewString()
 
-	// A bucket inside the planner's default horizon, on a six-hour boundary so
-	// the sweep's floor() lands on it exactly.
+	// The NEXT-but-one six-hour boundary: always in the future, always inside
+	// the 24h horizon.
+	//
+	// The first version truncated now+2h to the boundary, which lands in the
+	// PAST for most of the day — at 21:30 it yields 18:00. A bucket that has
+	// already elapsed cannot be flown, so the planner correctly ignored it and
+	// the test waited 150 seconds for a round that was never going to happen.
+	// It passed every afternoon and failed at night, which is the worst kind of
+	// green.
 	const bucket = 6 * time.Hour
-	start := time.Now().UTC().Add(2 * time.Hour).Truncate(bucket)
+	start := time.Now().UTC().Truncate(bucket).Add(2 * bucket)
 	bucketStart = start
 
-	// norad_id is derived from the table rather than from a hash of the name:
-	// it carries its own UNIQUE constraint, and ON CONFLICT (satellite_id)
-	// would not absorb a collision on it — the insert would simply fail, in a
-	// test whose subject is something else entirely.
-	if _, err := env.pool.Exec(ctx, `
-		INSERT INTO reference.satellites
-			(satellite_id, norad_id, display_name, sensor_modes, duty_cycle_budget_s)
-		VALUES ($1, (SELECT COALESCE(MAX(norad_id), 900000) + 1 FROM reference.satellites),
-		        $1, '{}'::jsonb, 600000)
-		ON CONFLICT (satellite_id) DO NOTHING`,
-		satelliteID); err != nil {
-		t.Fatalf("seeding the satellite: %v", err)
-	}
 	if _, err := env.pool.Exec(ctx, `
 		INSERT INTO reference.customers (customer_id, display_name)
 		VALUES ($1, 'Chaos Test Customer') ON CONFLICT (customer_id) DO NOTHING`,
@@ -263,9 +254,9 @@ func TestAPlannerWaitingOnADeadHoldersLockTakesOver(t *testing.T) {
 		t.Fatalf("terminating the holder: %v", err)
 	}
 
-	eventually(t, "the waiting planner to take the lock and plan", 90*time.Second, func() bool {
-		return roundsFor(t, satelliteID) >= 1
-	})
+	if !waitFor(90*time.Second, func() bool { return roundsFor(t, satelliteID) >= 1 }) {
+		t.Fatalf("the waiting planner never planned the bucket after the holder died\n%s", planner.logs.String())
+	}
 }
 
 // holdAdvisoryLock takes the lock on its own connection and returns that

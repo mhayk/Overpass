@@ -2,9 +2,9 @@
 
 Approved 2026-08-09.
 
-**Status:** scenario 1 has landed (both halves). Scenarios 2, 3 and 4 are not
-written yet, and `docs/performance.md` names them as gaps rather than leaving
-them implied. #50 stays open until they are.
+**Status:** all four scenarios have landed. Scenario 3 required a change to
+tasking-api rather than only a test — the submit path had no deadline, so an
+exhausted pool produced a hang rather than the 503 the criterion asks for.
 
 ## Goal
 

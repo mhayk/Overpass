@@ -22,6 +22,9 @@ the condition it exists to catch.
 | A projector, mid-stream | Nothing is lost; events that arrived while it was down are still delivered | Durable pull consumers with explicit ack | `TestAProjectorKilledMidStreamLosesNothing` |
 | Duplicates injected at every hop at once | The end state is identical to one clean pass | Idempotency key at ingress, `Nats-Msg-Id` at the broker, `processed_events` at each consumer | `TestDuplicatesInjectedAtEveryHopLeaveTheEndStateIdentical` |
 | A consumer's terminal failure | The payload survives the drop and can be replayed | Dead letter published before the Term; Nak if the publish fails (ADR-0017) | `TestADeadLetterIsReplayedBackOntoItsOriginalSubject` |
+| A consumer, `SIGKILL`, three times through a 200-event backlog | No delivery is half-applied: a ledger claim exists if and only if its projection does | The claim and the state change are one transaction | `TestAConsumerKilledMidTransactionLeavesNoPartialState` |
+| The database, made unreachable under an exhausted pool | Ingress answers 503 promptly, writes nothing, and recovers unaided | A bounded deadline on the submit path; 503 is already the mapping for a submission that could not be stored | `TestIngressRefusesRatherThanHangsWhenTheDatabaseIsUnreachable` |
+| The broker, restarted mid-backlog | The consumer reconnects unaided and nothing is lost | Durable pull consumers, file storage, explicit ack | `TestABrokerRestartUnderLoadLosesNothing` |
 
 ## The advisory lock, in detail
 
@@ -56,16 +59,36 @@ rather than reading about it:
   usually exercise a restart while claiming to exercise a kill. When the window
   is missed anyway, the test says so in its output rather than passing quietly.
 
-## Not yet covered
+## What each scenario had to be taught
 
-Named here so the gaps are visible rather than implied. All three are part of
-M3-03 and are not done:
+None of these worked the first time, and the reasons are the useful part.
 
-- NATS restarted under load — consumers reconnect, no message loss. Needs the
-  test broker's published port pinned across a restart, or the services
-  reconnect to a port nobody is listening on.
-- Postgres connection pool exhausted — ingress degrades to `503` rather than
-  hanging or writing partial state.
-- A consumer killed *inside* its transaction — the mid-stream test proves
-  durability, not the absence of partial state. The assertion that matters is
-  that a ledger claim exists if and only if its projection row does.
+**The kills have to land on a working consumer.** The mid-transaction test began
+with a 24-event backlog and drained it before the first kill — it passed, having
+exercised a restart, and said so in its own log. It runs 200 events now and
+kills at a third, a half and two thirds of the way through. Every chaos test
+here reports when its window was missed, because a scenario that quietly did not
+happen is worse than one that failed.
+
+**Ingress needed a change, not just a test.** Under an exhausted pool the submit
+path had no deadline: it waited for a connection that was not coming, and the
+symptom was a service that looked alive and answered nothing. 503 was already
+the mapping for a submission that could not be stored — what was missing was
+anything that made the attempt fail at all. `SUBMIT_TIMEOUT` (5s by default)
+supplies it, and the unit test that proves it hangs without one is
+`TestASubmissionThatCannotReachTheDatabaseIsRefusedNotHeld`.
+
+**A bucket in the past is not a bucket.** The planner test derived its bucket
+by truncating `now + 2h` to a six-hour boundary, which lands in the past for
+most of the day — at 21:30 it yields 18:00. An elapsed bucket cannot be flown,
+so the planner correctly ignored it and the test waited 150 seconds for a round
+that was never going to happen. It passed every afternoon and failed at night,
+which is the worst kind of green: sixteen consecutive passes proved only that
+sixteen runs happened before six o'clock.
+
+**The test broker's port has to be pinned.** Docker assigns a new host port on
+every start, so a restarted broker would have been unreachable at the address
+the services already knew — the test would have measured its own setup. It is
+pinned to a chosen free port, published on all interfaces: binding it to
+127.0.0.1 inside the Docker VM made it unreachable from the test process, which
+is how that line was chosen rather than guessed.

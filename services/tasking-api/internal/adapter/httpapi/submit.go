@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -106,7 +107,14 @@ func (s *Server) submit(w http.ResponseWriter, r *http.Request) {
 	// preserve.
 	trace := traceHeaders(r)
 
-	result, validation, err := s.submitter.Submit(r.Context(), req, key, fingerprint, trace)
+	// Bounded, so a database that cannot be reached becomes a 503 the client
+	// retries rather than a request nobody ever answers. The deadline covers
+	// the whole submission — acquiring a connection included, which is the part
+	// that blocks when the pool is exhausted.
+	ctx, cancel := context.WithTimeout(r.Context(), s.submitTimeout)
+	defer cancel()
+
+	result, validation, err := s.submitter.Submit(ctx, req, key, fingerprint, trace)
 	switch {
 	case errors.Is(err, port.ErrIdempotencyConflict):
 		// The key was reused with a different body. A client bug, surfaced

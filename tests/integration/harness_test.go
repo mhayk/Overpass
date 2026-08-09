@@ -3,12 +3,16 @@ package integration_test
 import (
 	"context"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/network"
 	"github.com/nats-io/nats.go"
 	"github.com/pressly/goose/v3"
 	"github.com/testcontainers/testcontainers-go"
@@ -35,6 +39,10 @@ type stack struct {
 
 	taskingAPIBin  string
 	planGatewayBin string
+	// natsContainer is exposed so the chaos suite can restart the broker under
+	// load. Nothing else should touch it.
+	natsContainer testcontainers.Container
+
 	// plannerBin exists for the chaos suite: the planner is the only service
 	// that takes an advisory lock, and #50's central claim is about what
 	// happens to that lock when the process holding it dies.
@@ -125,10 +133,25 @@ func boot(ctx context.Context) (*stack, func(), error) {
 	//
 	// The default is worth knowing because JetStream is NOT on by default in
 	// the bare image, which is what broke the CI workflow in #109.
+	// The published port is PINNED rather than left to Docker.
+	//
+	// The chaos suite restarts this broker, and Docker assigns a new host port
+	// on every start unless one is asked for. Without pinning, the services
+	// under test would reconnect to a port nobody is listening on and the test
+	// would be measuring its own setup instead of the broker's recovery.
+	natsPort, err := freePort()
+	if err != nil {
+		return nil, teardown, fmt.Errorf("choosing a nats port: %w", err)
+	}
 	nc, err := tcnats.Run(ctx, "nats:2.10-alpine",
 		testcontainers.WithWaitStrategy(
 			wait.ForLog("Server is ready").WithStartupTimeout(60*time.Second),
 		),
+		testcontainers.WithHostConfigModifier(func(hc *container.HostConfig) {
+			hc.PortBindings = network.PortMap{
+				network.MustParsePort("4222/tcp"): []network.PortBinding{{HostIP: netip.MustParseAddr("0.0.0.0"), HostPort: strconv.Itoa(natsPort)}},
+			}
+		}),
 	)
 	if err != nil {
 		return nil, teardown, fmt.Errorf("starting nats: %w", err)
@@ -158,6 +181,7 @@ func boot(ctx context.Context) (*stack, func(), error) {
 	built := &stack{
 		pool: pool, dsn: dsn,
 		natsConn: conn, js: js, natsURL: natsURL,
+		natsContainer: nc,
 	}
 
 	// Compiled once for the package. Building per test would dominate the
