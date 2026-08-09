@@ -170,7 +170,7 @@ On terminal failure the consumer publishes the original payload to
 | `Overpass-Dlq-Reason` | Terminal error class |
 | `Overpass-Dlq-Original-Subject` | Where it came from |
 | `Overpass-Dlq-Delivery-Count` | Attempts made |
-| `Overpass-Dlq-First-Failed-At` | RFC 3339 |
+| `Overpass-Dlq-Failed-At` | RFC 3339, when the terminal decision was made. Not "first failed": consumers are stateless across deliveries, so the first failure time is unknowable, and a header cannot promise information nobody has (ADR-0017) |
 | `Overpass-Dlq-Consumer` | Which consumer gave up |
 | `traceparent` | Preserved, so the trace of a dead message is still complete |
 

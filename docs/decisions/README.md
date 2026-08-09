@@ -40,6 +40,7 @@ until the M2-13 benchmark produced the numbers that completed it.
 | [0014](0014-replanning-semantics.md) | Fire a round on a quiet-period debounce under a staleness ceiling, recompute the whole bucket, and give incumbency no advantage | accepted | M2 |
 | [0015](0015-planner-projects-its-own-request-value.md) | Give the planner its own projection of request value, instead of reading the tasking schema | accepted | M2 |
 | [0016](0016-ephemeris-sampling-and-horizon.md) | Sample the ephemeris every ten seconds, in aligned three-hour buckets, over a rolling day | accepted | M1 |
+| [0017](0017-dlq-publication-and-replay-semantics.md) | Dead letters are published by the consumer, before the Term, or not at all | accepted | M3 |
 
 ## Planned
 
