@@ -6,8 +6,11 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/mhayk/overpass/lib/go/consume"
 
 	"github.com/mhayk/overpass/services/plan-gateway/internal/adapter/wire"
 	"github.com/mhayk/overpass/services/plan-gateway/internal/app"
@@ -235,7 +238,20 @@ type countingSource struct {
 	acked []uint64
 	naked []uint64
 
+	// deadlettered records what was handed to the DLQ, and settled records the
+	// ORDER of every settle call — #49 is a statement about order, and "dead-
+	// lettered and terminated" is equally true of the sequence that drops the
+	// payload first.
+	deadlettered []deadLetter
+	settled      []string
+	dlqErr       error
+
 	cancel func()
+}
+
+type deadLetter struct {
+	eventID string
+	reason  string
 }
 
 func (s *countingSource) Next(context.Context) ([]port.Message, error) {
@@ -259,16 +275,28 @@ func (s *countingSource) Next(context.Context) ([]port.Message, error) {
 
 func (s *countingSource) Ack(_ context.Context, m port.Message) error {
 	s.acked = append(s.acked, m.Sequence)
+	s.settled = append(s.settled, "ack")
 	return nil
 }
 
 func (s *countingSource) Term(_ context.Context, m port.Message) error {
 	s.terminated = append(s.terminated, m.EventID)
+	s.settled = append(s.settled, "term")
 	return nil
 }
 
 func (s *countingSource) Nak(_ context.Context, m port.Message) error {
 	s.naked = append(s.naked, m.Sequence)
+	s.settled = append(s.settled, "nak")
+	return nil
+}
+
+func (s *countingSource) Deadletter(_ context.Context, m port.Message, reason string) error {
+	if s.dlqErr != nil {
+		return s.dlqErr
+	}
+	s.deadlettered = append(s.deadlettered, deadLetter{eventID: m.EventID, reason: reason})
+	s.settled = append(s.settled, "deadletter")
 	return nil
 }
 
@@ -612,6 +640,76 @@ func TestTheLastTransientDeliveryTerms(t *testing.T) {
 
 	if len(source.terminated) != 1 {
 		t.Errorf("terminated %v, want the deliberate Term on the final attempt", source.terminated)
+	}
+}
+
+// #49: the payload survives the drop, and it survives it in the right order.
+//
+// The gateway is a pure projector, so a message it terminates exists nowhere
+// else in the system — there is no outbox row and no downstream event to
+// reconstruct it from. If it is not in the DLQ, it is gone.
+func TestAPoisonMessageIsDeadLetteredBeforeItIsTermed(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	poison := msg("FEASIBILITY", "feasibility.opportunities.computed.v1", 9, `{"hello":"world"}`)
+	poison.Delivered = 1
+	source := &countingSource{batches: [][]port.Message{{poison}}, cancel: cancel}
+	projector := newProjector(source, newRecording())
+
+	if err := projector.Run(ctx); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	if got := strings.Join(source.settled, ","); got != "deadletter,term" {
+		t.Fatalf("settled %q, want deadletter,term — a Term before the dead letter is the loss this prevents", got)
+	}
+	if len(source.deadlettered) != 1 || source.deadlettered[0].reason != consume.ReasonContract {
+		t.Fatalf("dead-lettered %+v, want one %q", source.deadlettered, consume.ReasonContract)
+	}
+	if projector.Metrics.Snapshot().Deadlettered != 1 {
+		t.Error("no Deadlettered metric; terminated-minus-deadlettered would read as a lost message")
+	}
+}
+
+func TestTheLastTransientDeliveryIsDeadLetteredAsExhausted(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	last := msg("TASKING", app.SubjectRequestReceived, 4, envelopeFor(t, app.SubjectRequestReceived, eventAt))
+	last.Delivered = 10 // deploy/nats/init.sh: gateway max_deliver
+	source := &countingSource{batches: [][]port.Message{{last}}, cancel: cancel}
+
+	if err := newProjector(source, &failingProjection{}).Run(ctx); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	if len(source.deadlettered) != 1 || source.deadlettered[0].reason != consume.ReasonExhausted {
+		t.Fatalf("dead-lettered %+v, want one %q", source.deadlettered, consume.ReasonExhausted)
+	}
+}
+
+// A dead letter that cannot be published means NAK, not Term. The delivery
+// retries in full and both halves are idempotent.
+func TestAFailedDeadLetterNaksRatherThanDropping(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	poison := msg("FEASIBILITY", "feasibility.opportunities.computed.v1", 9, `{"hello":"world"}`)
+	poison.Delivered = 1
+	source := &countingSource{
+		batches: [][]port.Message{{poison}},
+		cancel:  cancel,
+		dlqErr:  errors.New("no responders available for request"),
+	}
+	projector := newProjector(source, newRecording())
+
+	if err := projector.Run(ctx); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	if len(source.terminated) != 0 {
+		t.Errorf("terminated %v after a failed dead letter — the payload is gone", source.terminated)
+	}
+	if len(source.naked) != 1 {
+		t.Errorf("naked %v, want the one retry that re-runs both halves", source.naked)
+	}
+	if snapshot := projector.Metrics.Snapshot(); snapshot.Terminated != 0 || snapshot.Deadlettered != 0 {
+		t.Errorf("metrics %+v claim a drop that did not happen", snapshot)
 	}
 }
 

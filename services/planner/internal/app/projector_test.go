@@ -5,8 +5,11 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/mhayk/overpass/lib/go/consume"
 
 	"github.com/mhayk/overpass/services/planner/internal/app"
 	"github.com/mhayk/overpass/services/planner/internal/domain"
@@ -23,6 +26,19 @@ type fakeSource struct {
 	acked      []string
 	naked      []string
 	terminated []string
+
+	// deadlettered records what was handed to the DLQ, and settled records the
+	// ORDER of every settle call — because #49 is a statement about order.
+	// "Dead-lettered and terminated" is true of both the correct sequence and
+	// the one that drops the payload first, and only one of those is safe.
+	deadlettered []deadLetter
+	settled      []string
+	dlqErr       error
+}
+
+type deadLetter struct {
+	eventID string
+	reason  string
 }
 
 func (f *fakeSource) Next(context.Context) ([]port.Message, error) {
@@ -36,16 +52,28 @@ func (f *fakeSource) Next(context.Context) ([]port.Message, error) {
 
 func (f *fakeSource) Ack(_ context.Context, m port.Message) error {
 	f.acked = append(f.acked, m.EventID)
+	f.settled = append(f.settled, "ack")
 	return nil
 }
 
 func (f *fakeSource) Nak(_ context.Context, m port.Message) error {
 	f.naked = append(f.naked, m.EventID)
+	f.settled = append(f.settled, "nak")
 	return nil
 }
 
 func (f *fakeSource) Term(_ context.Context, m port.Message) error {
 	f.terminated = append(f.terminated, m.EventID)
+	f.settled = append(f.settled, "term")
+	return nil
+}
+
+func (f *fakeSource) Deadletter(_ context.Context, m port.Message, reason string) error {
+	if f.dlqErr != nil {
+		return f.dlqErr
+	}
+	f.deadlettered = append(f.deadlettered, deadLetter{eventID: m.EventID, reason: reason})
+	f.settled = append(f.settled, "deadletter")
 	return nil
 }
 
@@ -332,6 +360,87 @@ func TestOneInvalidCandidateRejectsTheWholeBatch(t *testing.T) {
 	// An invalid candidate is invalid on every redelivery: permanent, Term.
 	if len(source.terminated) != 1 {
 		t.Errorf("terminated %v, want the deliberate Term", source.terminated)
+	}
+}
+
+// The ordering invariant, tested as an ordering: publish, THEN Term.
+//
+// A Term that lands before the dead letter is a drop with extra steps, and it
+// looks identical to the correct sequence in every counter — which is why this
+// asserts the sequence rather than the pair of facts (ADR-0017).
+func TestAPoisonMessageIsDeadLetteredBeforeItIsTermed(t *testing.T) {
+	source := &fakeSource{batches: [][]port.Message{{
+		message("TASKING", app.SubjectRequestReceived, "e1"),
+	}}}
+
+	projector := app.NewProjector(source,
+		fakeDecoder{snapshotErr: errors.New("not an enveloped contract event")},
+		&fakeProjections{applied: true}, discard())
+	if _, err := projector.DrainOnce(context.Background()); err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+
+	if got := strings.Join(source.settled, ","); got != "deadletter,term" {
+		t.Fatalf("settled %q, want deadletter,term — a Term before the dead letter is the loss this prevents", got)
+	}
+	if len(source.deadlettered) != 1 || source.deadlettered[0].eventID != "e1" {
+		t.Fatalf("dead-lettered %+v, want the poison event once", source.deadlettered)
+	}
+	// The planner's permanent class is "the payload is one this service
+	// refuses" — a decode failure or a contract violation, indistinguishable
+	// here because both arrive wrapped in domain.ErrInvalid.
+	if source.deadlettered[0].reason != consume.ReasonContract {
+		t.Errorf("reason = %q, want %q", source.deadlettered[0].reason, consume.ReasonContract)
+	}
+	if got := projector.Metrics.Snapshot().Deadlettered; got != 1 {
+		t.Errorf("deadlettered metric = %d, want 1", got)
+	}
+}
+
+// The exhausted retry says so, rather than borrowing the poison reason. An
+// operator triages on this header: "the payload is bad" and "the dependency was
+// down for five deliveries" are different incidents with different fixes.
+func TestAnExhaustedRetryIsDeadLetteredAsExhausted(t *testing.T) {
+	last := message("FEASIBILITY", app.SubjectOpportunities, "e2")
+	last.Delivered = 5 // deploy/nats/init.sh: max_deliver 5
+
+	source := &fakeSource{batches: [][]port.Message{{last}}}
+	projector := app.NewProjector(source, fakeDecoder{opportunities: validCandidateEvent()},
+		&fakeProjections{err: errors.New("connection refused")}, discard())
+	if _, err := projector.DrainOnce(context.Background()); err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+
+	if len(source.deadlettered) != 1 || source.deadlettered[0].reason != consume.ReasonExhausted {
+		t.Fatalf("dead-lettered %+v, want one %q", source.deadlettered, consume.ReasonExhausted)
+	}
+}
+
+// If the dead letter cannot be published, NAK. The delivery retries in full —
+// the handling and the dead-lettering — and both are idempotent, so the retry
+// is boring. Terminating here would be the silent drop with a metric attached.
+func TestAFailedDeadLetterNaksRatherThanDropping(t *testing.T) {
+	source := &fakeSource{
+		batches: [][]port.Message{{message("TASKING", app.SubjectRequestReceived, "e1")}},
+		dlqErr:  errors.New("no responders available for request"),
+	}
+
+	projector := app.NewProjector(source,
+		fakeDecoder{snapshotErr: errors.New("not an enveloped contract event")},
+		&fakeProjections{applied: true}, discard())
+	if _, err := projector.DrainOnce(context.Background()); err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+
+	if len(source.terminated) != 0 {
+		t.Errorf("terminated %v after a failed dead letter — the payload is gone", source.terminated)
+	}
+	if len(source.naked) != 1 {
+		t.Errorf("naked %v, want the one retry that re-runs both halves", source.naked)
+	}
+	snapshot := projector.Metrics.Snapshot()
+	if snapshot.Deadlettered != 0 || snapshot.Terminated != 0 {
+		t.Errorf("metrics %+v claim a drop that did not happen", snapshot)
 	}
 }
 

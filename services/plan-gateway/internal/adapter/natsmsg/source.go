@@ -13,6 +13,8 @@ import (
 
 	"github.com/nats-io/nats.go"
 
+	"github.com/mhayk/overpass/lib/go/consume"
+
 	"github.com/mhayk/overpass/services/plan-gateway/internal/port"
 )
 
@@ -36,8 +38,29 @@ type Source struct {
 	batch int
 	wait  time.Duration
 
+	// pub and consumerFor are what dead-lettering needs: somewhere to publish,
+	// and the name of the consumer that gave up. The application supplies only
+	// the reason; the rest of a dead letter is transport detail held here.
+	pub         consume.Publisher
+	consumerFor map[string]string
+
 	mu       sync.Mutex
 	inflight map[string]*nats.Msg
+}
+
+// jetstreamPublisher is the transport half of lib/go/consume's Publisher.
+//
+// It exists because that module imports no NATS, deliberately — the header set
+// and the subject mapping are shared, the wire is not.
+type jetstreamPublisher struct{ js nats.JetStreamContext }
+
+func (p jetstreamPublisher) Publish(ctx context.Context, subject string, header map[string][]string, payload []byte) error {
+	_, err := p.js.PublishMsg(&nats.Msg{
+		Subject: subject,
+		Header:  nats.Header(header),
+		Data:    payload,
+	}, nats.Context(ctx))
+	return err
 }
 
 func handleKey(m port.Message) string {
@@ -51,13 +74,16 @@ func handleKey(m port.Message) string {
 // diverges from it the first time a setting changes.
 func Bind(js nats.JetStreamContext, durablePrefix string, batch int, wait time.Duration) (*Source, error) {
 	s := &Source{
-		subs:     make(map[string]*nats.Subscription, len(Streams)),
-		batch:    batch,
-		wait:     wait,
-		inflight: make(map[string]*nats.Msg),
+		subs:        make(map[string]*nats.Subscription, len(Streams)),
+		batch:       batch,
+		wait:        wait,
+		pub:         jetstreamPublisher{js: js},
+		consumerFor: make(map[string]string, len(Streams)),
+		inflight:    make(map[string]*nats.Msg),
 	}
 	for _, stream := range Streams {
 		durable := durablePrefix + "-" + strings.ToLower(stream)
+		s.consumerFor[stream] = durable
 
 		// The subject passed to PullSubscribe must EQUAL the consumer's
 		// declared filter. Measured against a live broker: passing "" — which
@@ -116,20 +142,27 @@ func (s *Source) Next(ctx context.Context) ([]port.Message, error) {
 			return nil, fmt.Errorf("fetching from %s: %w", stream, err)
 		}
 		out := make([]port.Message, 0, len(msgs))
+		var unreadable []*nats.Msg
 		s.mu.Lock()
 		for _, m := range msgs {
 			converted, convErr := convert(stream, m)
 			if convErr != nil {
 				// Metadata that will not parse will not parse on redelivery
-				// either. Term rather than Nak, so it stops occupying a
-				// delivery slot forever.
-				_ = m.Term() //nolint:errcheck // nothing useful to do if the term itself fails
+				// either, so this ends in a Term — but not before the payload
+				// is kept. Collected and handled outside the lock, because
+				// dead-lettering publishes and this critical section guards a
+				// map, not a network round trip.
+				unreadable = append(unreadable, m)
 				continue
 			}
 			s.inflight[handleKey(converted)] = m
 			out = append(out, converted)
 		}
 		s.mu.Unlock()
+
+		for _, m := range unreadable {
+			s.deadletterUnreadable(ctx, stream, m)
+		}
 		return out, nil
 	}
 	return nil, nil
@@ -201,6 +234,70 @@ func (s *Source) Term(_ context.Context, m port.Message) error {
 		return err
 	}
 	return raw.Term()
+}
+
+// Deadletter publishes the message to its DLQ subject. See port.MessageSource:
+// the projector calls this BEFORE Term and Naks if it fails.
+//
+// It peeks at the in-flight handle rather than claiming it, because the Term
+// that follows still needs it. A claim here would make the correct sequence —
+// dead-letter, then Term — fail on the Term with "no in-flight handle".
+func (s *Source) Deadletter(ctx context.Context, m port.Message, reason string) error {
+	raw, err := s.peek(m)
+	if err != nil {
+		return err
+	}
+	return consume.Deadletter(ctx, s.pub, consume.DeadLetter{
+		Subject:     raw.Subject,
+		EventID:     m.EventID,
+		Payload:     raw.Data,
+		Traceparent: raw.Header.Get(consume.HeaderTraceparent),
+		Reason:      reason,
+		Delivered:   m.Delivered,
+		Consumer:    s.consumerFor[m.Stream],
+	})
+}
+
+// deadletterUnreadable handles the one message the projector never sees: the
+// delivery whose broker metadata would not parse, so it has no sequence and
+// cannot be tracked in-flight.
+//
+// Delivered is 0 and that is not a guess — the delivery count lives in the
+// metadata that just failed to parse. The reason header says `metadata`, which
+// is what tells an operator the count is missing rather than wrong.
+//
+// A failed publish Naks: the message comes back and the whole thing is retried,
+// same invariant as everywhere else. If it keeps failing the broker's
+// max_deliver eventually lapses, which is the one silent drop left in this
+// design — it needs both an unparseable delivery AND a broker that will not
+// accept a publish.
+func (s *Source) deadletterUnreadable(ctx context.Context, stream string, m *nats.Msg) {
+	err := consume.Deadletter(ctx, s.pub, consume.DeadLetter{
+		Subject:     m.Subject,
+		EventID:     m.Header.Get(consume.HeaderMsgID),
+		Payload:     m.Data,
+		Traceparent: m.Header.Get(consume.HeaderTraceparent),
+		Reason:      consume.ReasonMetadata,
+		Consumer:    s.consumerFor[stream],
+	})
+	if err != nil {
+		_ = m.Nak() //nolint:errcheck // the redelivery is the retry; a failed Nak is one the ack wait covers
+		return
+	}
+	_ = m.Term() //nolint:errcheck // nothing useful to do if the term itself fails
+}
+
+// peek reads the handle without taking it, for the operations that are not the
+// last thing to happen to a message.
+func (s *Source) peek(m port.Message) (*nats.Msg, error) {
+	key := handleKey(m)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	raw, ok := s.inflight[key]
+	if !ok {
+		return nil, fmt.Errorf("no in-flight handle for %s (event %s)", key, m.EventID)
+	}
+	return raw, nil
 }
 
 // claim takes the handle out of the map, so a double ack is a loud error rather
