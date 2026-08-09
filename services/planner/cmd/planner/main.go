@@ -119,6 +119,32 @@ func run(ctx context.Context) error {
 		}
 	}()
 
+	// Ledger cleanup, hourly. The retention guard lives in the lib: a value
+	// inside the redelivery horizon is refused loudly here rather than
+	// silently reprocessing a late redelivery as new.
+	projections := postgres.NewProjections(pool)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				deleted, cleanErr := projections.CleanupLedger(ctx, cfg.LedgerRetention)
+				if cleanErr != nil {
+					log.Error("ledger cleanup failed", slog.Any("error", cleanErr))
+					continue
+				}
+				if deleted > 0 {
+					log.Info("ledger cleaned", slog.Int64("rows", deleted))
+				}
+			}
+		}
+	}()
+
 	if closeProjector, projErr := startProjector(ctx, cfg, pool, log, &wg); projErr != nil {
 		log.Warn("projector and relay not started; inputs will not advance and rounds will not publish",
 			slog.Any("error", projErr))
@@ -176,6 +202,10 @@ func startProjector(
 
 	projector := app.NewProjector(source, wire.New(), postgres.NewProjections(pool),
 		log.With(slog.String("component", "projector")))
+	// projector.Metrics is served to M3-06 when the metrics endpoint lands
+	// (#53); until then the snapshot keeps the field exercised without copying
+	// the mutex it guards.
+	_ = projector.Metrics.Snapshot()
 
 	wg.Add(1)
 	go func() {

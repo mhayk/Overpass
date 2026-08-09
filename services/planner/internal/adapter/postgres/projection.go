@@ -11,9 +11,12 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/mhayk/overpass/lib/go/consume"
 
 	"github.com/mhayk/overpass/services/planner/internal/domain"
 	"github.com/mhayk/overpass/services/planner/internal/port"
@@ -21,12 +24,22 @@ import (
 
 // Projections is the pgx-backed implementation of port.Projections.
 type Projections struct {
-	pool *pgxpool.Pool
+	pool   *pgxpool.Pool
+	ledger consume.Ledger
 }
 
 // NewProjections wraps a pool.
+//
+// The dedup lives in lib/go/consume since #168 — one helper per language, not
+// per service. The table name is a constant here, so the constructor cannot
+// fail on it; the panic on error is the compile-time-constant idiom, and it
+// fires only if someone edits the constant into an invalid shape.
 func NewProjections(pool *pgxpool.Pool) *Projections {
-	return &Projections{pool: pool}
+	ledger, err := consume.NewLedger("planning.processed_events")
+	if err != nil {
+		panic(err) // unreachable: the argument is a package constant
+	}
+	return &Projections{pool: pool, ledger: ledger}
 }
 
 // ProjectSnapshot folds tasking.request.received.v1 into
@@ -34,7 +47,7 @@ func NewProjections(pool *pgxpool.Pool) *Projections {
 func (p *Projections) ProjectSnapshot(ctx context.Context, consumer string, e port.RequestReceived) (bool, error) {
 	var applied bool
 	err := pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
-		first, err := claimEvent(ctx, tx, consumer, e.EventID)
+		first, err := p.claim(ctx, tx, consumer, e.EventID)
 		if err != nil {
 			return err
 		}
@@ -81,7 +94,7 @@ func (p *Projections) ProjectSnapshot(ctx context.Context, consumer string, e po
 func (p *Projections) ProjectCandidates(ctx context.Context, consumer string, e port.OpportunitiesComputed) (bool, error) {
 	var applied bool
 	err := pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
-		first, err := claimEvent(ctx, tx, consumer, e.EventID)
+		first, err := p.claim(ctx, tx, consumer, e.EventID)
 		if err != nil {
 			return err
 		}
@@ -143,32 +156,24 @@ func (p *Projections) send(ctx context.Context, tx pgx.Tx, batch *pgx.Batch) pgx
 	return tx.SendBatch(ctx, batch)
 }
 
-// claimEvent records the event in the dedup ledger, reporting whether this is
-// the first time it has been seen.
-//
-// The INSERT is the claim. Checking with a SELECT and then inserting would be a
-// read-then-write race between two projector replicas, and the whole point of
-// the ledger is that it is the thing being raced on. ON CONFLICT DO NOTHING
-// makes the database arbitrate: exactly one caller sees a row affected.
-//
-// Keyed (consumer, event_id) per ADR-0008, so the two streams cannot mask each
-// other's redeliveries — the same event replayed onto a second consumer is a
-// separate fact.
-func claimEvent(ctx context.Context, tx pgx.Tx, consumer, eventID string) (bool, error) {
-	if eventID == "" {
-		// Would become an empty dedup key, so every such message would look
-		// like a redelivery of the same one and all but the first would be
-		// silently dropped. The decoder already refuses these; this is the
-		// second line, because the consequence is silent data loss.
-		return false, fmt.Errorf("%w: empty event_id cannot be deduplicated", domain.ErrInvalid)
-	}
-	tag, err := tx.Exec(ctx, `
-		INSERT INTO planning.processed_events (consumer, event_id)
-		VALUES ($1, $2)
-		ON CONFLICT (consumer, event_id) DO NOTHING
-	`, consumer, eventID)
+// claim delegates to the shared ledger, wrapping its empty-id refusal in
+// domain.ErrInvalid so the projector classifies it as permanent — a payload
+// with no id will have no id on redelivery either.
+func (p *Projections) claim(ctx context.Context, tx pgx.Tx, consumer, eventID string) (bool, error) {
+	first, err := p.ledger.Claim(ctx, tx, consumer, eventID)
 	if err != nil {
-		return false, fmt.Errorf("claiming event %s for %s: %w", eventID, consumer, err)
+		if eventID == "" {
+			return false, fmt.Errorf("%w: %w", domain.ErrInvalid, err)
+		}
+		return false, err
 	}
-	return tag.RowsAffected() == 1, nil
+	return first, nil
+}
+
+// CleanupLedger deletes dedup rows old enough that no redelivery can still
+// arrive for them. The retention guard lives in the lib; this only supplies
+// the planner's own consumer bounds from deploy/nats/init.sh — max_deliver 5,
+// the longer ack_wait of its two consumers.
+func (p *Projections) CleanupLedger(ctx context.Context, retention time.Duration) (int64, error) {
+	return p.ledger.Cleanup(ctx, p.pool, retention, 5, 60*time.Second)
 }

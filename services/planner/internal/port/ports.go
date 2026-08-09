@@ -34,6 +34,11 @@ type Message struct {
 	EventID  string
 	EventAt  time.Time
 	Payload  []byte
+	// Delivered is the broker's delivery counter for this message, 1 on the
+	// first attempt. The poison decision reads it: retry until the LAST
+	// delivery, then terminate deliberately rather than letting max_deliver
+	// lapse into a silent drop.
+	Delivered uint64
 }
 
 // MessageSource hands the projector one batch at a time.
@@ -45,6 +50,10 @@ type MessageSource interface {
 	Next(ctx context.Context) ([]Message, error)
 	Ack(ctx context.Context, m Message) error
 	Nak(ctx context.Context, m Message) error
+	// Term stops delivery of a message on purpose: poison, or the final
+	// attempt of a failure retrying has not fixed. Distinct from Ack — the
+	// work did NOT land — and from Nak — nobody wants it again.
+	Term(ctx context.Context, m Message) error
 }
 
 // RequestReceived mirrors tasking.request.received.v1, reduced to what

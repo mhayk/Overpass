@@ -19,9 +19,10 @@ import (
 // the two happened: acking a failure drops an event silently, and a silently
 // dropped opportunity is a customer whose request never competes in any round.
 type fakeSource struct {
-	batches [][]port.Message
-	acked   []string
-	naked   []string
+	batches    [][]port.Message
+	acked      []string
+	naked      []string
+	terminated []string
 }
 
 func (f *fakeSource) Next(context.Context) ([]port.Message, error) {
@@ -40,6 +41,11 @@ func (f *fakeSource) Ack(_ context.Context, m port.Message) error {
 
 func (f *fakeSource) Nak(_ context.Context, m port.Message) error {
 	f.naked = append(f.naked, m.EventID)
+	return nil
+}
+
+func (f *fakeSource) Term(_ context.Context, m port.Message) error {
+	f.terminated = append(f.terminated, m.EventID)
 	return nil
 }
 
@@ -84,12 +90,13 @@ func discard() *slog.Logger {
 
 func message(stream, subject, eventID string) port.Message {
 	return port.Message{
-		Stream:   stream,
-		Sequence: 1,
-		Subject:  subject,
-		EventID:  eventID,
-		EventAt:  time.Date(2026, 8, 7, 9, 0, 0, 0, time.UTC),
-		Payload:  []byte(`{}`),
+		Stream:    stream,
+		Sequence:  1,
+		Subject:   subject,
+		EventID:   eventID,
+		EventAt:   time.Date(2026, 8, 7, 9, 0, 0, 0, time.UTC),
+		Payload:   []byte(`{}`),
+		Delivered: 1,
 	}
 }
 
@@ -228,15 +235,21 @@ func TestSiblingSubjectIsIgnoredAndAcked(t *testing.T) {
 	}
 }
 
-func TestDecodeFailureIsNakedNotAcked(t *testing.T) {
+// A payload that does not decode will not decode on redelivery either:
+// PERMANENT, terminated on the FIRST delivery. The M2 behaviour — Nak
+// everything and let max_deliver bound the cost — burned the whole delivery
+// budget rerunning a deterministic failure; the demo's poison "hello" messages
+// showed exactly that, redelivering for an hour.
+func TestDecodeFailureIsTerminatedOnFirstDelivery(t *testing.T) {
 	source := &fakeSource{batches: [][]port.Message{{
 		message("TASKING", app.SubjectRequestReceived, "e1"),
 	}}}
 	projections := &fakeProjections{applied: true}
 
-	stats, err := app.NewProjector(source,
+	projector := app.NewProjector(source,
 		fakeDecoder{snapshotErr: errors.New("not an enveloped contract event")},
-		projections, discard()).DrainOnce(context.Background())
+		projections, discard())
+	stats, err := projector.DrainOnce(context.Background())
 	if err != nil {
 		t.Fatalf("drain: %v", err)
 	}
@@ -244,12 +257,44 @@ func TestDecodeFailureIsNakedNotAcked(t *testing.T) {
 	if stats.Failed != 1 {
 		t.Errorf("failed = %d, want 1", stats.Failed)
 	}
-	if len(source.naked) != 1 || len(source.acked) != 0 {
-		t.Errorf("acked %v, naked %v — a failure must NOT be acked, or the event is dropped silently",
-			source.acked, source.naked)
+	if len(source.terminated) != 1 || len(source.acked) != 0 || len(source.naked) != 0 {
+		t.Errorf("acked %v, naked %v, terminated %v — a deterministic failure must Term, once",
+			source.acked, source.naked, source.terminated)
 	}
 	if projections.snapshotCalls != 0 {
 		t.Error("an undecodable payload reached the database")
+	}
+	if projector.Metrics.Snapshot().Terminated != 1 {
+		t.Error("the Term left no metric; the drop would be invisible to M3-06")
+	}
+}
+
+// A TRANSIENT failure still retries — and on the LAST delivery terminates
+// deliberately rather than letting max_deliver lapse into a silent drop.
+func TestTransientFailureNaksUntilTheLastDeliveryThenTerms(t *testing.T) {
+	early := message("FEASIBILITY", app.SubjectOpportunities, "e2")
+	last := message("FEASIBILITY", app.SubjectOpportunities, "e2")
+	last.Delivered = 5 // deploy/nats/init.sh: max_deliver 5
+
+	source := &fakeSource{batches: [][]port.Message{{early}, {last}}}
+	projections := &fakeProjections{err: errors.New("connection refused")}
+	projector := app.NewProjector(source, fakeDecoder{opportunities: validCandidateEvent()}, projections, discard())
+
+	if _, err := projector.DrainOnce(context.Background()); err != nil {
+		t.Fatalf("drain 1: %v", err)
+	}
+	if len(source.naked) != 1 || len(source.terminated) != 0 {
+		t.Fatalf("first delivery: naked %v terminated %v, want one Nak", source.naked, source.terminated)
+	}
+
+	if _, err := projector.DrainOnce(context.Background()); err != nil {
+		t.Fatalf("drain 2: %v", err)
+	}
+	if len(source.terminated) != 1 {
+		t.Fatalf("final delivery: terminated %v, want the deliberate Term", source.terminated)
+	}
+	if projector.Metrics.Snapshot().Redeliveries != 1 {
+		t.Error("the redelivery left no metric; the early-warning line is dark")
 	}
 }
 
@@ -284,8 +329,9 @@ func TestOneInvalidCandidateRejectsTheWholeBatch(t *testing.T) {
 	if stats.Failed != 1 {
 		t.Errorf("failed = %d, want 1", stats.Failed)
 	}
-	if len(source.naked) != 1 {
-		t.Errorf("naked %v, want the message held for redelivery", source.naked)
+	// An invalid candidate is invalid on every redelivery: permanent, Term.
+	if len(source.terminated) != 1 {
+		t.Errorf("terminated %v, want the deliberate Term", source.terminated)
 	}
 }
 
@@ -306,6 +352,9 @@ func TestProjectionErrorIsNaked(t *testing.T) {
 	}
 	if len(source.acked) != 0 {
 		t.Errorf("acked %v after a database failure — the event would be lost", source.acked)
+	}
+	if len(source.naked) != 1 {
+		t.Errorf("naked %v — a database failure is transient and must retry, not Term", source.naked)
 	}
 }
 
