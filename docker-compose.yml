@@ -224,6 +224,38 @@ services:
     logging: *default-logging
 
   # ---------------------------------------------------------------------------
+  # NATS exporter
+  # ---------------------------------------------------------------------------
+  #
+  # The DLQ alert needs a number for "how many dead letters are outstanding",
+  # and that number lives in the broker rather than in any service: a message
+  # sits in a DLQ stream precisely because no consumer will touch it, so no
+  # consumer can count it. `-jsz all` is what turns the monitoring endpoint's
+  # JetStream section into per-stream gauges — without it the exporter defaults
+  # to varz and publishes server metrics only, which was measured rather than
+  # read: the container logs "No metrics specified. Defaulting to varz."
+  #
+  # One small container, and it is the whole reason DLQ depth can be alerted on
+  # instead of noticed (ADR-0017).
+  nats-exporter:
+    image: natsio/prometheus-nats-exporter:0.16.0
+    container_name: overpass-nats-exporter
+    restart: unless-stopped
+    command: ["-port", "7777", "-varz", "-jsz", "all", "http://nats:8222"]
+    depends_on:
+      nats:
+        condition: service_healthy
+    ports:
+      - "${NATS_EXPORTER_PORT:-7777}:7777"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:7777/metrics"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    logging: *default-logging
+
+  # ---------------------------------------------------------------------------
   # Prometheus
   # ---------------------------------------------------------------------------
   prometheus:

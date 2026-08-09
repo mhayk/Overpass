@@ -9,17 +9,28 @@ groups:
   - name: overpass-delivery
     interval: 30s
     rules:
+      # The metric name is the exporter's, verified against a running broker
+      # rather than taken from documentation: prometheus-nats-exporter with
+      # `-jsz all` publishes jetstream_stream_total_messages per stream_name.
+      # The rule this replaces read `overpass_dlq_depth`, a name nothing has
+      # ever published — an alert that could not fire, which is worse than no
+      # alert because it looks like coverage.
+      #
+      # Per stream, not summed: which domain is stuck is the first thing an
+      # operator needs, and it is free here.
       - alert: DeadLetterQueueNotEmpty
-        expr: sum(overpass_dlq_depth) > 0
+        expr: max by (stream_name) (jetstream_stream_total_messages{stream_name=~"DLQ_.*"}) > 0
         for: 1m
         labels: { severity: warning }
         annotations:
-          summary: "Messages have been dead-lettered"
+          summary: "Dead letters are waiting in {{ $labels.stream_name }}"
           description: >-
-            A message exhausted its max-deliver limit. This is almost always a
-            code bug or a bad deployment, not a bad message. Inspect with
-            `make dlq-inspect`, fix the cause, then `make dlq-replay` — replay
-            is safe because consumers are idempotent.
+            A consumer gave up on a message and kept the payload. This is almost
+            always a code bug or a bad deployment, not a bad message. Inspect
+            with `make dlq-inspect STREAM={{ $labels.stream_name }}`, read the
+            preserved traceparent in Grafana, fix the cause, then
+            `make dlq-replay` — replay is safe because consumers are idempotent.
+            Runbook: docs/runbooks/dlq-replay.md
 
       - alert: OutboxRelayLagging
         expr: overpass_outbox_pending_seconds > 30

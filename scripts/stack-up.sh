@@ -31,7 +31,7 @@ fi
 BUDGET_SECONDS="${BUDGET_SECONDS:-300}"
 
 # Long-running services that must report healthy.
-SERVICES=(postgres nats otel-collector prometheus grafana)
+SERVICES=(postgres nats nats-exporter otel-collector prometheus grafana)
 # One-shot containers that must complete with exit 0.
 ONESHOT=(nats-init migrate)
 
