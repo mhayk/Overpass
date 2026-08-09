@@ -9,16 +9,15 @@
 # ADR-0005 for why this is Docker Compose and not Kubernetes, and what
 # production would actually require.
 #
-#   make up      bring everything up and wait for healthy
+#   make up      infrastructure up and genuinely ready (the default)
+#   make up-all  the same plus the application services (`app` profile, #166)
 #   make down    stop, keep data
 #   make clean   stop and destroy volumes
 #
 # Application services (tasking-api, feasibility, planner, plan-gateway, web)
-# are NOT here yet — they arrive in M1 as they are built, tracked by issues
-# #14 through #33. The placeholder block at the bottom of this file records
-# exactly what lands and when. Declaring services with build contexts that do
-# not exist would break `docker compose config` for everyone, which is a worse
-# kind of placeholder than a comment.
+# live at the bottom of this file under the `app` profile, so the default
+# `make up` stays infrastructure-only for contributors running a service from
+# source against the stack.
 
 name: overpass
 
@@ -291,21 +290,160 @@ services:
     logging: *default-logging
 
   # ---------------------------------------------------------------------------
-  # Application services — M1 onward
+  # Application services (#166)
   # ---------------------------------------------------------------------------
-  # Deliberately absent rather than stubbed. Each arrives with the issue that
-  # builds it:
+  # Under the `app` profile, so `make up` stays infrastructure-only — the
+  # default a contributor iterating on one service wants, since their service
+  # runs from source while the stack provides its dependencies. `make up-all`
+  # brings everything.
   #
-  #   tasking-api          Go       #15  ports 8080     depends: postgres, nats
-  #   feasibility-service  Python   #24  no ports       depends: nats, postgres
-  #   plan-gateway         Go       #28  ports 8081     depends: postgres, nats
-  #   planner-service      Go       #34  no ports       depends: postgres, nats
-  #   web                  Next.js  #30  ports 3000     depends: plan-gateway
-  #   acquisition-simulator Go      #56  no ports       depends: nats
+  # One pattern, stated once: repo-root build context (the Go modules reach
+  # gen/go and lib/go through replace directives), environment defaults from
+  # each service's own config.go, health read from /readyz, and a start order
+  # that waits for the schema and the NATS topology — the Go services bind
+  # pre-declared durable consumers and exit if they are missing.
   #
-  # All of them are twelve-factor — configuration from environment, logs to
-  # stdout, no local state — so each is a ~15 line addition here and nothing
-  # about this file needs to change to accommodate them.
+  # acquisition-simulator (#56) is still to come and arrives with its issue.
+  tasking-api:
+    build:
+      context: .
+      dockerfile: services/tasking-api/Dockerfile
+    container_name: overpass-tasking-api
+    profiles: ["app"]
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: "postgres://${POSTGRES_USER:-overpass}:${POSTGRES_PASSWORD:-overpass}@postgres:5432/${POSTGRES_DB:-overpass}?sslmode=disable"
+      NATS_URL: nats://nats:4222
+      OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+    ports:
+      - "${TASKING_API_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      nats-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8080/readyz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging: *default-logging
+
+  feasibility:
+    build:
+      context: .
+      dockerfile: services/feasibility/Dockerfile
+    container_name: overpass-feasibility
+    profiles: ["app"]
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: "postgres://${POSTGRES_USER:-overpass}:${POSTGRES_PASSWORD:-overpass}@postgres:5432/${POSTGRES_DB:-overpass}"
+      NATS_URL: nats://nats:4222
+      OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+    # No ports and no healthcheck: the worker is a consumer with no listener,
+    # so there is nothing to probe short of inventing an HTTP server for the
+    # probe's benefit. The stack script treats "running" as ready for it, and
+    # a crash loop is still loud through `restart` counts and logs.
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      nats-init:
+        condition: service_completed_successfully
+    logging: *default-logging
+
+  planner:
+    build:
+      context: .
+      dockerfile: services/planner/Dockerfile
+    container_name: overpass-planner
+    profiles: ["app"]
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: "postgres://${POSTGRES_USER:-overpass}:${POSTGRES_PASSWORD:-overpass}@postgres:5432/${POSTGRES_DB:-overpass}?sslmode=disable"
+      NATS_URL: nats://nats:4222
+      OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+    ports:
+      - "${PLANNER_PORT:-8084}:8084"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      nats-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8084/readyz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging: *default-logging
+
+  plan-gateway:
+    build:
+      context: .
+      dockerfile: services/plan-gateway/Dockerfile
+    container_name: overpass-plan-gateway
+    profiles: ["app"]
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: "postgres://${POSTGRES_USER:-overpass}:${POSTGRES_PASSWORD:-overpass}@postgres:5432/${POSTGRES_DB:-overpass}?sslmode=disable"
+      NATS_URL: nats://nats:4222
+      OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+    ports:
+      # 8083, matching the service's own default — the placeholder comment
+      # said 8081, which predated the config that actually shipped.
+      - "${PLAN_GATEWAY_PORT:-8083}:8083"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      nats-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:8083/readyz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging: *default-logging
+
+  web:
+    build:
+      context: .
+      dockerfile: web/Dockerfile
+    container_name: overpass-web
+    profiles: ["app"]
+    restart: unless-stopped
+    # No environment block: the NEXT_PUBLIC_* defaults baked at build time
+    # already point at localhost:8080/8083, which is correct because the
+    # BROWSER calls those services, and the browser is on the host.
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    depends_on:
+      plan-gateway:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:3000/ || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    logging: *default-logging
 
 volumes:
   postgres-data:
