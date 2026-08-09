@@ -331,6 +331,31 @@ func (r *Rounds) readInputs(ctx context.Context, tx pgx.Tx, key domain.RoundKey,
 		return port.RoundInputs{}, fmt.Errorf("reading the live plan for %s: %w", key, err)
 	}
 
+	if inputs.LivePlanID != nil {
+		// Who holds a slot the re-plan is about to contest. Read from the
+		// acquisitions, not the candidate ledger: a holder whose candidates
+		// have since expired is exactly the one most likely to be dropped, and
+		// most in need of being told.
+		holderRows, holdersErr := tx.Query(ctx, `
+			SELECT DISTINCT request_id::text FROM planning.acquisitions
+			WHERE plan_id = $1 AND status = 'ACTIVE'
+		`, *inputs.LivePlanID)
+		if holdersErr != nil {
+			return port.RoundInputs{}, fmt.Errorf("reading the live plan's holders: %w", holdersErr)
+		}
+		defer holderRows.Close()
+		for holderRows.Next() {
+			var requestID string
+			if scanErr := holderRows.Scan(&requestID); scanErr != nil {
+				return port.RoundInputs{}, fmt.Errorf("scanning a holder: %w", scanErr)
+			}
+			inputs.LivePlanHolders = append(inputs.LivePlanHolders, requestID)
+		}
+		if rowsErr := holderRows.Err(); rowsErr != nil {
+			return port.RoundInputs{}, fmt.Errorf("reading holders: %w", rowsErr)
+		}
+	}
+
 	// The next version is dense per bucket. collection_plans_unique_version is
 	// the backstop that says so out loud if two rounds ever race past the lock.
 	if err := tx.QueryRow(ctx, `

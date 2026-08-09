@@ -244,6 +244,11 @@ func buildUnfulfilledEvent(r port.Round, u domain.Unfulfilment, inputs port.Roun
 		explanation.Deadline = &deadline
 		populated = true
 	}
+	if u.Detail.SupersededByPlanID != "" {
+		superseded := events.Uuid(u.Detail.SupersededByPlanID)
+		explanation.SupersededByPlanId = &superseded
+		populated = true
+	}
 
 	data := events.PlanningRequestUnfulfilledData{
 		RequestId:  events.Uuid(u.RequestID),

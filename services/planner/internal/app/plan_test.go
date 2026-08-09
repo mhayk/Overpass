@@ -224,3 +224,89 @@ func inputsVersion(inputs port.RoundInputs) int {
 	}
 	return inputs.NextPlanVersion
 }
+
+// A holder the re-plan drops gets SUPERSEDED — overriding the competitive
+// reason, because "you HAD a slot and the re-plan dropped you" is what the
+// customer experiences. The numbers stay; the code names the event.
+func TestADroppedHolderIsReportedSuperseded(t *testing.T) {
+	inputs := contested()
+	livePlan := "dddddddd-0000-4000-8000-00000000000d"
+	inputs.LivePlanID = &livePlan
+	inputs.LivePlanRowVersion = 1
+	inputs.NextPlanVersion = 2
+	// The POOR request held a slot in v1; the rich one arrived since.
+	inputs.LivePlanHolders = []string{"bbbbbbbb-0000-4000-8000-000000000002"}
+
+	plan := openPlan(t, inputs)
+
+	if len(plan.UnfulfilledEvents) != 1 {
+		t.Fatalf("%d unfulfilment events, want 1", len(plan.UnfulfilledEvents))
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal(plan.UnfulfilledEvents[0].Payload, &envelope); err != nil {
+		t.Fatalf("payload: %v", err)
+	}
+	data := asMap(t, envelope["data"], "data")
+	if data["reason_code"] != domain.ReasonSuperseded {
+		t.Errorf("reason = %v, want %s — the holder lost a slot it HAD", data["reason_code"], domain.ReasonSuperseded)
+	}
+	if data["eligible_for_retry"] != true {
+		t.Error("a superseded request must return to contention, not silently disappear")
+	}
+	explanation := asMap(t, data["explanation"], "explanation")
+	if explanation["superseded_by_plan_id"] != plan.PlanID {
+		t.Errorf("superseded_by_plan_id = %v, want the replacing plan %s — ADR-0012 retained the rows so this reference has something to point at",
+			explanation["superseded_by_plan_id"], plan.PlanID)
+	}
+	// The competitive numbers survive the override.
+	if _, ok := explanation["duty_cycle_required_s"]; !ok {
+		t.Error("the override discarded the structured detail; 'why did the re-plan drop me' is unanswerable")
+	}
+}
+
+// A holder whose candidates have all EXPIRED still gets told. The conservation
+// ledger promises outcomes for who competed; this promise is older, made when
+// the plan committed.
+func TestAHolderWithNoRemainingCandidatesStillGetsAnEvent(t *testing.T) {
+	inputs := someInputs()
+	livePlan := "eeeeeeee-0000-4000-8000-00000000000e"
+	inputs.LivePlanID = &livePlan
+	inputs.NextPlanVersion = 2
+	// A ghost from v1: holds a slot, has no candidates in this round at all.
+	inputs.LivePlanHolders = []string{"eeeeeeee-0000-4000-8000-000000000009"}
+
+	plan := openPlan(t, inputs)
+
+	found := false
+	for _, event := range plan.UnfulfilledEvents {
+		var envelope map[string]any
+		if err := json.Unmarshal(event.Payload, &envelope); err != nil {
+			t.Fatalf("payload: %v", err)
+		}
+		data := asMap(t, envelope["data"], "data")
+		if data["request_id"] == "eeeeeeee-0000-4000-8000-000000000009" {
+			found = true
+			if data["reason_code"] != domain.ReasonSuperseded {
+				t.Errorf("reason = %v", data["reason_code"])
+			}
+		}
+	}
+	if !found {
+		t.Fatal("the dropped holder vanished silently — the worst customer experience and the easiest bug to write")
+	}
+}
+
+// A holder the re-plan KEEPS is not superseded: nothing was lost.
+func TestAHolderThatStillWinsIsNotSuperseded(t *testing.T) {
+	inputs := someInputs()
+	livePlan := "ffffffff-0000-4000-8000-00000000000f"
+	inputs.LivePlanID = &livePlan
+	inputs.NextPlanVersion = 2
+	inputs.LivePlanHolders = []string{"aaaaaaaa-0000-4000-8000-000000000001"} // the winner
+
+	plan := openPlan(t, inputs)
+
+	if len(plan.UnfulfilledEvents) != 0 {
+		t.Fatalf("%d unfulfilment events for a holder that still flies", len(plan.UnfulfilledEvents))
+	}
+}
