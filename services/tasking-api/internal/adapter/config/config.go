@@ -18,13 +18,21 @@ import (
 
 // Config is everything this service reads from its environment.
 type Config struct {
-	Environment      string
-	Version          string
-	HTTPAddr         string
-	DatabaseURL      string
-	NATSURL          string
-	LogLevel         string
-	ShutdownTimeout  time.Duration
+	Environment     string
+	Version         string
+	HTTPAddr        string
+	DatabaseURL     string
+	NATSURL         string
+	LogLevel        string
+	ShutdownTimeout time.Duration
+
+	// IngressMaxConns and BackgroundMaxConns size the two pools separately —
+	// the bulkhead (#51). Ingress availability is the property this
+	// architecture exists to protect (ADR-0003), and a shared pool makes it
+	// depend on whatever else happens to be querying.
+	IngressMaxConns    int32
+	BackgroundMaxConns int32
+
 	SubmitTimeout    time.Duration
 	ReadinessTimeout time.Duration
 
@@ -66,6 +74,21 @@ func Load() (Config, error) {
 	if cfg.SubmitTimeout, err = duration("SUBMIT_TIMEOUT", 5*time.Second); err != nil {
 		return Config{}, err
 	}
+	// Ingress gets the larger share on purpose. The background work — the relay
+	// draining batches, the readiness probe — is throughput-shaped and can wait;
+	// a refused submission is business damage.
+	ingress, err := positiveInt("DB_INGRESS_MAX_CONNS", 8)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.IngressMaxConns = int32(ingress) //nolint:gosec // bounded by positiveInt above
+
+	background, err := positiveInt("DB_BACKGROUND_MAX_CONNS", 4)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.BackgroundMaxConns = int32(background) //nolint:gosec // as above
+
 	if cfg.ReadinessTimeout, err = duration("READINESS_TIMEOUT", 2*time.Second); err != nil {
 		problems = append(problems, err.Error())
 	}
@@ -138,4 +161,21 @@ func duration(key string, fallback time.Duration) (time.Duration, error) {
 		return 0, fmt.Errorf("%s must be positive, got %q", key, raw)
 	}
 	return d, nil
+}
+
+// positiveInt reads a count that must be at least one.
+//
+// Refuses a zero rather than treating it as "unlimited": a pool sized zero
+// accepts no work at all, and the failure would look like a hang at startup
+// rather than a misconfiguration.
+func positiveInt(key string, fallback int) (int, error) {
+	raw, ok := os.LookupEnv(key)
+	if !ok || raw == "" {
+		return fallback, nil
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n < 1 {
+		return 0, fmt.Errorf("%s must be a positive integer, got %q", key, raw)
+	}
+	return n, nil
 }
