@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -33,6 +34,7 @@ from nats.js.errors import NotFoundError
 from opentelemetry.trace import Status, StatusCode
 
 from feasibility import failures
+from feasibility.messaging import consume
 from feasibility.messaging.idempotency import (
     Delivery,
     NonRetryableError,
@@ -56,6 +58,11 @@ STREAM = "TASKING"
 # stall the request, long enough that a database that is down does not get five
 # attempts inside a second and burn the whole max_deliver budget on one outage.
 _NAK_DELAY_S = 5.0
+
+# Mirrors deploy/nats/init.sh for feasibility-worker. The poison decision needs
+# it to terminate the LAST attempt deliberately instead of letting the broker's
+# counter lapse into a silent drop.
+_MAX_DELIVER = 5
 
 
 @dataclass(frozen=True)
@@ -173,9 +180,23 @@ def handle_one(
         return Outcome.FAILED_RETRYABLE
 
 
-async def _settle(msg: Msg, outcome: Outcome) -> None:
+async def _settle(msg: Msg, outcome: Outcome, delivered_count: int = 1) -> None:
     """Tell the broker what happened. Called only after the transaction ended."""
     if outcome is Outcome.FAILED_RETRYABLE:
+        # Retry until the LAST delivery, then terminate DELIBERATELY (#48). A
+        # lapsed max_deliver is a silent drop; a term has the log line below
+        # and a metric. Permanent failures never reach here — they are
+        # FAILED_TERMINAL, publish their refusal, and ack.
+        if (
+            consume.on_failure(permanent=False, delivered=delivered_count, max_deliver=_MAX_DELIVER)
+            is consume.Decision.TERMINATE
+        ):
+            log.error(
+                "terminating after %d deliveries; retrying has not fixed it",
+                delivered_count,
+            )
+            await msg.term()
+            return
         await msg.nak(delay=_NAK_DELAY_S)
     else:
         # PROCESSED, DUPLICATE and FAILED_TERMINAL all ack.
@@ -192,6 +213,7 @@ async def run(
     handler_factory: Callable[[Delivery], Callable[[psycopg.Cursor[Any]], None]],
     stop: asyncio.Event | None = None,
     max_batches: int | None = None,
+    metrics: consume.Metrics | None = None,
 ) -> int:
     """Run the consume loop until `stop` is set or `max_batches` is reached.
 
@@ -202,6 +224,7 @@ async def run(
     Returns the number of messages settled.
     """
     stop = stop or asyncio.Event()
+    metrics = metrics if metrics is not None else consume.Metrics()
     client = NatsClient()
     await client.connect(servers=[config.nats_url])
     settled = 0
@@ -230,6 +253,7 @@ async def run(
                     continue
 
                 for msg in messages:
+                    received = time.monotonic()
                     try:
                         delivery = delivery_from(msg)
                     except NonRetryableError:
@@ -239,6 +263,7 @@ async def run(
                         log.exception("undeliverable message on %s", msg.subject)
                         await msg.term()
                         settled += 1
+                        metrics.terminated += 1
                         continue
 
                     # The consumer span wraps the work AND the settle, so the
@@ -267,8 +292,14 @@ async def run(
                             # retryable failure is an expected state of this
                             # system rather than a fault of this span.
                             span.set_status(Status(StatusCode.ERROR, "retryable failure"))
-                        await _settle(msg, outcome)
+                        await _settle(msg, outcome, delivery.delivered_count)
                     settled += 1
+                    metrics.record(outcome, delivery.delivered_count, time.monotonic() - received)
+                    if (
+                        outcome is Outcome.FAILED_RETRYABLE
+                        and delivery.delivered_count >= _MAX_DELIVER
+                    ):
+                        metrics.terminated += 1
     finally:
         await client.drain()
 
