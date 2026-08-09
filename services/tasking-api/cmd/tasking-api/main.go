@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -103,15 +104,31 @@ func run(ctx context.Context) error {
 		}
 	}()
 
-	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
+	// TWO POOLS, not one — the bulkhead (#51).
+	//
+	// Ingress and the background work are separated so that neither can consume
+	// the other's capacity. The relay drains batches and the readiness probe
+	// runs on a timer; both are throughput-shaped and can wait. A submission
+	// cannot: refusing one is business damage, and ADR-0003 makes ingress
+	// availability the property this architecture exists to protect.
+	//
+	// A shared pool makes that property depend on whatever else is querying at
+	// the time, which is precisely the coupling a bulkhead removes.
+	ingressPool, err := openPool(ctx, cfg.DatabaseURL, cfg.IngressMaxConns, "overpass-tasking-api-ingress")
 	if err != nil {
-		return err
+		return fmt.Errorf("ingress pool: %w", err)
 	}
-	defer pool.Close()
+	defer ingressPool.Close()
 
-	health := app.NewHealthService(cfg.Version, cfg.ReadinessTimeout, postgres.NewProbe(pool))
+	backgroundPool, err := openPool(ctx, cfg.DatabaseURL, cfg.BackgroundMaxConns, "overpass-tasking-api-background")
+	if err != nil {
+		return fmt.Errorf("background pool: %w", err)
+	}
+	defer backgroundPool.Close()
+
+	health := app.NewHealthService(cfg.Version, cfg.ReadinessTimeout, postgres.NewProbe(backgroundPool))
 	submitter := app.NewSubmitService(
-		postgres.NewSubmissions(pool),
+		postgres.NewSubmissions(ingressPool),
 		systemClock{},
 		domain.ConfiguredSensors(),
 		domain.DefaultValidationPolicy(),
@@ -128,7 +145,7 @@ func run(ctx context.Context) error {
 	// a reviewer's laptop, and the definition of done is about that laptop.
 	// Splitting it is a packaging change, not a code change.
 	var wg sync.WaitGroup
-	if closeRelay, relayErr := startRelay(ctx, cfg, pool, log, &wg); relayErr != nil {
+	if closeRelay, relayErr := startRelay(ctx, cfg, backgroundPool, log, &wg); relayErr != nil {
 		log.Warn("outbox relay not started; events will accumulate unpublished",
 			slog.Any("error", relayErr))
 	} else {
@@ -138,6 +155,26 @@ func run(ctx context.Context) error {
 	serveErr := httpapi.Serve(ctx, server, cfg.ShutdownTimeout, log)
 	wg.Wait()
 	return serveErr
+}
+
+// openPool builds one pool with its own size and its own application_name.
+//
+// The name is not decoration. It is what makes the bulkhead visible in
+// pg_stat_activity during an incident — "which half is holding the
+// connections" is otherwise a question nobody can answer — and it is what the
+// integration test asserts on, because two pools that are separate in the code
+// and identical on the wire would be a bulkhead in name only.
+func openPool(ctx context.Context, dsn string, maxConns int32, name string) (*pgxpool.Pool, error) {
+	poolCfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		return nil, err
+	}
+	// Set, not appended to a DSN string: a DSN that already carries
+	// pool_max_conns would otherwise win silently, and the bulkhead would be
+	// whatever the environment happened to say.
+	poolCfg.MaxConns = maxConns
+	poolCfg.ConnConfig.RuntimeParams["application_name"] = name
+	return pgxpool.NewWithConfig(ctx, poolCfg)
 }
 
 // startRelay connects to NATS and drains the outbox in the background.

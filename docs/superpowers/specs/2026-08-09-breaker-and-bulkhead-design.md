@@ -2,6 +2,10 @@
 
 Approved 2026-08-09.
 
+**Status:** breaker done (#181), bulkhead done. Still open on #51: the audit of
+outbound timeouts, and the breaker gauge, which needs the `/metrics` surface
+#53 brings.
+
 ## What this system actually calls
 
 The acceptance criteria say "circuit breaker on cross-service HTTP and on the
@@ -52,11 +56,22 @@ hung.
 
 ## The bulkhead
 
-tasking-api opens a second pool for the submit path, small and its own, so a
-burst of read traffic or a slow health query cannot leave ingress without a
-connection. ADR-0003's position is that ingress availability is the property
-this architecture exists to protect; a shared pool makes that property depend on
+tasking-api opens two pools — `overpass-tasking-api-ingress` and
+`overpass-tasking-api-background` — sized independently. The relay and the
+readiness probe take the background one; the submit path has its own.
+ADR-0003's position is that ingress availability is the property this
+architecture exists to protect, and a shared pool makes that property depend on
 whatever else happens to be querying.
+
+**What the test can and cannot show.** That the pools are genuinely separate is
+asserted against `pg_stat_activity`, by name and by cap — two pools identical on
+the wire would be a bulkhead in name only. That background work can *starve*
+ingress today cannot be shown from outside, because the relay and the submit
+path write the same table, so anything blocking one blocks the other. The
+separation is the mechanism; the starvation it prevents arrives with the first
+read endpoint or the first slow background job, and this is cheaper to have
+before that than after. Said plainly rather than dressed up as a stronger
+result.
 
 ## Out of scope
 
