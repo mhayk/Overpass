@@ -202,6 +202,17 @@ type MessageSource interface {
 	// Term stops delivery on purpose: poison, or the final attempt of a
 	// failure retrying has not fixed.
 	Term(ctx context.Context, m Message) error
+	// Deadletter hands the message to its DLQ subject, with the terminal error
+	// class as the reason. Called BEFORE Term, and a failure means Nak rather
+	// than Term (ADR-0017): a Term without a landed dead letter is the silent
+	// loss the DLQ exists to prevent — and this service is a pure projector, so
+	// a message it drops exists nowhere else.
+	//
+	// The reason is all the application supplies. The trace context, the
+	// delivery count and the consumer name are transport detail the adapter
+	// already holds, and routing them through this port would put the transport
+	// back into the interface that exists to keep it out.
+	Deadletter(ctx context.Context, m Message, reason string) error
 }
 
 // Reads serves the REST endpoints.

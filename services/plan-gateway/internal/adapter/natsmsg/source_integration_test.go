@@ -8,6 +8,8 @@ import (
 
 	"github.com/nats-io/nats.go"
 
+	"github.com/mhayk/overpass/lib/go/consume"
+
 	"github.com/mhayk/overpass/services/plan-gateway/internal/adapter/natsmsg"
 	"github.com/mhayk/overpass/services/plan-gateway/internal/port"
 )
@@ -135,4 +137,70 @@ func drainFor(t *testing.T, source *natsmsg.Source, eventID string) (port.Messag
 		}
 	}
 	return port.Message{}, false
+}
+
+// The claim #49 actually makes: a terminated message is still there afterwards.
+//
+// The subject mapping and the DLQ streams' subject filters are declared in two
+// different files, and the consumer name in the header is built here from a
+// prefix and a stream name. Only a real broker can say all three agree — and a
+// misattributed dead letter sends an operator to the wrong service.
+func TestADeadLetteredMessageLandsInTheDlqStreamWithItsHeaders(t *testing.T) {
+	js, _ := connect(t)
+
+	source, bindErr := natsmsg.Bind(js, "gateway-projector", 8, 200*time.Millisecond)
+	if bindErr != nil {
+		t.Fatalf("bind: %v", bindErr)
+	}
+	t.Cleanup(func() {
+		if drainErr := source.Drain(); drainErr != nil {
+			t.Errorf("drain: %v", drainErr)
+		}
+	})
+
+	const traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+	eventID := "dddddddd-0000-4000-8000-" + time.Now().UTC().Format("150405.000000")[:12]
+	payload := []byte(`{"event_id":"` + eventID + `","poison":true}`)
+
+	msg := nats.NewMsg("planning.plan.committed.v1")
+	msg.Data = payload
+	msg.Header.Set("Nats-Msg-Id", eventID)
+	msg.Header.Set("traceparent", traceparent)
+	if _, err := js.PublishMsg(msg); err != nil {
+		t.Fatalf("publishing: %v", err)
+	}
+
+	got, found := drainFor(t, source, eventID)
+	if !found {
+		t.Fatal("the poison message never arrived; nothing was dead-lettered")
+	}
+	// The projector's sequence, exactly: publish, then Term.
+	if err := source.Deadletter(t.Context(), got, consume.ReasonContract); err != nil {
+		t.Fatalf("dead-lettering: %v", err)
+	}
+	if err := source.Term(t.Context(), got); err != nil {
+		t.Fatalf("terming after the dead letter: %v", err)
+	}
+
+	stored, err := js.GetLastMsg("DLQ_PLANNING", consume.SubjectPrefix+"planning.plan.committed.v1")
+	if err != nil {
+		t.Fatalf("reading DLQ_PLANNING: %v — the dlq. subject and the stream's filter disagree", err)
+	}
+	if id := stored.Header.Get(consume.HeaderMsgID); id != eventID {
+		t.Fatalf("last dead letter is %q, not the one this test made (%q)", id, eventID)
+	}
+	if string(stored.Data) != string(payload) {
+		t.Errorf("payload = %q, want it byte-identical — replay republishes these bytes", stored.Data)
+	}
+	// Built here from a prefix and a stream name, so it is the header most
+	// likely to be quietly wrong.
+	if got := stored.Header.Get(consume.HeaderConsumer); got != "gateway-projector-planning" {
+		t.Errorf("%s = %q, want gateway-projector-planning", consume.HeaderConsumer, got)
+	}
+	if got := stored.Header.Get(consume.HeaderTraceparent); got != traceparent {
+		t.Errorf("traceparent = %q, want it preserved so the failure stays inspectable", got)
+	}
+	if got := stored.Header.Get(consume.HeaderReason); got != consume.ReasonContract {
+		t.Errorf("%s = %q, want %q", consume.HeaderReason, got, consume.ReasonContract)
+	}
 }

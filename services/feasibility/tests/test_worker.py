@@ -297,6 +297,17 @@ async def test_a_failure_that_never_heals_is_terminated_on_the_last_delivery(
     assert metrics.terminated == 1
     assert metrics.redeliveries == 4
 
+    # #49: the Term kept the payload. Without this the five attempts end in a
+    # deliberate, logged, counted DROP — better than a lapsed max_deliver, and
+    # still a customer's request gone.
+    assert metrics.deadlettered == 1
+    stored = await last_dead_letter(SUBJECT)
+    assert stored.headers is not None
+    assert stored.headers["Overpass-Dlq-Reason"] == consume.REASON_EXHAUSTED
+    assert stored.headers["Overpass-Dlq-Consumer"] == CONSUMER
+    assert stored.headers["Overpass-Dlq-Delivery-Count"] == "5"
+    assert stored.headers["Nats-Msg-Id"] == event_id
+
     client = await nats.connect(servers=[_nats_url()])
     try:
         info = await client.jetstream().consumer_info("TASKING", CONSUMER)
@@ -318,13 +329,41 @@ async def test_an_unparseable_envelope_is_terminated_not_retried(
 ) -> None:
     # No event_id means nothing to deduplicate on. Redelivering it five times
     # cannot help, so it is terminated rather than left to burn the budget.
-    await publish(b'{"not":"an envelope"}', count=1)
+    payload = b'{"not":"an envelope","marker":"dlq-decode"}'
+    await publish(payload, count=1)
     settled = await run(config(), counting_handler, max_batches=2)
     assert settled >= 1
+
+    # #49: an envelope nothing can read is exactly the message with no id to
+    # deduplicate on — and exactly the one an operator needs to SEE, because
+    # something upstream is publishing garbage.
+    stored = await last_dead_letter(SUBJECT)
+    assert stored.data == payload, "the dead letter must carry the original bytes"
+    assert stored.headers is not None
+    assert stored.headers["Overpass-Dlq-Reason"] == consume.REASON_DECODE
+    # No Nats-Msg-Id: there was no id to preserve, and a blank one would be a
+    # dedup key every unreadable message would share.
+    assert "Nats-Msg-Id" not in stored.headers
 
     client = await nats.connect(servers=[_nats_url()])
     try:
         info = await client.jetstream().consumer_info("TASKING", CONSUMER)
         assert info.num_pending == 0
+    finally:
+        await client.drain()
+
+
+async def last_dead_letter(subject: str) -> Any:
+    """The most recent dead letter for `subject`, straight from the DLQ stream.
+
+    Reading the stream rather than trusting a counter: the counter and the
+    stream disagree exactly when the subject mapping is wrong, which is the
+    failure this is here to catch.
+    """
+    client = await nats.connect(servers=[_nats_url()])
+    try:
+        return await client.jetstream().get_last_msg(
+            "DLQ_TASKING", consume.DLQ_SUBJECT_PREFIX + subject
+        )
     finally:
         await client.drain()

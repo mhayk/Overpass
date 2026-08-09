@@ -8,8 +8,11 @@ import (
 
 	"github.com/nats-io/nats.go"
 
+	"github.com/mhayk/overpass/lib/go/consume"
+
 	"github.com/mhayk/overpass/services/planner/internal/adapter/natsmsg"
 	"github.com/mhayk/overpass/services/planner/internal/app"
+	"github.com/mhayk/overpass/services/planner/internal/port"
 )
 
 // Against a real broker, because every claim here is about the broker.
@@ -136,6 +139,98 @@ func TestAPublishedMessageReachesTheProjector(t *testing.T) {
 
 	if !found {
 		t.Fatal("a message published to a subject planner-lifecycle filters on never arrived")
+	}
+}
+
+// The claim #49 actually makes: a terminated message is still there afterwards.
+//
+// Everything upstream of this can be true — the header builder, the ordering in
+// the projector, the reason vocabulary — while the message never reaches a DLQ
+// stream, because the subject mapping and the stream's subject filter are
+// declared in two different files. Only a real broker can say they agree.
+func TestADeadLetteredMessageLandsInTheDlqStreamWithItsHeaders(t *testing.T) {
+	js, _ := connect(t)
+
+	source, bindErr := natsmsg.Bind(js, 8, 2*time.Second)
+	if bindErr != nil {
+		t.Fatalf("bind: %v", bindErr)
+	}
+	t.Cleanup(func() {
+		if err := source.Drain(); err != nil {
+			t.Logf("draining: %v", err)
+		}
+	})
+
+	const traceparent = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+	eventID := "cccccccc-0000-4000-8000-" + time.Now().UTC().Format("150405.000000")[:12]
+	payload := []byte(`{"event_id":"` + eventID + `","poison":true}`)
+
+	msg := nats.NewMsg(app.SubjectRequestReceived)
+	msg.Data = payload
+	msg.Header.Set("Nats-Msg-Id", eventID)
+	msg.Header.Set("traceparent", traceparent)
+	if _, err := js.PublishMsg(msg); err != nil {
+		t.Fatalf("publishing: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	var dead bool
+	for !dead && ctx.Err() == nil {
+		batch, err := source.Next(ctx)
+		if err != nil {
+			t.Fatalf("next: %v", err)
+		}
+		for _, m := range batch {
+			if m.EventID != eventID {
+				// Another test's message, or another run's. Ack and move on.
+				if err := source.Ack(context.Background(), m); err != nil {
+					t.Errorf("acking a bystander: %v", err)
+				}
+				continue
+			}
+			// The projector's sequence, exactly: publish, then Term.
+			if err := source.Deadletter(ctx, m, consume.ReasonContract); err != nil {
+				t.Fatalf("dead-lettering: %v", err)
+			}
+			if err := source.Term(ctx, m); err != nil {
+				t.Fatalf("terming after the dead letter: %v", err)
+			}
+			dead = true
+		}
+	}
+	if !dead {
+		t.Fatal("the poison message never arrived; nothing was dead-lettered")
+	}
+
+	stored, err := js.GetLastMsg("DLQ_TASKING", consume.SubjectPrefix+app.SubjectRequestReceived)
+	if err != nil {
+		t.Fatalf("reading DLQ_TASKING: %v — the dlq. subject and the stream's filter disagree", err)
+	}
+	if got := stored.Header.Get(consume.HeaderMsgID); got != eventID {
+		t.Fatalf("last dead letter is %q, not the one this test made (%q)", got, eventID)
+	}
+	if string(stored.Data) != string(payload) {
+		t.Errorf("payload = %q, want it byte-identical — replay republishes these bytes", stored.Data)
+	}
+	for _, want := range []struct{ header, value string }{
+		{consume.HeaderReason, consume.ReasonContract},
+		{consume.HeaderOriginalSubject, app.SubjectRequestReceived},
+		{consume.HeaderConsumer, port.ConsumerLifecycle},
+		// Preserved, so the failure is inspectable in Grafana rather than
+		// reconstructed from logs.
+		{consume.HeaderTraceparent, traceparent},
+	} {
+		if got := stored.Header.Get(want.header); got != want.value {
+			t.Errorf("%s = %q, want %q", want.header, got, want.value)
+		}
+	}
+	if stored.Header.Get(consume.HeaderFailedAt) == "" {
+		t.Error("no Overpass-Dlq-Failed-At; the terminal decision has no time on it")
+	}
+	if stored.Header.Get(consume.HeaderDeliveryCount) == "" {
+		t.Error("no Overpass-Dlq-Delivery-Count; how hard it was tried is unrecorded")
 	}
 }
 
