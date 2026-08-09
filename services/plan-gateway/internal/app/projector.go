@@ -4,12 +4,23 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
 
+	"github.com/mhayk/overpass/lib/go/consume"
+
 	"github.com/mhayk/overpass/services/plan-gateway/internal/port"
 )
+
+// maxDeliver mirrors deploy/nats/init.sh for the gateway's three consumers.
+// Higher than the workers' (10, not 5), because a pure projector with no side
+// effects beyond its own tables can afford more retries — and the poison
+// decision is what keeps that budget for genuinely transient failures instead
+// of letting malformed payloads burn it, which is precisely what the demo's
+// "hello" messages spent an hour doing at this consumer.
+const maxDeliver = 10
 
 // Projector folds a stream of events into the read models.
 type Projector struct {
@@ -17,6 +28,9 @@ type Projector struct {
 	projection port.Projection
 	decode     port.Decoder
 	log        *slog.Logger
+
+	// Metrics is exported so main can serve it and M3-06 can scrape it.
+	Metrics consume.Metrics
 }
 
 // NewProjector wires the loop.
@@ -53,15 +67,36 @@ func (p *Projector) Run(ctx context.Context) error {
 }
 
 func (p *Projector) handle(ctx context.Context, m port.Message) {
+	received := time.Now()
+	if m.Delivered > 1 {
+		p.Metrics.Redelivered()
+	}
+
 	// Fold first, ack second, always in that order. Acking on receipt would
 	// make a crash mid-fold lose the event permanently; this way it redelivers
 	// and the fold's own idempotency absorbs the duplicate.
 	if err := p.Apply(ctx, m); err != nil {
-		p.log.Error("fold failed; will redeliver",
+		// A malformed payload will be malformed on redelivery too: permanent,
+		// terminated on the first delivery. Everything else retries until the
+		// LAST delivery, then terminates deliberately — a lapsed max_deliver
+		// is a silent drop, a Term has this log line and a metric.
+		permanent := errors.Is(err, port.ErrMalformed)
+		decision := consume.OnFailure(permanent, m.Delivered, maxDeliver)
+		p.log.Error("fold failed",
 			slog.String("subject", m.Subject),
 			slog.String("event_id", m.EventID),
 			slog.Uint64("sequence", m.Sequence),
+			slog.Uint64("delivered", m.Delivered),
+			slog.Bool("permanent", permanent),
+			slog.String("decision", decision.String()),
 			slog.Any("error", err))
+		if decision == consume.Terminate {
+			p.Metrics.Terminated()
+			if termErr := p.source.Term(ctx, m); termErr != nil {
+				p.log.Warn("term failed", slog.Any("error", termErr))
+			}
+			return
+		}
 		if nakErr := p.source.Nak(ctx, m); nakErr != nil {
 			p.log.Warn("nak failed", slog.Any("error", nakErr))
 		}
@@ -72,7 +107,10 @@ func (p *Projector) handle(ctx context.Context, m port.Message) {
 		// cursor guard will Ignore it, which is exactly why the guard exists.
 		p.log.Warn("ack failed; the event will redeliver and be ignored",
 			slog.String("event_id", m.EventID), slog.Any("error", err))
+		return
 	}
+	p.Metrics.Processed()
+	p.Metrics.AckAfter(time.Since(received))
 }
 
 // Apply routes one message to the matching fold and advances the cursor.
