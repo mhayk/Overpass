@@ -88,6 +88,7 @@ expect_mutant_blocks() {
 
 W1="tstzrange('2031-03-01 10:00:00+00','2031-03-01 10:05:00+00')"
 W2="tstzrange('2031-03-01 10:03:00+00','2031-03-01 10:08:00+00')"   # overlaps W1
+W3="tstzrange('2031-03-01 13:03:00+00','2031-03-01 13:08:00+00')"   # disjoint from W1 and W2: the #163 cases must be probative for 00011 alone
 POLY="ST_GeomFromText('POLYGON((0 0,0 1,1 1,1 0,0 0))',4326)"
 
 cleanup() {
@@ -160,47 +161,63 @@ sql "INSERT INTO planning.collection_plans (plan_id, round_id, satellite_id, buc
             ('bbbbbbbb-0000-0000-0000-0000000000ff','00000000-0000-0000-0000-0000000000ff','DBTEST-B',
              tstzrange('2031-03-01 09:00:00+00','2031-03-01 12:00:00+00'), 1, 'DBTEST', now())"
 
-# acq <id> <satellite> <plan> <status> <window> [superseded_at]
+# acq <id> <satellite> <plan> <status> <window> <request>
+#
+# The request id is a PARAMETER since 00011: one request may hold one ACTIVE
+# acquisition GLOBALLY, so a helper that reused a single request for every row
+# would make every window case reject for the wrong reason — a case that stops
+# being probative for the constraint it names is worse than no case at all.
+# Window-semantics cases therefore use DISTINCT requests, and the one-active
+# cases below say explicitly when they share one.
 acq() {
   local sup="NULL"; [[ "$4" == "SUPERSEDED" ]] && sup="now()"
   echo "INSERT INTO planning.acquisitions
           (acquisition_id, plan_id, request_id, opportunity_id, customer_id, satellite_id,
            mode, acq_window, geometry, footprint, duty_cycle_cost_s, awarded_value_credits,
            status, superseded_at)
-        VALUES ('$1','$3','00000000-0000-0000-0000-0000000000ff',gen_random_uuid(),
+        VALUES ('$1','$3','$6',gen_random_uuid(),
                 'dbtest-customer','$2','SPOTLIGHT',$5,'{}'::jsonb,$POLY,30,100,'$4',$sup)"
 }
+
+R0=00000000-0000-0000-0000-0000000000ff
+R1=00000001-0000-0000-0000-0000000000ff
+R2=00000002-0000-0000-0000-0000000000ff
+R3=00000003-0000-0000-0000-0000000000ff
+R4=00000004-0000-0000-0000-0000000000ff
+R5=00000005-0000-0000-0000-0000000000ff
+R6=00000006-0000-0000-0000-0000000000ff
+R7=00000007-0000-0000-0000-0000000000ff
 
 PA=aaaaaaaa-0000-0000-0000-0000000000ff
 PB=bbbbbbbb-0000-0000-0000-0000000000ff
 
 expect accepts "baseline live acquisition" \
-  "$(acq 10000000-0000-0000-0000-0000000000ff DBTEST-A $PA ACTIVE "$W1")"
+  "$(acq 10000000-0000-0000-0000-0000000000ff DBTEST-A $PA ACTIVE "$W1" $R0)"
 
 expect rejects "two overlapping live acquisitions, raw SQL, no application code" \
-  "$(acq 10000001-0000-0000-0000-0000000000ff DBTEST-A $PA ACTIVE "$W2")"
+  "$(acq 10000001-0000-0000-0000-0000000000ff DBTEST-A $PA ACTIVE "$W2" $R1)"
 
 expect accepts "the same window on a DIFFERENT satellite" \
-  "$(acq 10000002-0000-0000-0000-0000000000ff DBTEST-B $PB ACTIVE "$W2")"
+  "$(acq 10000002-0000-0000-0000-0000000000ff DBTEST-B $PB ACTIVE "$W2" $R2)"
 
 expect accepts "an overlapping SUPERSEDED row — history survives re-planning" \
-  "$(acq 10000003-0000-0000-0000-0000000000ff DBTEST-A $PA SUPERSEDED "$W2")"
+  "$(acq 10000003-0000-0000-0000-0000000000ff DBTEST-A $PA SUPERSEDED "$W2" $R3)"
 
 expect accepts "the ACTIVE -> EXECUTED transition does not self-conflict" \
   "UPDATE planning.acquisitions SET status='EXECUTED'
      WHERE acquisition_id='10000000-0000-0000-0000-0000000000ff'"
 
 expect rejects "a new ACTIVE overlapping an EXECUTED acquisition" \
-  "$(acq 10000004-0000-0000-0000-0000000000ff DBTEST-A $PA ACTIVE "$W2")"
+  "$(acq 10000004-0000-0000-0000-0000000000ff DBTEST-A $PA ACTIVE "$W2" $R4)"
 
 expect rejects "two overlapping EXECUTED acquisitions" \
-  "$(acq 10000005-0000-0000-0000-0000000000ff DBTEST-A $PA EXECUTED "$W2")"
+  "$(acq 10000005-0000-0000-0000-0000000000ff DBTEST-A $PA EXECUTED "$W2" $R5)"
 
 expect rejects "status cannot be NULL — the partial predicate depends on it" \
   "INSERT INTO planning.acquisitions
      (acquisition_id, plan_id, request_id, opportunity_id, customer_id, satellite_id,
       mode, acq_window, geometry, footprint, duty_cycle_cost_s, awarded_value_credits, status)
-   VALUES ('10000006-0000-0000-0000-0000000000ff','$PA','00000000-0000-0000-0000-0000000000ff',
+   VALUES ('10000006-0000-0000-0000-0000000000ff','$PA','$R6',
            gen_random_uuid(),'dbtest-customer','DBTEST-A','SPOTLIGHT',$W2,'{}'::jsonb,$POLY,30,100,NULL)"
 
 expect rejects "a recorded gap smaller than the recorded slew" \
@@ -208,10 +225,14 @@ expect rejects "a recorded gap smaller than the recorded slew" \
      WHERE acquisition_id='10000002-0000-0000-0000-0000000000ff'"
 
 # Supersession in the natural write order: insert the replacement first, demote
-# the incumbent second. This is the case an immediate constraint rejects.
+# the incumbent second. This is the case an immediate constraint rejects — for
+# BOTH deferred constraints now: the replacement is the SAME REQUEST as the
+# incumbent (that is what supersession is), so inside the transaction the
+# request briefly holds two ACTIVE rows and 00011 must tolerate it until COMMIT
+# exactly as 00004 tolerates the overlapping window.
 expect accepts "supersession in the natural write order (insert v2, then demote v1)" \
   "BEGIN;
-     $(acq 10000007-0000-0000-0000-0000000000ff DBTEST-A $PA ACTIVE "$W2");
+     $(acq 10000007-0000-0000-0000-0000000000ff DBTEST-A $PA ACTIVE "$W2" $R0);
      UPDATE planning.acquisitions SET status='SUPERSEDED', superseded_at=now()
        WHERE acquisition_id='10000000-0000-0000-0000-0000000000ff';
    COMMIT;"
@@ -219,8 +240,22 @@ expect accepts "supersession in the natural write order (insert v2, then demote 
 # Deferring moves WHEN the check runs, not WHETHER.
 expect rejects "a genuinely conflicting plan is still rejected at COMMIT" \
   "BEGIN;
-     $(acq 10000008-0000-0000-0000-0000000000ff DBTEST-A $PA ACTIVE "$W1");
+     $(acq 10000008-0000-0000-0000-0000000000ff DBTEST-A $PA ACTIVE "$W1" $R7);
    COMMIT;"
+
+# ---------------------------------------------------------------------------
+# 00011 — one ACTIVE acquisition per request, GLOBALLY (#163)
+# ---------------------------------------------------------------------------
+# The first full-stack demo awarded one request five ACTIVE acquisitions across
+# four satellites: the per-round invariant does not compose across
+# (satellite, bucket) partitions, and every earlier case here ran one request
+# per row so nothing noticed. These are the cases that would have.
+
+expect rejects "a second ACTIVE acquisition for the SAME request on a DIFFERENT satellite" \
+  "$(acq 10000009-0000-0000-0000-0000000000ff DBTEST-B $PB ACTIVE "$W3" $R0)"
+
+expect accepts "the same request SUPERSEDED elsewhere — history does not claim the request" \
+  "$(acq 1000000a-0000-0000-0000-0000000000ff DBTEST-B $PB SUPERSEDED "$W3" $R0)"
 
 # ---------------------------------------------------------------------------
 # Phase 3 — the planner's inputs (ADR-0015)
