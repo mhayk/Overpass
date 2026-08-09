@@ -35,6 +35,13 @@ SERVICES=(postgres nats otel-collector prometheus grafana)
 # One-shot containers that must complete with exit 0.
 ONESHOT=(nats-init migrate)
 
+# With the `app` profile (make up-all), the application services join the
+# readiness wait. feasibility has no healthcheck — it is a consumer with no
+# listener — so the "running counts as ready" branch below is what covers it.
+if [[ ",${COMPOSE_PROFILES:-}," == *",app,"* ]]; then
+  SERVICES+=(tasking-api feasibility planner plan-gateway web)
+fi
+
 cyan() { printf '\033[0;36m%s\033[0m\n' "$*"; }
 ok()   { printf '  \033[0;32m%-22s %s\033[0m\n' "$1" "$2"; }
 bad()  { printf '  \033[0;31m%-22s %s\033[0m\n' "$1" "$2"; }
@@ -98,8 +105,15 @@ printf '  NATS        nats://localhost:%s   monitor http://localhost:%s\n' \
   "${NATS_PORT:-4222}" "${NATS_MONITOR_PORT:-8222}"
 printf '  Prometheus  http://localhost:%s\n' "${PROMETHEUS_PORT:-9090}"
 printf '  Grafana     http://localhost:%s   (anonymous, no login)\n' "${GRAFANA_PORT:-3001}"
-printf '  OTLP        grpc localhost:%s   http localhost:%s\n\n' \
+printf '  OTLP        grpc localhost:%s   http localhost:%s\n' \
   "${OTLP_GRPC_PORT:-4317}" "${OTLP_HTTP_PORT:-4318}"
+if [[ ",${COMPOSE_PROFILES:-}," == *",app,"* ]]; then
+  printf '  Tasking API http://localhost:%s\n' "${TASKING_API_PORT:-8080}"
+  printf '  Gateway     http://localhost:%s\n' "${PLAN_GATEWAY_PORT:-8083}"
+  printf '  Planner     http://localhost:%s\n' "${PLANNER_PORT:-8084}"
+  printf '  Web         http://localhost:%s\n' "${WEB_PORT:-3000}"
+fi
+printf '\n'
 
 if (( elapsed > BUDGET_SECONDS )); then
   bad "BUDGET" "exceeded by $(( elapsed - BUDGET_SECONDS ))s"

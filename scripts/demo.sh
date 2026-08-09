@@ -15,4 +15,14 @@ if ! command -v uv >/dev/null 2>&1; then
   exit 1
 fi
 
+# The demo drives the running system; it does not start one. `make up-all`
+# brings the application services (#166), `make seed` gives the sweep a
+# constellation. Checked here because "connection refused" twenty lines into
+# a demo is a worse first impression than one line naming the fix.
+if ! curl -sf "${TASKING_API_URL:-http://localhost:8080}/readyz" >/dev/null 2>&1; then
+  echo "error: tasking-api is not answering on ${TASKING_API_URL:-http://localhost:8080}." >&2
+  echo "       run 'make up-all' (and 'make seed' once) first." >&2
+  exit 1
+fi
+
 exec uv run --quiet --no-project python scripts/demo.py "$@"
