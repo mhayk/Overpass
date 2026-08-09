@@ -1,9 +1,10 @@
-"""The #48 hardening: poison decision, metrics, cleanup guard.
+"""The #48 hardening: poison decision, metrics, cleanup guard — and the #49
+dead-lettering that turns a Term from a drop into a handoff.
 
-The decision and metrics tests are pure. The cleanup tests run against a real
-Postgres — the guard protects a DELETE, and a version with a fake connection
-would test the mock — so they skip unless `OVERPASS_TEST_DSN` is set, same as
-`test_idempotency.py`.
+The decision, metrics and dead-letter tests are pure. The cleanup tests run
+against a real Postgres — the guard protects a DELETE, and a version with a
+fake connection would test the mock — so they skip unless `OVERPASS_TEST_DSN`
+is set, same as `test_idempotency.py`.
 
 Mirrors `lib/go/consume` case for case, so the Go and Python halves of the
 design are held to the same bar.
@@ -13,14 +14,23 @@ from __future__ import annotations
 
 import os
 import uuid
-from datetime import timedelta
-from typing import TYPE_CHECKING, Any
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Any, cast
 
 import psycopg
 import pytest
+from nats.js import JetStreamContext
 
 from feasibility.messaging import consume
-from feasibility.messaging.consume import Decision, Metrics, cleanup, on_failure
+from feasibility.messaging.consume import (
+    DeadLetter,
+    Decision,
+    Metrics,
+    cleanup,
+    on_failure,
+    publish_dead_letter,
+)
 from feasibility.messaging.idempotency import Outcome
 
 if TYPE_CHECKING:
@@ -82,6 +92,181 @@ def test_metrics_count_each_outcome_where_an_operator_expects_it() -> None:
 
 def test_metrics_mean_is_zero_before_any_ack_rather_than_a_crash() -> None:
     assert Metrics().ack_latency_mean_s == 0.0
+
+
+def test_metrics_count_dead_letters() -> None:
+    """`terminated` minus `deadlettered` is how many messages this worker
+    dropped without keeping a copy — which is why they are two counters."""
+    m = Metrics()
+    m.deadlettered += 2
+
+    assert m.deadlettered == 2
+    assert m.terminated == 0
+
+
+# --- dead letters ------------------------------------------------------------
+
+
+class Recorder:
+    """The publisher the worker's JetStream context will be.
+
+    Records rather than asserts, so each test below reads what actually went on
+    the wire — and it is a fake of a two-line interface, not a mock of NATS.
+    """
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self.calls = 0
+        self.subject = ""
+        self.payload = b""
+        self.headers: dict[str, str] = {}
+        self.error = error
+
+    async def publish(
+        self,
+        subject: str,
+        payload: bytes = b"",
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> object:
+        self.calls += 1
+        self.subject, self.payload, self.headers = subject, payload, dict(headers or {})
+        if self.error is not None:
+            raise self.error
+        return None
+
+
+def sample() -> DeadLetter:
+    return DeadLetter(
+        subject="tasking.request.received.v1",
+        payload=b'{"event_id":"9b2f0c0e-7f6f-4f6c-8f0c-2b3a4d5e6f70"}',
+        reason=consume.REASON_DECODE,
+        consumer="feasibility-worker",
+        delivered=5,
+        event_id="9b2f0c0e-7f6f-4f6c-8f0c-2b3a4d5e6f70",
+        traceparent="00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+        failed_at=datetime(2026, 8, 9, 14, 30, tzinfo=UTC),
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_dead_letter_goes_to_the_prefixed_subject() -> None:
+    """A prefix, not an infix: `tasking.dlq.>` is already inside the TASKING
+    stream's wildcard and NATS refuses overlapping streams."""
+    publisher = Recorder()
+
+    await publish_dead_letter(publisher, sample())
+
+    assert publisher.subject == "dlq.tasking.request.received.v1"
+
+
+@pytest.mark.asyncio
+async def test_a_dead_letter_carries_the_contract_header_set() -> None:
+    """The header set is the contract. The inspect tooling reads exactly these
+    names, so a typo here is a tool that silently shows nothing."""
+    publisher = Recorder()
+
+    await publish_dead_letter(publisher, sample())
+
+    assert publisher.headers == {
+        "Overpass-Dlq-Reason": "decode",
+        "Overpass-Dlq-Original-Subject": "tasking.request.received.v1",
+        "Overpass-Dlq-Delivery-Count": "5",
+        "Overpass-Dlq-Failed-At": "2026-08-09T14:30:00Z",
+        "Overpass-Dlq-Consumer": "feasibility-worker",
+        "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+        "Nats-Msg-Id": "9b2f0c0e-7f6f-4f6c-8f0c-2b3a4d5e6f70",
+    }
+    assert publisher.payload == sample().payload
+
+
+@pytest.mark.asyncio
+async def test_a_dead_letter_without_an_event_id_still_lands() -> None:
+    """An unparseable envelope has no id, and that is precisely the message
+    that dies here. Refusing it would leave the caller naking forever under
+    ADR-0017's ordering — the loss this mechanism exists to prevent."""
+    publisher = Recorder()
+
+    await publish_dead_letter(publisher, replace(sample(), event_id=""))
+
+    assert publisher.calls == 1
+    assert "Nats-Msg-Id" not in publisher.headers
+
+
+@pytest.mark.asyncio
+async def test_an_absent_traceparent_is_omitted_rather_than_blank() -> None:
+    """A blank traceparent parses downstream as a broken trace context, where
+    an absent one parses as "no trace"."""
+    publisher = Recorder()
+
+    await publish_dead_letter(publisher, replace(sample(), traceparent=""))
+
+    assert "traceparent" not in publisher.headers
+
+
+@pytest.mark.asyncio
+async def test_an_unset_failed_at_is_stamped_from_the_clock() -> None:
+    """The stamp is the time of the terminal DECISION (ADR-0017's amendment),
+    and a caller that supplies none gets the clock, not year zero."""
+    publisher = Recorder()
+    before = datetime.now(UTC) - timedelta(seconds=1)
+
+    await publish_dead_letter(publisher, replace(sample(), failed_at=None))
+
+    stamped = datetime.fromisoformat(publisher.headers["Overpass-Dlq-Failed-At"])
+    assert before <= stamped <= datetime.now(UTC) + timedelta(seconds=1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("letter", "message"),
+    [
+        (replace(sample(), subject=""), "subject"),
+        (replace(sample(), reason=""), "reason"),
+        (replace(sample(), consumer=""), "consumer"),
+        # dlq.dlq.tasking.> is a stream nobody declared. A consumer bound to a
+        # DLQ stream that dead-letters again is a wiring mistake, and it must be
+        # loud rather than invent a subject space by accident.
+        (replace(sample(), subject="dlq.tasking.request.received.v1"), "already"),
+    ],
+)
+async def test_dead_lettering_refuses_an_incomplete_call_site(
+    letter: DeadLetter, message: str
+) -> None:
+    """These are call-site facts — literals and a consumer name known at wiring
+    time, never anything a bad message can influence. An empty one is a
+    programming error, not traffic."""
+    publisher = Recorder()
+
+    with pytest.raises(ValueError, match=message):
+        await publish_dead_letter(publisher, letter)
+
+    assert publisher.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_a_failed_publish_is_reported_so_the_caller_can_nak() -> None:
+    """The caller chooses term or nak on this error. Swallowing it would term
+    without a landed dead letter, which is the silent loss again."""
+    publisher = Recorder(error=TimeoutError("no responders available for request"))
+
+    with pytest.raises(TimeoutError):
+        await publish_dead_letter(publisher, sample())
+
+
+def test_the_real_jetstream_context_satisfies_the_publisher_protocol() -> None:
+    """A protocol nothing real implements is a protocol that type-checks and
+    then fails on the first live publish.
+
+    The assertion here is the mypy one: passing a `JetStreamContext` where a
+    `DlqPublisher` is expected fails the type check the day nats-py changes
+    that signature — which is the day we would otherwise find out in an
+    incident, dead-lettering a message we had already decided to lose.
+    """
+    accepts_publisher(cast("JetStreamContext", object()))
+
+
+def accepts_publisher(publisher: consume.DlqPublisher) -> None:
+    """Exists only to give the line above something to type-check against."""
 
 
 # --- cleanup -----------------------------------------------------------------
