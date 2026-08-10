@@ -235,6 +235,23 @@ type Reads interface {
 	// Ephemeris returns one satellite's samples over `[from, to)`, in time
 	// order. An empty result is not an error: the sweep may not have reached
 	// this horizon.
+	// Targets returns request targets whose own window overlaps `[start, end)`.
+	//
+	// The DEMAND side of the map. Deliberately separate from Acquisitions,
+	// which returns what was scheduled: a region dense with targets and empty
+	// of acquisitions is the interesting case, and one query cannot show both
+	// halves without an outer join that lies about one of them.
+	Targets(ctx context.Context, q TargetQuery) ([]TargetView, Cursor, error)
+
+	// OpportunityFootprints returns candidate footprints over a window, won
+	// and lost.
+	//
+	// Distinct from RequestOpportunities, which answers "what could this ONE
+	// request have had". This answers "what did the constellation consider
+	// over this ground", across every request, which is the question a
+	// contention view asks.
+	OpportunityFootprints(ctx context.Context, q OpportunityFootprintQuery) ([]OpportunityFootprintView, Cursor, error)
+
 	Ephemeris(ctx context.Context, satelliteID string, from, to time.Time) ([]EphemerisSample, error)
 
 	// Constellation returns every satellite's samples over `[from, to)`, keyed
@@ -263,6 +280,70 @@ type AcquisitionQuery struct {
 	RequestID   string
 	Statuses    []string
 	Limit       int
+}
+
+// TargetQuery filters the target-density layer.
+type TargetQuery struct {
+	WindowStart time.Time
+	WindowEnd   time.Time
+	// State narrows to one request state. Empty means every state, which is
+	// what a density view wants: an INFEASIBLE request is still demand, and
+	// hiding it would make the map describe supply.
+	State string
+	Limit int
+}
+
+// TargetView is one request's target, with enough of the request to colour it.
+type TargetView struct {
+	RequestID  string
+	CustomerID string
+	TargetName string
+	State      string
+	// No priority tier and no bid: readmodel.request_views carries neither.
+	// They live on the write side and were never projected, and declaring
+	// them here would put a field in two generated languages that is served
+	// as null forever — the mistake #192 corrected in the contract.
+	WindowStart time.Time
+	WindowEnd   time.Time
+	// OpportunityCount distinguishes "nobody wanted this ground" from "nobody
+	// could image it" — zero against a settled state is a feasibility answer,
+	// not an absence of demand.
+	OpportunityCount int
+	// GeoJSON is the target geometry, already serialised by PostGIS.
+	//
+	// Carried as bytes rather than a decoded struct because it is a Point OR a
+	// Polygon: the read model stores both in one geometry column, and decoding
+	// to a Go type here would mean a union that every layer above has to
+	// re-discriminate. The renderer embeds it verbatim.
+	GeoJSON []byte
+}
+
+// OpportunityFootprintQuery filters the contention layer.
+type OpportunityFootprintQuery struct {
+	SatelliteID string
+	WindowStart time.Time
+	WindowEnd   time.Time
+	// Awarded narrows to winners or losers. Nil means both, which is what the
+	// conflict view needs — the ratio is the interesting quantity and it
+	// cannot be computed from one half.
+	Awarded *bool
+	Limit   int
+}
+
+// OpportunityFootprintView is one candidate's footprint, won or lost.
+type OpportunityFootprintView struct {
+	OpportunityID string
+	RequestID     string
+	SatelliteID   string
+	Mode          string
+	WindowStart   time.Time
+	WindowEnd     time.Time
+	QualityScore  float64
+	// Awarded is `won` from the read model. False means this candidate lost,
+	// NOT that its request went unserved — the same request may have won on a
+	// different pass.
+	Awarded bool
+	GeoJSON []byte
 }
 
 // PlanView is a projected plan.

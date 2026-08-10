@@ -30,8 +30,13 @@ type fakeReads struct {
 	request       port.RequestView
 	opportunities []port.OpportunityView
 	ephemeris     []port.EphemerisSample
-	constellation map[string][]port.EphemerisSample
-	err           error
+	targets       []port.TargetView
+	footprints    []port.OpportunityFootprintView
+
+	lastTargetQuery    port.TargetQuery
+	lastFootprintQuery port.OpportunityFootprintQuery
+	constellation      map[string][]port.EphemerisSample
+	err                error
 
 	lastSatelliteFilter string
 
@@ -72,6 +77,20 @@ func (f *fakeReads) Ephemeris(
 	_ context.Context, _ string, _, _ time.Time,
 ) ([]port.EphemerisSample, error) {
 	return f.ephemeris, f.err
+}
+
+func (f *fakeReads) Targets(
+	_ context.Context, q port.TargetQuery,
+) ([]port.TargetView, port.Cursor, error) {
+	f.lastTargetQuery = q
+	return f.targets, port.Cursor{LastEventAt: lastEvent}, f.err
+}
+
+func (f *fakeReads) OpportunityFootprints(
+	_ context.Context, q port.OpportunityFootprintQuery,
+) ([]port.OpportunityFootprintView, port.Cursor, error) {
+	f.lastFootprintQuery = q
+	return f.footprints, port.Cursor{LastEventAt: lastEvent}, f.err
 }
 
 func (f *fakeReads) Constellation(

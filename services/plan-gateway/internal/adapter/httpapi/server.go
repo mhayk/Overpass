@@ -69,6 +69,8 @@ func (s *Server) Routes() http.Handler {
 	r.Get("/v1/geo/plans/{satellite_id}/{bucket_start}/czml", s.planCZML)
 	r.Get("/v1/geo/satellites/czml", s.constellationCZML)
 	r.Get("/v1/geo/footprints", s.footprintsGeoJSON)
+	r.Get("/v1/geo/targets", s.targetsGeoJSON)
+	r.Get("/v1/geo/opportunities", s.opportunityFootprintsGeoJSON)
 
 	return otelhttp.NewHandler(r, "plan-gateway",
 		// Probes excluded. A liveness check every five seconds is the
