@@ -69,6 +69,10 @@ TOOLS_BIN   := $(ROOT)/.tools/bin
 CONTRACTS   := $(ROOT)/contracts
 GEN         := $(ROOT)/gen
 GO_SERVICES := tasking-api planner plan-gateway
+# The shared Go modules. They were absent from test-go and lint-go until #64,
+# so consume/ and telemetry/ shipped with tests that `make test` never ran —
+# a suite nobody runs is a suite nobody can trust.
+GO_LIBS     := consume telemetry httpx
 MIGRATIONS  := $(ROOT)/db/migrations
 
 # One migration sequence for the whole database, not one per schema. The
@@ -191,6 +195,11 @@ lint-go: $(TOOLS_BIN)/golangci-lint ## Lint the Go services
 			echo "==> $$s"; (cd services/$$s && golangci-lint run ./...); \
 		fi; \
 	done
+	@for l in $(GO_LIBS); do \
+		if [ -f lib/go/$$l/go.mod ]; then \
+			echo "==> lib/go/$$l"; (cd lib/go/$$l && golangci-lint run ./...); \
+		fi; \
+	done
 
 .PHONY: lint-python
 lint-python: ## Lint and type-check feasibility-service
@@ -290,6 +299,11 @@ test-go: ## Go unit tests, always with -race
 			echo "==> $$s"; (cd services/$$s && go test -race -coverprofile=coverage.out ./...); \
 		fi; \
 	done
+	@for l in $(GO_LIBS); do \
+		if [ -f lib/go/$$l/go.mod ]; then \
+			echo "==> lib/go/$$l"; (cd lib/go/$$l && go test -race -coverprofile=coverage.out ./...); \
+		fi; \
+	done
 
 .PHONY: test-python
 test-python: ## Python unit tests
@@ -308,7 +322,7 @@ coverage: ## Enforce coverage thresholds (80% overall, 95% planner and geometry)
 
 .PHONY: test-e2e
 test-e2e: ## Playwright end-to-end tests against the full stack
-	@echo "not yet implemented — issue #58 (M4-08)"
+	@$(ROOT)/scripts/e2e.sh $(ARGS)
 
 ## Performance
 

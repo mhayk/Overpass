@@ -98,7 +98,7 @@ func run(ctx context.Context) error {
 	server := &http.Server{
 		Addr: cfg.HTTPAddr,
 		Handler: httpapi.New(reads, probe, func() time.Time { return time.Now().UTC() },
-			cfg.ReadTimeout, log).WithHub(hub).Routes(),
+			cfg.ReadTimeout, log).WithHub(hub).WithCORS(cfg.CORSAllowedOrigins).Routes(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

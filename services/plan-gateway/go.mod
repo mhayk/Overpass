@@ -12,6 +12,8 @@ replace github.com/mhayk/overpass/gen/go => ../../gen/go
 
 replace github.com/mhayk/overpass/lib/go/consume => ../../lib/go/consume
 
+replace github.com/mhayk/overpass/lib/go/httpx => ../../lib/go/httpx
+
 replace github.com/mhayk/overpass/lib/go/telemetry => ../../lib/go/telemetry
 
 require (
@@ -20,12 +22,14 @@ require (
 	github.com/jackc/pgx/v5 v5.10.0
 	github.com/mhayk/overpass/gen/go v0.0.0-20260808081418-1c8e3ce25b01
 	github.com/mhayk/overpass/lib/go/consume v0.0.0-00010101000000-000000000000
+	github.com/mhayk/overpass/lib/go/httpx v0.0.0-00010101000000-000000000000
 	github.com/mhayk/overpass/lib/go/telemetry v0.0.0-00010101000000-000000000000
 	github.com/nats-io/nats.go v1.52.0
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.61.0
 	go.opentelemetry.io/otel v1.45.0
 	go.opentelemetry.io/otel/metric v1.45.0
 	go.opentelemetry.io/otel/sdk/metric v1.45.0
+	go.opentelemetry.io/otel/trace v1.45.0
 )
 
 require (
@@ -46,7 +50,6 @@ require (
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace v1.45.0 // indirect
 	go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc v1.45.0 // indirect
 	go.opentelemetry.io/otel/sdk v1.45.0 // indirect
-	go.opentelemetry.io/otel/trace v1.45.0 // indirect
 	go.opentelemetry.io/proto/otlp v1.11.0 // indirect
 	golang.org/x/crypto v0.54.0 // indirect
 	golang.org/x/net v0.57.0 // indirect
