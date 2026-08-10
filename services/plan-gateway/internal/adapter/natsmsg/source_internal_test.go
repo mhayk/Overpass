@@ -103,3 +103,49 @@ func TestStreamsMatchTheDeclaredTopology(t *testing.T) {
 		t.Errorf("Streams starts with %s; draining tasking first is deliberate", Streams[0])
 	}
 }
+
+// Next must give every stream a turn, whatever the depth of the others.
+//
+// THE BUG THIS CATCHES WAS OBSERVED, NOT IMAGINED. Next returns as soon as one
+// stream yields a batch; starting the scan at index 0 every time meant a
+// stream with a backlog was fetched forever and the streams after it were
+// never fetched at all. A load test left 358,045 messages on TASKING and this
+// service then consumed none of the 782,870 waiting on PLANNING — while
+// request_views kept advancing, so nothing looked broken.
+//
+// The rotation is tested rather than the fetching: the starvation is entirely
+// in which index the scan begins at, and asserting that needs no broker.
+//
+// WHAT THIS DOES NOT COVER, stated rather than implied: it exercises
+// nextStart, not Next's use of it. Watched failing against a nextStart pinned
+// to 0 — "first pass started with [TASKING TASKING TASKING]" — but a change
+// that stopped CALLING nextStart would pass. Covering that needs a live broker
+// with two backlogged streams, which is source_integration_test.go's territory
+// and a heavier test than this defect warrants on its own.
+func TestTheStartingStreamRotates(t *testing.T) {
+	source := &Source{order: []string{"TASKING", "FEASIBILITY", "PLANNING"}}
+
+	seen := make([]string, 0, 6)
+	for i := 0; i < 6; i++ {
+		seen = append(seen, source.order[source.nextStart()])
+	}
+
+	// Every stream leads at least once in two passes. Under the old behaviour
+	// this is ["TASKING", "TASKING", ...] and the last two never lead.
+	if seen[0] != "TASKING" || seen[1] != "FEASIBILITY" || seen[2] != "PLANNING" {
+		t.Errorf("first pass started with %v, want each stream in turn", seen[:3])
+	}
+	if seen[3] != "TASKING" {
+		t.Errorf("second pass started with %q, want the rotation to wrap", seen[3])
+	}
+}
+
+// A single stream must not divide by zero or spin.
+func TestRotationHandlesOneStream(t *testing.T) {
+	source := &Source{order: []string{"TASKING"}}
+	for i := 0; i < 3; i++ {
+		if got := source.nextStart(); got != 0 {
+			t.Errorf("nextStart() = %d, want 0 for a single stream", got)
+		}
+	}
+}

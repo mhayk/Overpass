@@ -35,8 +35,12 @@ var Streams = []string{"TASKING", "FEASIBILITY", "PLANNING"}
 type Source struct {
 	subs  map[string]*nats.Subscription
 	order []string
-	batch int
-	wait  time.Duration
+	// cursor rotates the stream Next() starts from, so no stream can be
+	// starved by a backlog on one earlier in the list. Guarded by mu, like
+	// inflight, because Next may be called from more than one goroutine.
+	cursor int
+	batch  int
+	wait   time.Duration
 
 	// pub and consumerFor are what dead-lettering needs: somewhere to publish,
 	// and the name of the consumer that gave up. The application supplies only
@@ -118,7 +122,29 @@ func Bind(js nats.JetStreamContext, durablePrefix string, batch int, wait time.D
 
 // Next drains one batch from the first stream that has anything.
 func (s *Source) Next(ctx context.Context) ([]port.Message, error) {
-	for _, stream := range s.order {
+	// ROUND-ROBIN, not always from the top.
+	//
+	// This loop returns as soon as one stream yields a batch. Starting at
+	// index 0 every time therefore means a stream with a sustained backlog is
+	// fetched forever and the streams after it are NEVER fetched at all.
+	//
+	// Observed, not theorised: a load test left 358,045 messages on TASKING,
+	// and this service then consumed exactly none of the 782,870 messages
+	// waiting on PLANNING. The read model kept advancing — request_views was
+	// being written the whole time — so nothing looked broken while every plan
+	// and every acquisition silently failed to arrive.
+	//
+	// The comment below worries about a QUIET stream blocking the others. The
+	// opposite case, a busy one starving them, is the one that actually
+	// happened.
+	//
+	// Rotating the start index gives every stream a turn regardless of depth.
+	// It is not weighted or fair-queued on purpose: the streams carry
+	// different volumes but none is more urgent than another, and a turn each
+	// is the simplest thing that cannot starve.
+	start := s.nextStart()
+	for i := range s.order {
+		stream := s.order[(start+i)%len(s.order)]
 		// A derived context rather than MaxWait alongside Context: the client
 		// rejects both together with "context and timeout can not both be
 		// set", and dropping either one loses something that matters —
@@ -347,4 +373,20 @@ func flattenHeaders(header nats.Header) map[string]string {
 		}
 	}
 	return out
+}
+
+// nextStart returns the index Next should begin its scan at, and advances the
+// rotation.
+//
+// Its own method so the starvation fix is testable without a broker: the whole
+// defect lived in which index the scan started from.
+func (s *Source) nextStart() int {
+	if len(s.order) == 0 {
+		return 0
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	start := s.cursor
+	s.cursor = (s.cursor + 1) % len(s.order)
+	return start
 }
