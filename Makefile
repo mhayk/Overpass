@@ -26,6 +26,9 @@ GOLANGCI_LINT_VERSION := v2.12.2
 GOOSE_VERSION         := v3.27.3
 
 ROOT        := $(shell git rev-parse --show-toplevel 2>/dev/null || pwd)
+# Read from docker-compose.yml rather than restated, so promtool and the
+# running server can never disagree about rule syntax.
+PROMETHEUS_IMAGE := $(shell grep -oE 'prom/prometheus:[^ ]+' $(ROOT)/docker-compose.yml | head -1)
 
 # Read .env the way docker compose does, so the two cannot disagree about where
 # Postgres is listening.
@@ -197,6 +200,25 @@ lint-web: ## Lint and type-check the frontend
 
 .PHONY: test
 test: test-go test-python test-web ## Run every unit test suite
+
+.PHONY: alerts-test
+alerts-test: ## Unit-test the Prometheus alert rules (needs Docker)
+	@# promtool comes from the Prometheus image, pinned to the SAME tag
+	@# docker-compose.yml runs. A different promtool could accept rule syntax
+	@# the running server rejects, which would make this gate agree with
+	@# nothing.
+	@# Every rule is tested BOTH ways: firing on the series it exists to catch,
+	@# and silent on the series it must not. Without the negative case, `> 0`
+	@# and `> 72` both pass.
+	@# Refuse loudly on an empty image. An unset variable would expand the
+	@# command to `--entrypoint promtool  test rules ...`, and docker would
+	@# read `test` as the image name — a confusing failure that looks like a
+	@# registry problem rather than a Makefile one.
+	@test -n "$(PROMETHEUS_IMAGE)" || { \
+		echo "error: could not read prom/prometheus tag from docker-compose.yml" >&2; exit 1; }
+	@docker run --rm -v $(ROOT)/deploy/prometheus/rules:/rules:ro \
+		--entrypoint promtool $(PROMETHEUS_IMAGE) \
+		test rules /rules/alerts_test.yml
 
 .PHONY: test-integration
 test-integration: ## Integration tests against real Postgres and real NATS (needs Docker)

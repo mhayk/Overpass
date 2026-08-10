@@ -46,16 +46,35 @@ groups:
   - name: overpass-domain
     interval: 30s
     rules:
-      - alert: TleStale
-        expr: max(overpass_tle_age_hours) > 48
+      # Split in #53, because the single rule contradicted itself: it fired at
+      # 48h while its own description explained the behaviour at 72h.
+      # StalenessPolicy in element_set.py puts fresh below 24h and stale at or
+      # above 72h, and 72h is where feasibility starts REFUSING. One of the two
+      # numbers was wrong, and the two thresholds have different remedies, so
+      # they are now two rules.
+      #
+      # Both are per satellite. Which one is ageing is the first thing an
+      # operator needs, the label is already on the metric, and it is free.
+      - alert: TleAgeing
+        expr: max by (satellite_id) (overpass_tle_age_hours) > 48
         for: 5m
         labels: { severity: warning }
         annotations:
-          summary: "A TLE has exceeded the staleness threshold"
+          summary: "{{ $labels.satellite_id }}'s element set is ageing"
           description: >-
-            feasibility-service refuses to compute against a stale element set
-            rather than publishing a drifted access window. Requests for the
-            affected satellite will fail with TLE_STALE until a refresh.
+            Past 48h and heading for the 72h refusal threshold. Nothing is
+            failing yet, and a refresh now avoids a customer-visible TLE_STALE.
+
+      - alert: TleStale
+        expr: max by (satellite_id) (overpass_tle_age_hours) > 72
+        for: 5m
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.satellite_id }} is refusing requests as TLE_STALE"
+          description: >-
+            feasibility-service now refuses to compute against this element set
+            rather than publishing a drifted access window. Requests naming
+            this satellite fail with TLE_STALE until a refresh.
 
       - alert: PlannerRoundsSlow
         expr: histogram_quantile(0.95, sum(rate(overpass_allocation_duration_ms_bucket[5m])) by (le)) > 800
