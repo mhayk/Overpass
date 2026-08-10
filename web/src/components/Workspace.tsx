@@ -8,10 +8,14 @@ import {
   fetchAcquisitions,
   fetchConstellationCZML,
   fetchOpportunities,
+  fetchOpportunityFootprints,
+  fetchRequest,
   type Acquisition,
   type Opportunity,
   type Staleness,
 } from '@/lib/gateway';
+import { explainUnfulfilment } from '@/lib/explain';
+import type { Ghost } from '@/lib/timeline';
 import { SubmitRejected, submitRequest, type FieldError } from '@/lib/tasking';
 
 /**
@@ -95,11 +99,70 @@ export default function Workspace(): React.JSX.Element {
   const [submitting, setSubmitting] = useState(false);
   const [submitNote, setSubmitNote] = useState<string | undefined>(undefined);
   const [view, setView] = useState<'globe' | 'map' | 'timeline'>('globe');
+  const [ghosts, setGhosts] = useState<Ghost[]>([]);
+  // requestId -> a human sentence for why it lost. Held here rather than in the
+  // timeline because the M4-04 panel needs the same answers, and two
+  // components fetching them independently would be two caches disagreeing.
+  const [reasons, setReasons] = useState<Record<string, string>>({});
 
   // ONE window, computed once, shared by both views. Calling defaultWindow()
   // separately in each would give them different clocks and let them drift
   // apart while both looked correct.
   const [sharedWindow] = useState(defaultWindow);
+
+  // Why the selected request lost, fetched once and remembered.
+  //
+  // On selection rather than for every ghost: there are several candidates per
+  // request and the explanation is per REQUEST, so fetching per ghost would be
+  // the same answer many times over. Selecting a ghost is what the timeline
+  // already does on click.
+  useEffect(() => {
+    if (!selectedRequestId || reasons[selectedRequestId] !== undefined) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const view = await fetchRequest(selectedRequestId);
+        if (cancelled) return;
+        const sentence = explainUnfulfilment(view.unfulfilment);
+        if (sentence) setReasons((current) => ({ ...current, [selectedRequestId]: sentence }));
+      } catch {
+        // No explanation is better than a wrong one.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedRequestId, reasons]);
+
+  // Losing candidates, for the ghost layer. Fetched with the window rather
+  // than on demand: the timeline needs them all at once to lay out rows, and
+  // asking per satellite would be nine round trips for one picture.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const lost = await fetchOpportunityFootprints(sharedWindow, false);
+        if (cancelled) return;
+        setGhosts(
+          lost.features.map((feature) => ({
+            opportunityId: feature.properties.opportunity_id,
+            requestId: feature.properties.request_id,
+            satelliteId: feature.properties.satellite_id,
+            mode: feature.properties.mode,
+            startMs: Date.parse(feature.properties.window_start),
+            endMs: Date.parse(feature.properties.window_end),
+          })),
+        );
+      } catch {
+        // A missing ghost layer is a missing explanation, not a broken page.
+        // The schedule is still correct and still worth showing.
+        if (!cancelled) setGhosts([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [sharedWindow]);
   const [fieldErrors, setFieldErrors] = useState<FieldError[]>([]);
 
   const load = useCallback(async () => {
@@ -366,6 +429,8 @@ export default function Workspace(): React.JSX.Element {
           ) : (
             <Timeline
               acquisitions={acquisitions}
+              ghosts={ghosts}
+              reasons={reasons}
               selectedRequestId={selectedRequestId}
               // The same setter the globe's selection uses, so selecting a
               // block here highlights the acquisition there. One piece of

@@ -9,11 +9,19 @@
 
 import type { Acquisition } from '@/lib/gateway';
 
-/** What a block represents. Slew is not idle, which is the whole point. */
-export type BlockKind = 'acquisition' | 'slew';
+/**
+ * What a block represents.
+ *
+ * `slew` is not idle, which is the point of the view. `ghost` is a candidate
+ * that LOST — rendering only winners shows the result of de-confliction;
+ * rendering the losers shows the decision.
+ */
+export type BlockKind = 'acquisition' | 'slew' | 'ghost';
 
 export interface Block {
   kind: BlockKind;
+  /** Present on ghosts: the candidate that lost. */
+  opportunityId?: string;
   /** Present on acquisition blocks; absent on the slew that precedes one. */
   acquisitionId?: string;
   requestId?: string;
@@ -29,6 +37,59 @@ export interface SatelliteRow {
   imagingSeconds: number;
   /** Seconds spent rotating rather than imaging. */
   slewSeconds: number;
+}
+
+/** A losing candidate, as the timeline needs it. */
+export interface Ghost {
+  opportunityId: string;
+  requestId: string;
+  satelliteId: string;
+  mode: string;
+  startMs: number;
+  endMs: number;
+}
+
+/**
+ * Add ghost blocks to rows that already hold the winners.
+ *
+ * A SEPARATE PASS, not a parameter to buildRows, and the reason is the slew
+ * arithmetic: slew is derived from consecutive COMMITTED acquisitions, and
+ * feeding losing candidates into that sequence would invent manoeuvres between
+ * passes the satellite never made. The winners define the schedule; the ghosts
+ * are drawn beside it.
+ *
+ * A ghost on a satellite with no acquisitions still gets a row. "This
+ * satellite was considered and won nothing" is a real answer, and dropping the
+ * row would make the constellation look smaller than it is.
+ */
+export function withGhosts(rows: SatelliteRow[], ghosts: Ghost[]): SatelliteRow[] {
+  if (ghosts.length === 0) return rows;
+
+  const byId = new Map(rows.map((row) => [row.satelliteId, { ...row, blocks: [...row.blocks] }]));
+
+  for (const ghost of ghosts) {
+    const row = byId.get(ghost.satelliteId) ?? {
+      satelliteId: ghost.satelliteId,
+      blocks: [],
+      imagingSeconds: 0,
+      slewSeconds: 0,
+    };
+    row.blocks.push({
+      kind: 'ghost',
+      opportunityId: ghost.opportunityId,
+      requestId: ghost.requestId,
+      mode: ghost.mode,
+      startMs: ghost.startMs,
+      endMs: ghost.endMs,
+    });
+    byId.set(ghost.satelliteId, row);
+  }
+
+  // Ghosts do NOT contribute to imagingSeconds. Duty cycle is what the
+  // satellite actually spent, and counting candidates it declined would report
+  // a satellite as busier than it was — which is the number an operator would
+  // use to decide it had no capacity left.
+  return [...byId.values()].sort((a, b) => a.satelliteId.localeCompare(b.satelliteId));
 }
 
 /**
