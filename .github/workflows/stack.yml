@@ -246,19 +246,37 @@ jobs:
           # This is also the regression test for #187: a stale TLE fixture
           # makes feasibility refuse every request, so nothing reaches the
           # planner and this loop times out with the logs that say why.
-          echo "waiting for the pipeline to commit a plan"
-          deadline=$((SECONDS + 240))
-          until curl -sf --get http://localhost:9090/api/v1/query \
-                  --data-urlencode 'query=overpass_allocation_duration_ms_count' \
-                | grep -q '"value"'; do
-            if [ "$SECONDS" -ge "$deadline" ]; then
-              echo "::error::no plan was committed within 240s; the dashboards have nothing to show"
-              docker compose logs --tail=60 planner feasibility
-              exit 1
-            fi
-            sleep 10
+          # WAIT FOR EVERY METRIC FAMILY THE CHECK IS ABOUT TO ASSERT, not just
+          # one of them.
+          #
+          # Waiting only on the planner's metric was a race, and it failed
+          # exactly that way: a plan was committed and scraped, and the check
+          # then failed on two FEASIBILITY panels whose metrics had not landed
+          # yet. Both services export on independent ten-second timers into a
+          # ten-second scrape, so "the planner has reported" says nothing about
+          # whether feasibility has.
+          #
+          # Asserting a superset of what you waited for is a race by
+          # construction. The list below is the set of families the domain
+          # panels read, and it is deliberately the SAME list — if a panel is
+          # added that reads something new, this loop should grow with it.
+          echo "waiting for every domain metric family to be scraped"
+          deadline=$((SECONDS + 300))
+          for metric in \
+            overpass_allocation_duration_ms_count \
+            overpass_opportunities_per_request_count \
+            overpass_tle_age_hours; do
+            until curl -sf --get http://localhost:9090/api/v1/query \
+                    --data-urlencode "query=$metric" | grep -q '"value"'; do
+              if [ "$SECONDS" -ge "$deadline" ]; then
+                echo "::error::$metric never appeared; the pipeline half that publishes it is silent"
+                docker compose logs --tail=60 planner feasibility
+                exit 1
+              fi
+              sleep 10
+            done
+            echo "  $metric ok"
           done
-          echo "a plan is committed and scraped"
 
           ./scripts/dashboards-check.sh
 
