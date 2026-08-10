@@ -262,3 +262,138 @@ func matches(ifNoneMatch, tag string) bool {
 	}
 	return false
 }
+
+// targetsGeoJSON serves the demand layer.
+func (s *Server) targetsGeoJSON(w http.ResponseWriter, r *http.Request) {
+	start, end, ok := s.geoWindow(w, r)
+	if !ok {
+		return
+	}
+
+	limit := intParam(r, "limit")
+	if limit <= 0 || limit > footprintLimit {
+		limit = footprintLimit
+	}
+
+	state := r.URL.Query().Get("state")
+	if state != "" && !validRequestState(state) {
+		// Refused rather than ignored. An unrecognised state silently treated
+		// as "no filter" returns EVERY target, which looks like a working
+		// query and is the opposite of what was asked for.
+		s.problem(w, r, badRequest("state is not a known request state"))
+		return
+	}
+
+	// One more than asked for, so truncation is DETECTED rather than assumed.
+	items, cursor, err := s.reads.Targets(r.Context(), port.TargetQuery{
+		WindowStart: *start,
+		WindowEnd:   *end,
+		State:       state,
+		Limit:       limit + 1,
+	})
+	if err != nil {
+		s.unavailable(w, r, err)
+		return
+	}
+
+	truncated := len(items) > limit
+	if truncated {
+		items = items[:limit]
+	}
+
+	collection, err := render.TargetsGeoJSON(items, truncated, cursor, s.now())
+	if err != nil {
+		s.log.Error("rendering targets GeoJSON", slog.Any("error", err))
+		s.unavailable(w, r, err)
+		return
+	}
+	s.writeConditional(w, r, MediaTypeGeoJSON, collection)
+}
+
+// opportunityFootprintsGeoJSON serves the contention layer.
+func (s *Server) opportunityFootprintsGeoJSON(w http.ResponseWriter, r *http.Request) {
+	start, end, ok := s.geoWindow(w, r)
+	if !ok {
+		return
+	}
+
+	limit := intParam(r, "limit")
+	if limit <= 0 || limit > footprintLimit {
+		limit = footprintLimit
+	}
+
+	// Absent means BOTH, which is what the conflict view needs: the ratio is
+	// the interesting quantity and cannot be computed from one half.
+	var awarded *bool
+	if raw := r.URL.Query().Get("awarded"); raw != "" {
+		parsed, err := strconv.ParseBool(raw)
+		if err != nil {
+			s.problem(w, r, badRequest("awarded must be true or false"))
+			return
+		}
+		awarded = &parsed
+	}
+
+	items, cursor, err := s.reads.OpportunityFootprints(r.Context(), port.OpportunityFootprintQuery{
+		SatelliteID: r.URL.Query().Get("satellite_id"),
+		WindowStart: *start,
+		WindowEnd:   *end,
+		Awarded:     awarded,
+		Limit:       limit + 1,
+	})
+	if err != nil {
+		s.unavailable(w, r, err)
+		return
+	}
+
+	truncated := len(items) > limit
+	if truncated {
+		items = items[:limit]
+	}
+
+	collection, err := render.OpportunityFootprintsGeoJSON(items, truncated, cursor, s.now())
+	if err != nil {
+		s.log.Error("rendering opportunity GeoJSON", slog.Any("error", err))
+		s.unavailable(w, r, err)
+		return
+	}
+	s.writeConditional(w, r, MediaTypeGeoJSON, collection)
+}
+
+// geoWindow parses and validates the window every geo endpoint takes.
+//
+// Extracted after the third copy. The ordering check matters more than it
+// looks: `window_end` before `window_start` produces an empty tstzrange, which
+// Postgres answers with zero rows — a confident, fast, wrong "nothing here".
+func (s *Server) geoWindow(w http.ResponseWriter, r *http.Request) (start, end *time.Time, ok bool) {
+	start, err := timeParam(r, "window_start")
+	if err != nil || start == nil {
+		s.problem(w, r, badRequest("window_start is required and must be RFC 3339"))
+		return nil, nil, false
+	}
+	end, err = timeParam(r, "window_end")
+	if err != nil || end == nil {
+		s.problem(w, r, badRequest("window_end is required and must be RFC 3339"))
+		return nil, nil, false
+	}
+	if !end.After(*start) {
+		s.problem(w, r, badRequest("window_end must be after window_start"))
+		return nil, nil, false
+	}
+	return start, end, true
+}
+
+// validRequestState reports whether a state is one the state machine defines.
+//
+// The list is the contract's enum. Restated here rather than imported from the
+// generated types, which model the RESPONSE rather than this query parameter,
+// and a filter that accepts a state no request can hold is a filter that
+// always returns nothing.
+func validRequestState(state string) bool {
+	switch state {
+	case "RECEIVED", "AWAITING_PLANNING", "PLANNED", "ACQUIRED",
+		"INFEASIBLE", "REJECTED", "EXPIRED", "CANCELLED":
+		return true
+	}
+	return false
+}

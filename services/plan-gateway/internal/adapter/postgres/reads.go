@@ -359,9 +359,132 @@ func (r *Reads) cursor(ctx context.Context) (port.Cursor, error) {
 	return port.Cursor{LastEventAt: *lastAt}, nil
 }
 
+// defaultRows is what an unspecified limit gets. maxRows is a safety ceiling
+// against a caller asking for the table.
+//
+// The ceiling is well above any handler's limit, deliberately: the HANDLER is
+// where API policy lives (footprintLimit, and the +1 it adds to detect
+// truncation), and this function only exists to stop an unbounded query
+// reaching Postgres. Set the two too close and the safety net silently becomes
+// the policy.
+const (
+	defaultRows = 50
+	maxRows     = 1000
+)
+
+// limitOr bounds a row count, CLAMPING rather than falling back.
+//
+// It used to return 50 when asked for more than 200, and that was a silent
+// data-loss bug rather than a conservative default. The geo handlers cap at
+// footprintLimit (250) and pass limit+1 = 251 so truncation is detectable;
+// 251 > 200, so every one of those queries came back with 50 rows. The handler
+// then computed `truncated = len(items) > limit` — 50 > 250 — as FALSE.
+//
+// So the API answered "here is everything" while returning 50 of 293. That is
+// exactly the failure the `truncated` field exists to prevent, and the
+// contract describes it in those words: a viewport confidently drawing
+// emptiness over a fully-tasked region.
+//
+// Asking for more must never quietly yield less.
 func limitOr(n int) int {
-	if n <= 0 || n > 200 {
-		return 50
+	if n <= 0 {
+		return defaultRows
+	}
+	if n > maxRows {
+		return maxRows
 	}
 	return n
+}
+
+// Targets reads request targets whose own window overlaps the query's.
+//
+// The DEMAND side of the map. `target` is nullable in the read model — a
+// request projected from an event that carried no geometry — and those rows
+// are EXCLUDED rather than returned with a null geometry: RFC 7946 has no
+// representation for "a feature somewhere unspecified", and a GeoJSON reader
+// handed one either throws or silently drops it. Excluding them here at least
+// makes the count honest.
+func (r *Reads) Targets(ctx context.Context, q port.TargetQuery) ([]port.TargetView, port.Cursor, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT request_id::text, customer_id, target_name, state,
+		       lower(request_window), upper(request_window), opportunity_count,
+		       ST_AsGeoJSON(target, 6)
+		FROM readmodel.request_views
+		WHERE request_window && tstzrange($1, $2, '[)')
+		  AND ($3 = '' OR state = $3)
+		  AND target IS NOT NULL
+		ORDER BY lower(request_window)
+		LIMIT $4
+	`, q.WindowStart, q.WindowEnd, q.State, limitOr(q.Limit))
+	if err != nil {
+		return nil, port.Cursor{}, fmt.Errorf("listing targets: %w", err)
+	}
+	defer rows.Close()
+
+	var out []port.TargetView
+	for rows.Next() {
+		var t port.TargetView
+		var geojson string
+		if scanErr := rows.Scan(&t.RequestID, &t.CustomerID, &t.TargetName, &t.State,
+			&t.WindowStart, &t.WindowEnd, &t.OpportunityCount, &geojson); scanErr != nil {
+			return nil, port.Cursor{}, fmt.Errorf("scanning target: %w", scanErr)
+		}
+		t.GeoJSON = []byte(geojson)
+		out = append(out, t)
+	}
+	if rowsErr := rows.Err(); rowsErr != nil {
+		return nil, port.Cursor{}, fmt.Errorf("reading targets: %w", rowsErr)
+	}
+
+	cursor, err := r.cursor(ctx)
+	return out, cursor, err
+}
+
+// OpportunityFootprints reads candidate footprints over a window, won and lost.
+//
+// `won` in the read model is `awarded` in the contract. The rename is
+// deliberate and one-directional: the projection records what happened, the API
+// describes what it means, and "awarded" is the word the allocation domain
+// already uses for a candidate that received an acquisition.
+func (r *Reads) OpportunityFootprints(
+	ctx context.Context,
+	q port.OpportunityFootprintQuery,
+) ([]port.OpportunityFootprintView, port.Cursor, error) {
+	// A nil Awarded means BOTH, which is what a contention view needs: the
+	// ratio is the interesting quantity and it cannot be computed from one
+	// half. Passing nil straight into the predicate lets one query serve all
+	// three cases without string-building a WHERE clause.
+	rows, err := r.pool.Query(ctx, `
+		SELECT opportunity_id::text, request_id::text, satellite_id, mode,
+		       lower(access_window), upper(access_window), quality_score, won,
+		       ST_AsGeoJSON(footprint, 6)
+		FROM readmodel.opportunity_views
+		WHERE ($1 = '' OR satellite_id = $1)
+		  AND access_window && tstzrange($2, $3, '[)')
+		  AND ($4::boolean IS NULL OR won = $4)
+		ORDER BY lower(access_window)
+		LIMIT $5
+	`, q.SatelliteID, q.WindowStart, q.WindowEnd, q.Awarded, limitOr(q.Limit))
+	if err != nil {
+		return nil, port.Cursor{}, fmt.Errorf("listing opportunity footprints: %w", err)
+	}
+	defer rows.Close()
+
+	var out []port.OpportunityFootprintView
+	for rows.Next() {
+		var o port.OpportunityFootprintView
+		var geojson string
+		if scanErr := rows.Scan(&o.OpportunityID, &o.RequestID, &o.SatelliteID, &o.Mode,
+			&o.WindowStart, &o.WindowEnd, &o.QualityScore, &o.Awarded, &geojson); scanErr != nil {
+			return nil, port.Cursor{}, fmt.Errorf("scanning opportunity footprint: %w", scanErr)
+		}
+		o.GeoJSON = []byte(geojson)
+		out = append(out, o)
+	}
+	if rowsErr := rows.Err(); rowsErr != nil {
+		return nil, port.Cursor{}, fmt.Errorf("reading opportunity footprints: %w", rowsErr)
+	}
+
+	cursor, err := r.cursor(ctx)
+	return out, cursor, err
 }

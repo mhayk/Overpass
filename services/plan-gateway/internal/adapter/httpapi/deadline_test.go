@@ -26,6 +26,20 @@ func (b *blockingReads) Plans(ctx context.Context, _ port.PlanQuery) ([]port.Pla
 	return nil, port.Cursor{}, ctx.Err()
 }
 
+func (b *blockingReads) Targets(
+	ctx context.Context, _ port.TargetQuery,
+) ([]port.TargetView, port.Cursor, error) {
+	<-ctx.Done()
+	return nil, port.Cursor{}, ctx.Err()
+}
+
+func (b *blockingReads) OpportunityFootprints(
+	ctx context.Context, _ port.OpportunityFootprintQuery,
+) ([]port.OpportunityFootprintView, port.Cursor, error) {
+	<-ctx.Done()
+	return nil, port.Cursor{}, ctx.Err()
+}
+
 // A read that never returns is refused, not held open.
 //
 // This is the defect the audit found: every handler passed r.Context()
