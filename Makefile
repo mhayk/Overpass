@@ -201,8 +201,26 @@ lint-web: ## Lint and type-check the frontend
 .PHONY: test
 test: test-go test-python test-web ## Run every unit test suite
 
+.PHONY: prometheus-config
+prometheus-config: ## Validate prometheus.yml the way the server loads it
+	@# MOUNTED AT /etc/prometheus, the runtime path, and that is load-bearing.
+	@# rule_files names an ABSOLUTE path — /etc/prometheus/rules/*.yml — so
+	@# mounted anywhere else the glob matches nothing and this check passes
+	@# vacuously. It did exactly that on the first attempt: green against a
+	@# rules directory containing a file that takes the server down.
+	@#
+	@# `check config` FOLLOWS rule_files, which is why it catches what
+	@# validating the rules by name cannot: promtool was happy with the rule
+	@# file and the test file individually, and Prometheus still refused to
+	@# start because the glob swept up both.
+	@test -n "$(PROMETHEUS_IMAGE)" || { \
+		echo "error: could not read prom/prometheus tag from docker-compose.yml" >&2; exit 1; }
+	@docker run --rm -v $(ROOT)/deploy/prometheus:/etc/prometheus:ro \
+		--entrypoint promtool $(PROMETHEUS_IMAGE) \
+		check config /etc/prometheus/prometheus.yml
+
 .PHONY: alerts-test
-alerts-test: ## Unit-test the Prometheus alert rules (needs Docker)
+alerts-test: prometheus-config ## Unit-test the Prometheus alert rules (needs Docker)
 	@# promtool comes from the Prometheus image, pinned to the SAME tag
 	@# docker-compose.yml runs. A different promtool could accept rule syntax
 	@# the running server rejects, which would make this gate agree with
@@ -216,9 +234,13 @@ alerts-test: ## Unit-test the Prometheus alert rules (needs Docker)
 	@# registry problem rather than a Makefile one.
 	@test -n "$(PROMETHEUS_IMAGE)" || { \
 		echo "error: could not read prom/prometheus tag from docker-compose.yml" >&2; exit 1; }
-	@docker run --rm -v $(ROOT)/deploy/prometheus/rules:/rules:ro \
+	@# The whole deploy/prometheus tree is mounted, not just rules/: the tests
+	@# live OUTSIDE the directory prometheus.yml globs for rule files, because
+	@# a test file inside it is matched by that glob and Prometheus refuses to
+	@# start on it.
+	@docker run --rm -v $(ROOT)/deploy/prometheus:/etc/prometheus:ro \
 		--entrypoint promtool $(PROMETHEUS_IMAGE) \
-		test rules /rules/alerts_test.yml
+		test rules /etc/prometheus/tests/alerts_test.yml
 
 .PHONY: dashboards-check
 dashboards-check: ## Assert every Grafana panel renders against the running stack

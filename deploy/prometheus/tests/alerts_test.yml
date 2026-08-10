@@ -14,8 +14,21 @@
 #
 # Run with `make alerts-test`.
 
+# ../rules, not this directory, and that path is the whole reason this file
+# lives here rather than beside the rules it tests.
+#
+# prometheus.yml loads `rule_files: /etc/prometheus/rules/*.yml`. A test file
+# in that directory is matched by the glob, is not a rule file, and Prometheus
+# REFUSES TO START on it:
+#
+#   field rule_files not found in type rulefmt.RuleGroups
+#
+# The container went unhealthy and every dependent service failed to start
+# behind it. Caught by the cold-start gate, which is exactly what that gate is
+# for — the file was valid, promtool was happy with it, and it still took the
+# stack down.
 rule_files:
-  - alerts.yml
+  - ../rules/alerts.yml
 
 evaluation_interval: 30s
 
