@@ -233,11 +233,33 @@ jobs:
           set -euo pipefail
           ./scripts/seed.sh
           ./scripts/demo.sh
-          # The metric readers export on a ten-second interval and Prometheus
-          # scrapes on another ten, so a check run immediately after the demo
-          # is racing two independent timers rather than testing anything.
-          echo "waiting for one export and one scrape"
-          sleep 30
+
+          # WAIT FOR A ROUND, do not sleep for one.
+          #
+          # A fixed sleep was a race that passed by luck: the domain panels
+          # need a COMMITTED PLAN, which needs a feasibility sweep to produce
+          # candidates and the planner's quiet period to elapse. Polling the
+          # metric the panels actually read means the wait ends the moment the
+          # data exists, and a genuine stall fails saying the pipeline
+          # committed no plan rather than that the dashboards are wrong.
+          #
+          # This is also the regression test for #187: a stale TLE fixture
+          # makes feasibility refuse every request, so nothing reaches the
+          # planner and this loop times out with the logs that say why.
+          echo "waiting for the pipeline to commit a plan"
+          deadline=$((SECONDS + 240))
+          until curl -sf --get http://localhost:9090/api/v1/query \
+                  --data-urlencode 'query=overpass_allocation_duration_ms_count' \
+                | grep -q '"value"'; do
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "::error::no plan was committed within 240s; the dashboards have nothing to show"
+              docker compose logs --tail=60 planner feasibility
+              exit 1
+            fi
+            sleep 10
+          done
+          echo "a plan is committed and scraped"
+
           ./scripts/dashboards-check.sh
 
       - name: Diagnostics on failure

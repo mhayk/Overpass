@@ -9,7 +9,11 @@ import (
 
 	"github.com/google/uuid"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/mhayk/overpass/gen/go/events"
+	"github.com/mhayk/overpass/lib/go/telemetry"
 
 	"github.com/mhayk/overpass/services/planner/internal/domain"
 	"github.com/mhayk/overpass/services/planner/internal/port"
@@ -72,9 +76,37 @@ func (t *Trigger) buildPlan(
 		})
 	}
 
+	// A span around the allocation itself, carrying the domain attributes that
+	// make a trace answer a question rather than merely display a timeline.
+	//
+	// satellite_id and policy are the two that matter most: "why was this
+	// round slow" is almost always answered by which allocator ran against how
+	// many candidates, and neither is visible from HTTP metadata. The counts
+	// go on as attributes rather than events because they describe the whole
+	// span, not a moment inside it.
+	_, span := telemetry.Tracer(TelemetryScope).Start(ctx, "planner.allocate",
+		trace.WithAttributes(
+			attribute.String("overpass.satellite_id", round.Key.SatelliteID),
+			attribute.String("overpass.policy", t.allocator.Name()),
+			attribute.String("overpass.round_id", round.RoundID),
+			attribute.Int("overpass.candidates", len(problem.Candidates)),
+			attribute.Int("overpass.candidate_opportunities", inputs.CandidateOpportunityCount),
+			attribute.Int("overpass.competing_requests", len(inputs.CandidateRequestIDs)),
+		))
+
 	started := time.Now()
 	plan := t.allocator.Allocate(problem)
 	allocationMs := time.Since(started).Milliseconds()
+
+	// The OUTCOME on the same span as the inputs, so one span answers both
+	// "what was this round asked to do" and "what did it manage".
+	span.SetAttributes(
+		attribute.Int("overpass.acquisitions", len(plan.Acquisitions)),
+		attribute.Int("overpass.unfulfilled", len(plan.Unfulfilled)),
+		attribute.Int64("overpass.plan_value_credits", plan.Value()),
+		attribute.Int64("overpass.allocation_duration_ms", allocationMs),
+	)
+	span.End()
 
 	// Conservation, checked BEFORE anything reaches the database — and against
 	// the round's ANNOUNCED ledger, not the scored subset. The difference is

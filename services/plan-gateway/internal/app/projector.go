@@ -9,7 +9,11 @@ import (
 	"log/slog"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/mhayk/overpass/lib/go/consume"
+	"github.com/mhayk/overpass/lib/go/telemetry"
 
 	"github.com/mhayk/overpass/services/plan-gateway/internal/port"
 )
@@ -21,6 +25,10 @@ import (
 // of letting malformed payloads burn it, which is precisely what the demo's
 // "hello" messages spent an hour doing at this consumer.
 const maxDeliver = 10
+
+// TelemetryScope names the instrumentation scope this service's hand-written
+// spans and metrics are attributed to.
+const TelemetryScope = "github.com/mhayk/overpass/services/plan-gateway"
 
 // Projector folds a stream of events into the read models.
 type Projector struct {
@@ -68,6 +76,23 @@ func (p *Projector) Run(ctx context.Context) error {
 
 func (p *Projector) handle(ctx context.Context, m port.Message) {
 	received := time.Now()
+
+	// The last hop in the chain. A CHILD and a LINK of the publish that
+	// produced this message — see telemetry.ConsumerSpan for why both — and it
+	// wraps the fold AND the settle, so an ack that fails after a successful
+	// fold shows up here rather than as an unexplained duplicate later.
+	//
+	// This is what makes the trace reach the read model. Until #52 the chain
+	// ended at the planner's publish, so "why does the UI not show my
+	// acquisition" had no span to answer it.
+	ctx, span := telemetry.ConsumerSpan(ctx, TelemetryScope,
+		m.Subject+" project", m.Headers,
+		telemetry.MessagingAttributes(m.Subject, m.EventID),
+		trace.WithAttributes(
+			attribute.Int64("messaging.message.delivery_count", int64(m.Delivered)),
+		),
+	)
+	defer span.End()
 	if m.Delivered > 1 {
 		p.Metrics.Redelivered(ctx, m.Subject)
 	}
@@ -134,6 +159,7 @@ func (p *Projector) handle(ctx context.Context, m port.Message) {
 		return
 	}
 	p.Metrics.Observe(ctx, m.Subject, consume.OutcomeProcessed, time.Since(received))
+	span.SetAttributes(attribute.String("overpass.outcome", consume.OutcomeProcessed))
 }
 
 // Apply routes one message to the matching fold and advances the cursor.

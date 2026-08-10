@@ -189,6 +189,15 @@ type Message struct {
 	// Delivered is the broker's delivery counter, 1 on the first attempt. The
 	// poison decision reads it.
 	Delivered uint64
+	// Headers carries the broker's message headers, which is where the W3C
+	// traceparent lives.
+	//
+	// It was absent until #52, and its absence was the reason this service
+	// could not continue a trace: the natsmsg adapter read the payload and
+	// the metadata and dropped the headers, so by the time the projector saw
+	// a message the causal chain had already been discarded one layer below
+	// it. Every span this service produced would have been a root.
+	Headers map[string]string
 }
 
 // MessageSource hands the projector one message at a time.

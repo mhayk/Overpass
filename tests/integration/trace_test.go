@@ -59,6 +59,11 @@ type observedSpan struct {
 	spanID   string
 	parentID string
 	links    int
+	// attributes carries the span's own keys, which is where the domain
+	// detail lives. M3-05 asks for domain-meaningful attributes rather than
+	// HTTP metadata, so a test that cannot read them cannot check the
+	// criterion — only that a span exists.
+	attributes map[string]string
 }
 
 // startFeasibilityWorker runs the Python consumer as a real process.
@@ -240,9 +245,23 @@ func TestOneTraceSpansBothServices(t *testing.T) {
 // join it rather than start a new one.
 func submitAndReadTraceID(t *testing.T, api *service) string {
 	t.Helper()
+	traceID, _ := submitAndReadTraceIDs(t, api)
+	return traceID
+}
 
-	traceID := strings.ReplaceAll(uuid.NewString(), "-", "")
+// submitAndReadTraceIDs also returns the CALLER'S span id.
+//
+// A completeness check needs it. The traceparent this test sends names a
+// parent span that the test invented and never exported, so the ingress span
+// legitimately points at a span that is not in the trace — which is
+// indistinguishable, to a naive orphan check, from a hop that dropped its
+// context. Knowing the id the test made up is what separates the two.
+func submitAndReadTraceIDs(t *testing.T, api *service) (traceID, callerSpanID string) {
+	t.Helper()
+
+	traceID = strings.ReplaceAll(uuid.NewString(), "-", "")
 	rootSpan := strings.ReplaceAll(uuid.NewString(), "-", "")[:16]
+	callerSpanID = rootSpan
 
 	body := map[string]any{
 		"customer_id": traceCustomerID,
@@ -285,7 +304,7 @@ func submitAndReadTraceID(t *testing.T, api *service) string {
 		_, _ = detail.ReadFrom(resp.Body) //nolint:errcheck // diagnostics only
 		t.Fatalf("submit returned %d: %s\n%s", resp.StatusCode, detail.String(), api.logs.String())
 	}
-	return traceID
+	return traceID, callerSpanID
 }
 
 func fetchTrace(t *testing.T, traceID string) []observedSpan {
@@ -321,13 +340,18 @@ func fetchTrace(t *testing.T, traceID string) []observedSpan {
 		}
 		for _, scope := range batch.ScopeSpans {
 			for _, span := range scope.Spans {
+				attributes := make(map[string]string, len(span.Attributes))
+				for _, attribute := range span.Attributes {
+					attributes[attribute.Key] = attribute.Value.StringValue
+				}
 				out = append(out, observedSpan{
-					service:  service,
-					name:     span.Name,
-					kind:     span.Kind,
-					spanID:   span.SpanID,
-					parentID: span.ParentSpanID,
-					links:    len(span.Links),
+					service:    service,
+					name:       span.Name,
+					kind:       span.Kind,
+					spanID:     span.SpanID,
+					parentID:   span.ParentSpanID,
+					links:      len(span.Links),
+					attributes: attributes,
 				})
 			}
 		}
