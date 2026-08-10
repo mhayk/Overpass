@@ -78,6 +78,7 @@ export default function RejectionPanel({
   return (
     <section
       aria-label="Why this request was not scheduled"
+      data-testid="rejection-panel"
       className="rounded border border-slate-700 p-3 text-sm"
     >
       <header className="mb-2">
@@ -89,7 +90,9 @@ export default function RejectionPanel({
 
       {explanation ? (
         <>
-          <p className="text-slate-200">{explanation.summary}</p>
+          <p className="text-slate-200" data-testid="rejection-summary">
+            {explanation.summary}
+          </p>
 
           {explanation.suggestion ? (
             <p className="mt-2 rounded bg-slate-800 p-2 text-slate-300">
