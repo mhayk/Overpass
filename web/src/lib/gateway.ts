@@ -272,6 +272,99 @@ export async function fetchFootprints(window: TimeRange): Promise<{
   };
 }
 
+/** A GeoJSON feature whose properties this client knows the shape of. */
+export interface TypedFeature<P> {
+  type: 'Feature';
+  id?: string;
+  geometry: unknown;
+  properties: P;
+}
+
+/** One request's target — the DEMAND side of the map. */
+export interface TargetProperties {
+  request_id: string;
+  customer_id: string;
+  target_name?: string;
+  state: string;
+  window: { start: string; end: string };
+  opportunity_count: number;
+}
+
+/** One candidate footprint — the CONTENTION side. */
+export interface OpportunityProperties {
+  opportunity_id: string;
+  request_id: string;
+  satellite_id: string;
+  mode: string;
+  window_start: string;
+  window_end: string;
+  quality_score?: number;
+  awarded: boolean;
+}
+
+export interface GeoCollection<P> {
+  features: TypedFeature<P>[];
+  truncated: boolean;
+  staleness: Staleness;
+}
+
+async function getCollection<P>(path: string): Promise<GeoCollection<P>> {
+  const body = await getJson<{
+    features?: TypedFeature<P>[];
+    truncated?: boolean;
+    staleness?: RawStaleness;
+  }>(path);
+  return {
+    features: body.features ?? [],
+    // TRUE when absent, the same safe direction fetchFootprints takes: a
+    // viewport that wrongly believes it has everything draws emptiness over a
+    // region that is merely unread.
+    truncated: body.truncated ?? true,
+    staleness: toStaleness(body.staleness),
+  };
+}
+
+/**
+ * Request targets over a window — what customers ASKED for.
+ *
+ * The half `fetchFootprints` structurally cannot show: footprints are
+ * committed acquisitions, so a region thick with requests and empty of
+ * acquisitions looks exactly like a region nobody asked about. Those are
+ * opposite situations and the density layer exists to tell them apart.
+ */
+export async function fetchTargets(
+  window: TimeRange,
+  state?: string,
+): Promise<GeoCollection<TargetProperties>> {
+  const query = new URLSearchParams({
+    window_start: window.start,
+    window_end: window.end,
+  });
+  if (state) query.set('state', state);
+  return getCollection<TargetProperties>(`/v1/geo/targets?${query.toString()}`);
+}
+
+/**
+ * Candidate footprints over a window, WON AND LOST.
+ *
+ * `awarded: false` means the candidate lost, not that its request went
+ * unserved — the same request may have won on another pass. So a density of
+ * unawarded footprints measures contention for GROUND, which is what the
+ * conflict layer claims to show, and not customer disappointment, which it
+ * does not.
+ */
+export async function fetchOpportunityFootprints(
+  window: TimeRange,
+  awarded?: boolean,
+): Promise<GeoCollection<OpportunityProperties>> {
+  const query = new URLSearchParams({
+    window_start: window.start,
+    window_end: window.end,
+  });
+  if (awarded !== undefined) query.set('awarded', String(awarded));
+  return getCollection<OpportunityProperties>(`/v1/geo/opportunities?${query.toString()}`);
+}
+
 /**
  * The constellation's orbit tracks, as a CZML document.
  *

@@ -22,6 +22,13 @@ import { SubmitRejected, submitRequest, type FieldError } from '@/lib/tasking';
  * multi-megabyte asset arriving silently reads as a broken page, and telling
  * the user what is happening costs one line.
  */
+// deck.gl, like Cesium, touches WebGL at import time and cannot be rendered on
+// the server. Dynamic with ssr:false for the same reason the globe is.
+const PlanningMap = dynamic(() => import('@/components/PlanningMap'), {
+  ssr: false,
+  loading: () => <p className="p-4 text-sm text-slate-400">Loading the planning map…</p>,
+});
+
 const CesiumGlobe = dynamic(() => import('@/components/CesiumGlobe'), {
   ssr: false,
   loading: () => (
@@ -83,6 +90,12 @@ export default function Workspace(): React.JSX.Element {
   const [error, setError] = useState<string | undefined>(undefined);
   const [submitting, setSubmitting] = useState(false);
   const [submitNote, setSubmitNote] = useState<string | undefined>(undefined);
+  const [view, setView] = useState<'globe' | 'map'>('globe');
+
+  // ONE window, computed once, shared by both views. Calling defaultWindow()
+  // separately in each would give them different clocks and let them drift
+  // apart while both looked correct.
+  const [sharedWindow] = useState(defaultWindow);
   const [fieldErrors, setFieldErrors] = useState<FieldError[]>([]);
 
   const load = useCallback(async () => {
@@ -310,13 +323,44 @@ export default function Workspace(): React.JSX.Element {
         </section>
       </aside>
 
-      <div className="h-full">
-        <CesiumGlobe
-          acquisitions={acquisitions}
-          selectedRequestId={selectedRequestId}
-          constellation={constellation}
-          opportunities={opportunities}
-        />
+      {/*
+        Globe over map, sharing ONE window.
+        `view` decides which is on top; both read the same `window` state, which
+        is what M4-01 means by the filter being synchronised — two components
+        deriving their own window from their own clock would drift apart within
+        a minute and neither would be wrong.
+      */}
+      <div className="grid h-full grid-rows-[auto_1fr]">
+        <div className="flex gap-1 border-b border-slate-800 bg-slate-900/60 px-3 py-2">
+          {(['globe', 'map'] as const).map((option) => (
+            <button
+              key={option}
+              type="button"
+              onClick={() => setView(option)}
+              aria-pressed={view === option}
+              className={
+                view === option
+                  ? 'rounded bg-slate-700 px-3 py-1 text-sm text-slate-100'
+                  : 'rounded px-3 py-1 text-sm text-slate-400 hover:text-slate-200'
+              }
+            >
+              {option === 'globe' ? '3D globe' : '2D planning'}
+            </button>
+          ))}
+        </div>
+
+        <div className="h-full min-h-0">
+          {view === 'globe' ? (
+            <CesiumGlobe
+              acquisitions={acquisitions}
+              selectedRequestId={selectedRequestId}
+              constellation={constellation}
+              opportunities={opportunities}
+            />
+          ) : (
+            <PlanningMap window={sharedWindow} />
+          )}
+        </div>
       </div>
     </main>
   );
