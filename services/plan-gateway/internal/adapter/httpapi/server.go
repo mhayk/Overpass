@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/mhayk/overpass/services/plan-gateway/internal/domain"
 	"github.com/mhayk/overpass/services/plan-gateway/internal/port"
@@ -33,8 +34,16 @@ func New(reads port.Reads, health func() error, now func() time.Time, log *slog.
 }
 
 // Routes returns the wired handler.
+//
+// otelhttp wraps the whole router rather than sitting inside chi's chain, so
+// the server span is the OUTERMOST thing in the request and encloses routing.
+// The filter, the span-name formatter and the RouteTag middleware are the same
+// as tasking-api's, deliberately copied rather than varied: the two services
+// must produce the same label shape, or every dashboard panel needs two
+// queries instead of one.
 func (s *Server) Routes() http.Handler {
 	r := chi.NewRouter()
+	r.Use(RouteTag)
 	r.Get("/healthz", s.liveness)
 	r.Get("/readyz", s.readiness)
 	r.Get("/v1/plans", s.listPlans)
@@ -48,7 +57,23 @@ func (s *Server) Routes() http.Handler {
 	r.Get("/v1/geo/plans/{satellite_id}/{bucket_start}/czml", s.planCZML)
 	r.Get("/v1/geo/satellites/czml", s.constellationCZML)
 	r.Get("/v1/geo/footprints", s.footprintsGeoJSON)
-	return r
+
+	return otelhttp.NewHandler(r, "plan-gateway",
+		// Probes excluded. A liveness check every five seconds is the
+		// highest-volume and least interesting operation this service
+		// performs; leaving it in makes the error ratio meaningless, because a
+		// 100% failure rate on a real route disappears into a denominator of
+		// probes.
+		otelhttp.WithFilter(func(req *http.Request) bool {
+			return req.URL.Path != "/healthz" && req.URL.Path != "/readyz"
+		}),
+		otelhttp.WithSpanNameFormatter(func(_ string, req *http.Request) string {
+			if route := chi.RouteContext(req.Context()); route != nil && route.RoutePattern() != "" {
+				return req.Method + " " + route.RoutePattern()
+			}
+			return req.Method + " " + req.URL.Path
+		}),
+	)
 }
 
 func (s *Server) liveness(w http.ResponseWriter, _ *http.Request) {

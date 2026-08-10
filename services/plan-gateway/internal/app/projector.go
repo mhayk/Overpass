@@ -69,7 +69,7 @@ func (p *Projector) Run(ctx context.Context) error {
 func (p *Projector) handle(ctx context.Context, m port.Message) {
 	received := time.Now()
 	if m.Delivered > 1 {
-		p.Metrics.Redelivered()
+		p.Metrics.Redelivered(ctx, m.Subject)
 	}
 
 	// Fold first, ack second, always in that order. Acking on receipt would
@@ -106,18 +106,19 @@ func (p *Projector) handle(ctx context.Context, m port.Message) {
 				if nakErr := p.source.Nak(ctx, m); nakErr != nil {
 					p.log.Warn("nak failed", slog.Any("error", nakErr))
 				}
+				p.Metrics.Observe(ctx, m.Subject, consume.OutcomeFailed, time.Since(received))
 				return
 			}
-			p.Metrics.Deadlettered()
-			p.Metrics.Terminated()
 			if termErr := p.source.Term(ctx, m); termErr != nil {
 				p.log.Warn("term failed", slog.Any("error", termErr))
 			}
+			p.Metrics.Observe(ctx, m.Subject, consume.OutcomeDeadlettered, time.Since(received))
 			return
 		}
 		if nakErr := p.source.Nak(ctx, m); nakErr != nil {
 			p.log.Warn("nak failed", slog.Any("error", nakErr))
 		}
+		p.Metrics.Observe(ctx, m.Subject, consume.OutcomeFailed, time.Since(received))
 		return
 	}
 	if err := p.source.Ack(ctx, m); err != nil {
@@ -125,10 +126,14 @@ func (p *Projector) handle(ctx context.Context, m port.Message) {
 		// cursor guard will Ignore it, which is exactly why the guard exists.
 		p.log.Warn("ack failed; the event will redeliver and be ignored",
 			slog.String("event_id", m.EventID), slog.Any("error", err))
+		// Observed anyway. The fold committed, so this IS processed work; a
+		// failed ack is a redelivery problem, not a lost unit of work, and
+		// leaving it unrecorded would understate throughput exactly when the
+		// broker is struggling.
+		p.Metrics.Observe(ctx, m.Subject, consume.OutcomeProcessed, time.Since(received))
 		return
 	}
-	p.Metrics.Processed()
-	p.Metrics.AckAfter(time.Since(received))
+	p.Metrics.Observe(ctx, m.Subject, consume.OutcomeProcessed, time.Since(received))
 }
 
 // Apply routes one message to the matching fold and advances the cursor.

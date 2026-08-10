@@ -19,6 +19,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 
+	"github.com/mhayk/overpass/lib/go/telemetry"
+
 	"github.com/mhayk/overpass/services/plan-gateway/internal/adapter/config"
 	"github.com/mhayk/overpass/services/plan-gateway/internal/adapter/httpapi"
 	"github.com/mhayk/overpass/services/plan-gateway/internal/adapter/logging"
@@ -27,6 +29,10 @@ import (
 	"github.com/mhayk/overpass/services/plan-gateway/internal/adapter/wire"
 	"github.com/mhayk/overpass/services/plan-gateway/internal/app"
 )
+
+// telemetryScope names the instrumentation scope this service's hand-written
+// spans and metrics are attributed to.
+const telemetryScope = "github.com/mhayk/overpass/services/plan-gateway"
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -44,7 +50,33 @@ func run(ctx context.Context) error {
 		return err
 	}
 
+	// Telemetry before anything reports anything. An unreachable collector is
+	// a warning, never a startup failure: refusing to serve read models
+	// because a metrics backend is down would make observability an
+	// availability dependency, which is exactly backwards.
+	shutdownTelemetry, telemetryErr := telemetry.Setup(ctx, telemetry.Config{
+		ServiceName:    "plan-gateway",
+		ServiceVersion: cfg.Version,
+		Environment:    cfg.Environment,
+		Endpoint:       cfg.OTLPEndpoint,
+		SampleRatio:    cfg.TraceSampleRatio,
+	})
+	if telemetryErr != nil {
+		shutdownTelemetry = func(context.Context) error { return nil }
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+		defer cancel()
+		if shutdownErr := shutdownTelemetry(shutdownCtx); shutdownErr != nil {
+			slog.Warn("telemetry shutdown", slog.Any("error", shutdownErr))
+		}
+	}()
+
 	log := logging.New(os.Stdout, "plan-gateway", cfg.Version, cfg.LogLevel)
+	if telemetryErr != nil {
+		log.Warn("telemetry not started; metrics and spans will be dropped",
+			slog.String("endpoint", cfg.OTLPEndpoint), slog.Any("error", telemetryErr))
+	}
 	log.Info("starting",
 		slog.String("version", cfg.Version),
 		slog.String("env", cfg.Environment),
@@ -106,6 +138,12 @@ func startProjector(
 
 	projector := app.NewProjector(source, postgres.NewProjection(pool), wire.New(),
 		log.With(slog.String("component", "projector")))
+	if bindErr := projector.Metrics.Bind(telemetry.Meter(telemetryScope)); bindErr != nil {
+		// A warning, matching how the projector itself is started: one that
+		// folds correctly while reporting nothing is still better than one
+		// that does not run.
+		log.Warn("consumer metrics not bound", slog.Any("error", bindErr))
+	}
 
 	wg.Add(1)
 	go func() {
