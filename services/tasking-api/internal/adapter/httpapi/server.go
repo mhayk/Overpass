@@ -56,6 +56,7 @@ func New(
 // leaving it in buries real traffic in the trace list.
 func (s *Server) Routes() http.Handler {
 	r := chi.NewRouter()
+	r.Use(RouteTag)
 	r.Use(Correlate(s.log))
 
 	r.Get("/healthz", s.liveness)
