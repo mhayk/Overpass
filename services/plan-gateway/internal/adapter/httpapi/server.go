@@ -26,11 +26,22 @@ type Server struct {
 	health func() error
 	now    func() time.Time
 	log    *slog.Logger
+
+	// readTimeout bounds how long one request may spend in the read models.
+	// See Deadline — every handler here passed an undeadlined context to the
+	// query layer until #51 audited it.
+	readTimeout time.Duration
 }
 
 // New builds the router.
-func New(reads port.Reads, health func() error, now func() time.Time, log *slog.Logger) *Server {
-	return &Server{reads: reads, health: health, now: now, log: log}
+func New(
+	reads port.Reads,
+	health func() error,
+	now func() time.Time,
+	readTimeout time.Duration,
+	log *slog.Logger,
+) *Server {
+	return &Server{reads: reads, health: health, now: now, readTimeout: readTimeout, log: log}
 }
 
 // Routes returns the wired handler.
@@ -43,6 +54,7 @@ func New(reads port.Reads, health func() error, now func() time.Time, log *slog.
 // queries instead of one.
 func (s *Server) Routes() http.Handler {
 	r := chi.NewRouter()
+	r.Use(Deadline(s.readTimeout))
 	r.Use(RouteTag)
 	r.Get("/healthz", s.liveness)
 	r.Get("/readyz", s.readiness)

@@ -166,3 +166,50 @@ def test_instrument_names_are_dotted_and_carry_their_unit(name: str) -> None:
     how overpass.tle.age_hours becomes exactly overpass_tle_age_hours."""
     assert name.startswith("overpass.")
     assert " " not in name
+
+
+def test_breaker_state_is_a_gauge_per_dependency() -> None:
+    """#51 asks for breaker state as a METRIC rather than a log line, because
+    of one specific question: 'why did latency drop while errors rose?' An open
+    breaker is the answer, and it is only answerable if the state can be
+    overlaid on the latency graph it explains."""
+    instruments, reader = _instruments()
+    state = {"value": 0}
+
+    instruments.register_breaker("celestrak", lambda: state["value"])
+
+    points = _read(reader, metrics.BREAKER_STATE)
+    assert [(p.attributes["dependency"], p.value) for p in points] == [("celestrak", 0)]
+
+    # The gauge reads a CALLABLE, not a stored snapshot. Breaker state is
+    # derived from a failure count and a clock, so a stored value would report
+    # the state at registration time — and "has the cooldown expired yet" is
+    # exactly what this gauge is asked.
+    state["value"] = 1
+    points = _read(reader, metrics.BREAKER_STATE)
+    assert [(p.attributes["dependency"], p.value) for p in points] == [("celestrak", 1)]
+
+
+def test_a_constructed_celestrak_client_publishes_its_breaker() -> None:
+    """Registration happens at construction, not from a composition root.
+
+    Nothing in the running services builds a CelestrakClient — ADR-0011 makes
+    the seeder read the frozen snapshot rather than the network — so a gauge
+    wired from a composition root would read a constant zero and imply a
+    healthy dependency that is simply never called. Registering at
+    construction means the series appears the moment live TLE refresh gives
+    the client a caller.
+    """
+    from feasibility.tle import CelestrakClient
+
+    reader = InMemoryMetricReader()
+    provider = MeterProvider(metric_readers=[reader], views=metrics.views())
+    instruments = metrics.build(provider.get_meter("test"))
+
+    client = CelestrakClient()
+    instruments.register_breaker("celestrak", lambda: int(client.breaker.state.value))
+
+    points = _read(reader, metrics.BREAKER_STATE)
+    assert {p.attributes["dependency"] for p in points} == {"celestrak"}
+    # CLOSED is 0, and the enum is numbered so it can be a gauge at all.
+    assert points[0].value == 0

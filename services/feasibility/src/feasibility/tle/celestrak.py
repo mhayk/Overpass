@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING
 
 import httpx
 
+from feasibility import metrics
 from feasibility.resilience import Breaker, BreakerOpenError
 from feasibility.tle.element_set import ElementSet, TleFormatError, parse_catalogue
 
@@ -76,6 +77,28 @@ class CelestrakClient:
         for norad_id in norad_ids:
             out.extend(self.fetch_by_catalog_number(norad_id))
         return out
+
+    def __post_init__(self) -> None:
+        """Publish this breaker's state as a gauge (#51).
+
+        Registered at CONSTRUCTION rather than from a composition root,
+        because the composition root that would do it does not exist: nothing
+        in the running services builds a CelestrakClient. ADR-0011 makes the
+        seeder read the frozen snapshot in testdata rather than the network,
+        deliberately, so the only outbound HTTP this system has is currently
+        unreachable from any running process.
+
+        That is stated here rather than worked around. The M3-04 spec already
+        made this argument one level up — "a breaker with no caller is dead
+        code that looks like resilience" — and the same applies to its metric:
+        a gauge wired from a composition root nobody runs would read a
+        constant zero and imply a healthy dependency that is simply never
+        called. Registering here means the series appears the moment live TLE
+        refresh gives the client a caller, and is honestly absent until then.
+        """
+        metrics.instruments().register_breaker(
+            "celestrak", lambda: int(self.breaker.state.value)
+        )
 
     def _request(self, params: dict[str, str]) -> httpx.Response:
         """One HTTP call, with every transport failure shaped as a CelestrakError.
