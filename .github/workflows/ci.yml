@@ -341,7 +341,19 @@ jobs:
         if: steps.exists.outputs.ready == 'true'
         run: |
           set -euo pipefail
-          DATABASE_URL="$OVERPASS_TEST_DSN" scripts/seed.sh
+          # OVERPASS_SEED_REBASE_EPOCH=0: seed EXACTLY what the file holds.
+          #
+          # The seeder normally stamps the frozen orbits with a current epoch
+          # so a demo stack is not refused as TLE_STALE (#187). These tests
+          # pin their clock to the snapshot's era — test_ephemeris_sweep.py
+          # asserts against WHEN = 2026-08-07T10:37:14Z — and
+          # newest_element_sets filters `epoch <= at`, so a rebased epoch sits
+          # in their future and the constellation reads as unseeded.
+          #
+          # Tests that assert against frozen physics should seed frozen data.
+          # The demo, which asserts nothing and has to actually work, gets the
+          # rebase.
+          OVERPASS_SEED_REBASE_EPOCH=0 DATABASE_URL="$OVERPASS_TEST_DSN" scripts/seed.sh
 
       # A step, not a service container, for the reason the go job records:
       # JetStream needs --jetstream on the command line and a service container

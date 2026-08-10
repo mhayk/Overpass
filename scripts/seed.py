@@ -214,7 +214,13 @@ def seed(dsn: str) -> int:
     # confuses a demo.
     #
     # OVERPASS_SEED_REBASE_EPOCH=0 opts out, for anyone who wants the database
-    # to hold exactly what the file holds.
+    # to hold exactly what the file holds. The Python unit suite sets it,
+    # because those tests pin their clock to the snapshot's era — 2026-08-07 in
+    # test_ephemeris_sweep.py — and `newest_element_sets` filters `epoch <= at`,
+    # so a rebased epoch would sit in their future and read as unseeded.
+    #
+    # Tests that assert against frozen physics seed frozen data. The demo,
+    # which asserts nothing and has to actually work, gets the rebase.
     if os.getenv("OVERPASS_SEED_REBASE_EPOCH", "1") != "0":
         at = datetime.now(UTC) - timedelta(hours=1)
         element_sets = [rebase_epoch(element, at) for element in element_sets]
