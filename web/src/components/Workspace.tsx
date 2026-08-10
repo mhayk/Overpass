@@ -327,7 +327,7 @@ export default function Workspace(): React.JSX.Element {
             </p>
           )}
 
-          <ul className="flex flex-col gap-1">
+          <ul className="flex flex-col gap-1" data-testid="acquisitions">
             {requestIds.map((requestId) => {
               const selected = requestId === selectedRequestId;
               const forRequest = acquisitions.filter((a) => a.requestId === requestId);
@@ -335,6 +335,8 @@ export default function Workspace(): React.JSX.Element {
                 <li key={requestId}>
                   <button
                     type="button"
+                    data-testid="acquisition"
+                    data-request-id={requestId}
                     onClick={() => setSelectedRequestId(selected ? undefined : requestId)}
                     className={`w-full rounded px-2 py-1.5 text-left text-xs ${
                       selected ? 'bg-slate-800 text-slate-100' : 'text-slate-400 hover:bg-slate-900'
@@ -416,7 +418,11 @@ export default function Workspace(): React.JSX.Element {
             </button>
           </form>
 
-          {submitNote !== undefined && <p className="mt-2 text-xs text-slate-400">{submitNote}</p>}
+          {submitNote !== undefined && (
+            <p className="mt-2 text-xs text-slate-400" data-testid="submit-note">
+              {submitNote}
+            </p>
+          )}
 
           {/* Every field error, not just the first. The API renders them all on
               purpose so a user fixes one form rather than four. */}

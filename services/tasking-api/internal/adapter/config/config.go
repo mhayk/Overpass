@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/mhayk/overpass/lib/go/httpx"
 )
 
 // Config is everything this service reads from its environment.
@@ -33,8 +35,14 @@ type Config struct {
 	IngressMaxConns    int32
 	BackgroundMaxConns int32
 
-	SubmitTimeout    time.Duration
-	ReadinessTimeout time.Duration
+	SubmitTimeout time.Duration
+
+	// CORSAllowedOrigins is the browser allow-list. Empty means no browser may
+	// submit, which is the right default for a service behind a same-origin
+	// proxy and the wrong one for the compose stack — where the UI is on :3000
+	// and this is on :8080. See docker-compose.yml.
+	CORSAllowedOrigins []string
+	ReadinessTimeout   time.Duration
 
 	OTLPEndpoint     string
 	TraceSampleRatio float64
@@ -96,6 +104,13 @@ func Load() (Config, error) {
 	// Everything, by default. This is a demo stack where a missing trace is a
 	// broken demo, and the traffic is a handful of requests. M3 lowers it when
 	// there is load worth sampling.
+	// Refused at startup rather than at the first request. A malformed origin
+	// produces no error anywhere at runtime — just a missing header and a
+	// browser message that names no cause.
+	if cfg.CORSAllowedOrigins, err = httpx.ParseOrigins(os.Getenv("CORS_ALLOWED_ORIGINS")); err != nil {
+		problems = append(problems, err.Error())
+	}
+
 	if cfg.TraceSampleRatio, err = ratio("TRACE_SAMPLE_RATIO", 1.0); err != nil {
 		problems = append(problems, err.Error())
 	}

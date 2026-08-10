@@ -347,6 +347,12 @@ services:
       DATABASE_URL: "postgres://${POSTGRES_USER:-overpass}:${POSTGRES_PASSWORD:-overpass}@postgres:5432/${POSTGRES_DB:-overpass}?sslmode=disable"
       NATS_URL: nats://nats:4222
       OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+      # The browser talks to both services directly, and both are on a
+      # different port from the UI — so every read and every submit is
+      # cross-origin. Without this the page loads, fetches, and is handed
+      # nothing: a blank UI with green health checks. Set to the web origin,
+      # never a wildcard.
+      CORS_ALLOWED_ORIGINS: "${WEB_ORIGIN:-http://localhost:3000}"
     ports:
       - "${TASKING_API_PORT:-8080}:8080"
     depends_on:
@@ -433,6 +439,12 @@ services:
       DATABASE_URL: "postgres://${POSTGRES_USER:-overpass}:${POSTGRES_PASSWORD:-overpass}@postgres:5432/${POSTGRES_DB:-overpass}?sslmode=disable"
       NATS_URL: nats://nats:4222
       OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
+      # The browser talks to both services directly, and both are on a
+      # different port from the UI — so every read and every submit is
+      # cross-origin. Without this the page loads, fetches, and is handed
+      # nothing: a blank UI with green health checks. Set to the web origin,
+      # never a wildcard.
+      CORS_ALLOWED_ORIGINS: "${WEB_ORIGIN:-http://localhost:3000}"
     ports:
       # 8083, matching the service's own default — the placeholder comment
       # said 8081, which predated the config that actually shipped.

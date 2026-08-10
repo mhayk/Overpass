@@ -15,6 +15,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/jackc/pgx/v5 v5.7.6
 	github.com/mhayk/overpass/gen/go v0.0.0
+	github.com/mhayk/overpass/lib/go/httpx v0.0.0
 	github.com/mhayk/overpass/lib/go/telemetry v0.0.0
 	github.com/nats-io/nats.go v1.52.0
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.61.0
@@ -64,5 +65,7 @@ require (
 )
 
 replace github.com/mhayk/overpass/gen/go => ../../gen/go
+
+replace github.com/mhayk/overpass/lib/go/httpx => ../../lib/go/httpx
 
 replace github.com/mhayk/overpass/lib/go/telemetry => ../../lib/go/telemetry

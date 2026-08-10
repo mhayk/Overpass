@@ -10,6 +10,8 @@ import (
 	"github.com/go-chi/chi/v5"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
+	"github.com/mhayk/overpass/lib/go/httpx"
+
 	"github.com/mhayk/overpass/gen/go/taskingapi"
 	"github.com/mhayk/overpass/services/tasking-api/internal/app"
 	"github.com/mhayk/overpass/services/tasking-api/internal/domain"
@@ -30,6 +32,23 @@ type Server struct {
 	// A refusal is recoverable and a hang is not, which is the same argument
 	// `unavailable` already makes about a request that could not be stored.
 	submitTimeout time.Duration
+
+	// corsOrigins is the browser allow-list. Empty means no CORS headers,
+	// which is right for every test and every non-browser caller.
+	corsOrigins []string
+}
+
+// corsMaxAge caches a preflight answer for ten minutes, matching plan-gateway.
+const corsMaxAge = 10 * time.Minute
+
+// WithCORS permits these browser origins to submit.
+//
+// Separate from New rather than a fifth positional argument: every existing
+// caller wants a server without one, and a constructor that grows a parameter
+// per optional feature is one nobody can read.
+func (s *Server) WithCORS(origins []string) *Server {
+	s.corsOrigins = origins
+	return s
 }
 
 // New builds the router.
@@ -58,6 +77,23 @@ func (s *Server) Routes() http.Handler {
 	r := chi.NewRouter()
 	r.Use(RouteTag)
 	r.Use(Correlate(s.log))
+
+	if len(s.corsOrigins) > 0 {
+		r.Use(httpx.CORS(httpx.CORSConfig{
+			AllowedOrigins: s.corsOrigins,
+			AllowedMethods: httpx.DefaultCORSMethods,
+			AllowedHeaders: httpx.DefaultCORSHeaders,
+			// WITHOUT THIS THE SUBMIT UI SILENTLY MISREADS EVERY REPLAY.
+			//
+			// Cross-origin, a page can read only the CORS-safelisted response
+			// headers; anything else comes back as null, with no error. The
+			// client turns this header into a boolean, and null is
+			// indistinguishable from "false" — so a de-duplicated resubmission
+			// would be reported to the user as a brand new request.
+			ExposedHeaders: []string{"Idempotency-Replayed"},
+			MaxAge:         corsMaxAge,
+		}))
+	}
 
 	r.Get("/healthz", s.liveness)
 	r.Get("/readyz", s.readiness)

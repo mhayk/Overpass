@@ -13,6 +13,8 @@ import (
 	"github.com/go-chi/chi/v5"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
+	"github.com/mhayk/overpass/lib/go/httpx"
+
 	"github.com/mhayk/overpass/services/plan-gateway/internal/app"
 	"github.com/mhayk/overpass/services/plan-gateway/internal/domain"
 	"github.com/mhayk/overpass/services/plan-gateway/internal/port"
@@ -20,6 +22,13 @@ import (
 
 // ProblemBase is the URI namespace clients branch on, shared with tasking-api.
 const ProblemBase = "https://overpass.dev/problems/"
+
+// corsMaxAge caches a preflight answer for ten minutes.
+//
+// Long enough that a browsing session pays for one preflight rather than one
+// per request; short enough that changing the allow-list takes effect within a
+// coffee break rather than requiring everyone to clear a cache.
+const corsMaxAge = 10 * time.Minute
 
 // Server routes the read API.
 type Server struct {
@@ -37,6 +46,10 @@ type Server struct {
 	// See Deadline — every handler here passed an undeadlined context to the
 	// query layer until #51 audited it.
 	readTimeout time.Duration
+
+	// corsOrigins is the browser allow-list. Empty means no CORS headers,
+	// which is right for every test and every non-browser caller.
+	corsOrigins []string
 }
 
 // New builds the router.
@@ -60,6 +73,16 @@ func (s *Server) WithHub(hub *app.Hub) *Server {
 	return s
 }
 
+// WithCORS permits these browser origins to read the API.
+//
+// Same optional-feature shape as WithHub, and for the same reason. An empty
+// list is a working server that no browser can read, which is what every test
+// here wants and what a deployment behind a same-origin proxy would want too.
+func (s *Server) WithCORS(origins []string) *Server {
+	s.corsOrigins = origins
+	return s
+}
+
 // Routes returns the wired handler.
 //
 // otelhttp wraps the whole router rather than sitting inside chi's chain, so
@@ -73,6 +96,19 @@ func (s *Server) Routes() http.Handler {
 	// RouteTag on the outer router, so every route — streaming or not —
 	// reports its pattern to the metrics.
 	r.Use(RouteTag)
+
+	// CORS on the OUTER router, above the Group below. /v1/events is
+	// registered outside that group to escape the read deadline, so anything
+	// added inside it would silently miss the live stream — a UI that loads
+	// its first render and then never updates.
+	if len(s.corsOrigins) > 0 {
+		r.Use(httpx.CORS(httpx.CORSConfig{
+			AllowedOrigins: s.corsOrigins,
+			AllowedMethods: httpx.DefaultCORSMethods,
+			AllowedHeaders: httpx.DefaultCORSHeaders,
+			MaxAge:         corsMaxAge,
+		}))
+	}
 
 	// THE STREAM IS REGISTERED OUTSIDE THE DEADLINE GROUP.
 	//

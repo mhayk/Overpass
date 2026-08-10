@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/mhayk/overpass/lib/go/httpx"
 )
 
 // Config is everything this service reads from its environment.
@@ -27,6 +29,12 @@ type Config struct {
 	// ReadTimeout bounds one request's time in the read models. See
 	// httpapi.Deadline for why this service needed one at all.
 	ReadTimeout time.Duration
+
+	// CORSAllowedOrigins is the browser allow-list. Empty means no browser may
+	// read this API, which is the right default for a service deployed behind
+	// a same-origin proxy and the wrong one for the compose stack — where the
+	// UI is on :3000 and this is on :8083. See docker-compose.yml.
+	CORSAllowedOrigins []string
 
 	// OTLPEndpoint is the collector's gRPC address; empty disables export.
 	// TraceSampleRatio is head sampling for traces only — metrics are not
@@ -73,6 +81,13 @@ func Load() (Config, error) {
 	}
 
 	if cfg.TraceSampleRatio, err = ratio("TRACE_SAMPLE_RATIO", 1.0); err != nil {
+		problems = append(problems, err.Error())
+	}
+
+	// Refused at startup rather than at the first request. A malformed origin
+	// produces no error anywhere at runtime — just a missing header and a
+	// browser message that names no cause.
+	if cfg.CORSAllowedOrigins, err = httpx.ParseOrigins(os.Getenv("CORS_ALLOWED_ORIGINS")); err != nil {
 		problems = append(problems, err.Error())
 	}
 
