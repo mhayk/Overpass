@@ -542,6 +542,92 @@ paths:
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
 
+  /v1/events:
+    get:
+      operationId: streamEvents
+      tags: [geo]
+      summary: Server-sent stream of plan and request changes
+      description: |
+        A live stream of what the read model has just folded. Submitting a
+        request and watching a plan change without a refresh is the demo, and
+        this is the endpoint that makes it one.
+
+        SSE RATHER THAN WEBSOCKETS. The traffic is unidirectional, SSE
+        reconnects and resumes natively through `Last-Event-ID`, and it
+        survives proxies that mangle WebSocket upgrades. A bidirectional
+        protocol for a unidirectional problem is unearned complexity.
+
+        ## Event types
+
+        | `event:` | `data:` |
+        | --- | --- |
+        | `request` | `{ request_id, state }` — a request changed state |
+        | `plan` | `{ plan_id, satellite_id, bucket_start, plan_version }` — a plan committed |
+        | `reset` | `{}` — resume was not possible; refetch before trusting the stream |
+        | `ping` | `{}` — keeps intermediaries from closing an idle connection |
+
+        Payloads are DELIBERATELY THIN. They name what changed and nothing
+        else, so a client refetches the resource it already knows how to read
+        rather than the stream growing a second, subtly different copy of every
+        read model. A stream that carries full entities is a second API to keep
+        in step with the first.
+
+        ## Resumption
+
+        Every event carries an `id:`. On reconnect the browser sends it back as
+        `Last-Event-ID` automatically and the server replays what it still
+        holds.
+
+        The buffer is BOUNDED and in memory, so resumption is best-effort by
+        construction: a client that was away too long, or that reconnects to a
+        restarted process, gets a `reset` event instead of silence. Silence is
+        the dangerous answer — it looks exactly like "nothing has happened".
+
+        ## Backpressure
+
+        A client that cannot keep up is DISCONNECTED, not buffered. Unbounded
+        per-client buffering turns one slow reader into a server-wide memory
+        problem, and a dropped client reconnects and resumes; a server that has
+        run out of memory does not.
+      parameters:
+        - $ref: '#/components/parameters/SatelliteId'
+        - name: request_id
+          in: query
+          description: Only events for one request. For a page watching a single submission.
+          schema: { $ref: '#/components/schemas/Uuid' }
+        - name: window_start
+          in: query
+          description: |
+            Only plans whose bucket falls in the window. Absent means every
+            bucket — a filter nobody set should not quietly hide anything.
+          schema: { type: string, format: date-time }
+        - name: window_end
+          in: query
+          schema: { type: string, format: date-time }
+      responses:
+        '200':
+          description: |
+            An event stream. Stays open until the client disconnects, the
+            server shuts down, or the client falls too far behind.
+          headers:
+            Cache-Control:
+              schema: { type: string }
+              description: Always `no-store`. A cached event stream is not a stream.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  SSE framing, not JSON. Declared as a string because OpenAPI
+                  3.0.3 has no way to describe a stream of framed events, and
+                  inventing a schema the body does not match would be worse
+                  than saying so — the event vocabulary is in the description
+                  above.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
   /healthz:
     get:
       operationId: getLiveness
