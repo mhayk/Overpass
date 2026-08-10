@@ -1,9 +1,178 @@
 # Performance and failure modes
 
-This document has two halves. The numbers half — throughput, latency, the
-breakpoint — is M3-07 through M3-09 and is not written yet. The failure-modes
-half is below, and it exists because knowing how a system fails is worth more
-than a clean graph of it working.
+This document has two halves. The numbers half is below; the failure-modes half
+follows it, and it exists because knowing how a system fails is worth more than
+a clean graph of it working.
+
+## The environment, stated
+
+An SLO with no stated environment is a number with no meaning, so:
+
+| | |
+| --- | --- |
+| CPU | Intel Core i9-14900K, 32 logical cores |
+| Memory | 31 GiB |
+| Kernel | 6.18.33 (WSL2) |
+| Docker | 29.6.1 |
+| Postgres | 16.4 (postgis/postgis:16-3.4) |
+| Load generator | k6 1.4.0, same host as the stack |
+
+**k6 runs on the same machine as the system under test.** That is not ideal —
+the generator competes with the services for the same 32 cores — and it is
+stated because it bounds what these numbers mean. At 1000 rps k6 used a handful
+of VUs and the box was nowhere near saturated, so the effect is small here; it
+would not be on a smaller machine.
+
+## Ingress: `POST /v1/tasking-requests`
+
+Three rungs, run in sequence, 30s each. `loadtest/k6/ingress.js`, thresholds as
+gates.
+
+| Offered rate | p50 | p90 | p95 | p99 | max | errors |
+| --- | --- | --- | --- | --- | --- | --- |
+| 10 rps | 2.14ms | 3.90ms | 5.79ms | — | 10.45ms | 0 |
+| 100 rps | 1.90ms | 3.01ms | 4.65ms | — | 39.98ms | 0 |
+| 1000 rps | 2.25ms | 6.74ms | 9.79ms | 18.26ms | 49.06ms | 0 |
+
+33,302 requests, zero failures, zero dropped iterations.
+
+| Criterion | Target | Measured | |
+| --- | --- | --- | --- |
+| 1000 rps p95 | < 40ms | **9.79ms** | ✅ |
+| 1000 rps p99 | < 120ms | **18.26ms** | ✅ |
+| 1000 rps errors | zero | **0 / 33,302** | ✅ |
+| 100 rps p95 | < 15ms | **4.65ms** | ✅ |
+
+**The curve is flat, and that is the interesting part.** M3-07 predicted it
+would show "the synchronous ingress path degrading while the async path stays
+flat". The median does not degrade at all between 10 and 1000 rps — 2.14ms,
+1.90ms, 2.25ms — and only the tail grows, p95 roughly doubling from 4.65ms to
+9.79ms.
+
+That is ADR-0003 working, measured rather than argued. Ingress does validation,
+one insert, one outbox insert, and returns 202. It is O(1) work with no
+dependency on constellation size, queue depth, or what the planner is doing, so
+there is nothing in it to degrade until the connection pool or the CPU runs
+out — and at 1000 rps on this box neither is close. The prediction was wrong in
+the right direction.
+
+## End to end: submit to a customer-visible answer
+
+`loadtest/k6/pipeline.js` submits, then polls plan-gateway until the request
+reaches a state a customer can act on. The read model is the customer-visible
+edge, so it is the edge that is timed — "the event was published" is not
+something anyone can see.
+
+Measured on a **cold stack with an empty queue** at 0.1 rps:
+
+| | |
+| --- | --- |
+| Requests | 6, all resolved |
+| Median | 30.3s |
+| p95 | 42.8s |
+| p99 | **44.8s** |
+
+| Criterion | Target | Measured | |
+| --- | --- | --- | --- |
+| End to end p99 at 200 rps | < 5s | **44.8s at 0.1 rps** | ❌ |
+
+**This acceptance criterion is not met, and it is not close.** It is recorded
+here rather than quietly redefined, because the reason is the most useful thing
+this exercise produced.
+
+### Where the 30 seconds goes
+
+Decomposed from database timestamps and service logs:
+
+| Stage | Cost | Note |
+| --- | --- | --- |
+| Ingress accept | ~2ms | measured above |
+| Feasibility sweep | **3.9s median, 4.7s p95** | SGP4 across nine satellites, per request, single worker |
+| Planner round | **< 1ms** | `triggered_at` to `committed_at` rounds to 0.00s |
+| Plan committed → visible | **14–54s** | in bursts, tracking projector fetch cadence |
+
+The planner — the component this project exists to show off, the one doing the
+actual scheduling — is **not** the bottleneck. Allocation of a real round
+completes in under a millisecond. The measured cost is queue time and poll
+cadence:
+
+- **One feasibility worker, ~3.9s per request.** That is `0.25 requests per
+  second` of sustained capacity for the whole pipeline.
+- **Projection hops wait on `FETCH_WAIT`,** 5s by default, across three
+  streams. A request's state is derived from events on TASKING, FEASIBILITY and
+  PLANNING in order, so a single request can wait three fetch intervals.
+
+### Ingress outruns the pipeline by 4000:1
+
+The two numbers above are the finding:
+
+```
+ingress accepts      1000 requests/second
+pipeline drains         0.25 requests/second
+                     ---------------------
+ratio                   4000 : 1
+```
+
+This was observed rather than calculated. A 30-second run of the ingress
+scenario left **33,337 requests in RECEIVED** and a backlog that would take
+roughly **37 hours** to drain at the measured rate.
+
+That is the outbox and JetStream doing exactly what ADR-0003 says they are for:
+ingress availability is decoupled from downstream capacity, and a burst is
+absorbed rather than refused. It is also the honest limit of that design —
+**decoupling converts a throughput problem into a latency problem, and does not
+make it go away.** A customer whose request is behind 33,000 others gets a 202
+in two milliseconds and an answer a day and a half later.
+
+### What would close the gap
+
+Not tuning. In rough order of effect:
+
+1. **Run more than one feasibility worker.** The work is embarrassingly
+   parallel — each request is an independent SGP4 sweep — and the service is
+   already an idempotent consumer on a durable queue, which is exactly the
+   precondition for scaling out horizontally. This is the single change that
+   moves 0.25 rps.
+2. **Reduce per-request SGP4 cost.** Nine satellites × the sampling interval
+   over a 24h horizon, per request. ADR-0016 fixed the sampling policy; nothing
+   has yet profiled the propagation itself.
+3. **Shorten the projection hops.** `FETCH_WAIT` at 5s across three streams is
+   up to 15s of pure waiting for one request. This is a configuration change
+   and the cheapest of the three, but it only addresses the tail after the
+   queue is fixed.
+
+None of this is done, and none of it is in M3's scope. It is written down so the
+next person does not have to rediscover it.
+
+## Planner allocation
+
+The allocation policy benchmark (`make benchmark`,
+[docs/policy-benchmark.md](policy-benchmark.md)) measures the round itself
+against generated problems:
+
+| Candidates | GREEDY_BY_BID | GREEDY_BY_VALUE_DENSITY | VICKREY_SEALED_BID |
+| --- | --- | --- | --- |
+| 5000 | 36.7ms | 55.9ms | 130.7ms |
+
+| Criterion | Target | Measured | |
+| --- | --- | --- | --- |
+| Round with 5000 opportunities p95 | < 800ms | **55.9ms** (configured default) | ✅ |
+
+5000 is the contract's candidate cap, so this is the worst case the schema
+permits rather than a convenient number.
+
+## Reproducing
+
+```bash
+make up-all && make seed
+make loadtest              # both scenarios, thresholds as gates
+```
+
+Thresholds fail the build. `ingress.js` carries the acceptance criteria
+verbatim; `pipeline.js` carries a 60s regression threshold rather than the 5s
+SLO, with the gap recorded above and in the script.
+
+
 
 Every row is a test that kills something on purpose and requires an invariant to
 survive. Nothing here is a description of intended behaviour: each line names
