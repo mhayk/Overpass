@@ -24,6 +24,8 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/mhayk/overpass/lib/go/telemetry/outboxmetrics"
+
 	"github.com/mhayk/overpass/services/tasking-api/internal/telemetry"
 	"github.com/nats-io/nats.go"
 )
@@ -157,8 +159,12 @@ type Relay struct {
 	cfg       Config
 	log       *slog.Logger
 
-	// Metrics is exported so main can serve it and M3 can scrape it.
+	// Metrics is the in-process snapshot the tests read.
 	Metrics Metrics
+
+	// Instruments exports the same facts over OTLP. Optional and nil-safe: a
+	// relay built without a meter publishes exactly as it otherwise would.
+	Instruments *outboxmetrics.Instruments
 }
 
 // New builds a relay.
@@ -188,6 +194,13 @@ func (r *Relay) DrainOnce(ctx context.Context) (published, failed int, err error
 			return err
 		}
 		if len(rows) == 0 {
+			// Report zero lag rather than returning silently. An empty batch
+			// means nothing is waiting, which IS zero lag and is the healthy
+			// steady state — and without this the observable gauge would stay
+			// pinned at whatever the last non-empty batch measured, so
+			// OutboxRelayLagging would keep firing forever after a backlog
+			// cleared.
+			r.Instruments.RecordBatch(ctx, 0, 0, 0)
 			return nil
 		}
 
@@ -259,6 +272,7 @@ func (r *Relay) DrainOnce(ctx context.Context) (published, failed int, err error
 		}
 
 		r.Metrics.record(published, failed, len(rows), lag)
+		r.Instruments.RecordBatch(ctx, published, failed, lag)
 		return nil
 	})
 	return published, failed, txErr

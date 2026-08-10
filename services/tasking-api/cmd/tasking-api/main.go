@@ -20,6 +20,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 
+	"github.com/mhayk/overpass/lib/go/telemetry/outboxmetrics"
+
 	"github.com/mhayk/overpass/services/tasking-api/internal/adapter/config"
 	"github.com/mhayk/overpass/services/tasking-api/internal/adapter/httpapi"
 	"github.com/mhayk/overpass/services/tasking-api/internal/adapter/logging"
@@ -203,6 +205,14 @@ func startRelay(
 
 	relay := outbox.New(pool, outbox.NewNATSPublisher(js), outbox.DefaultConfig(),
 		log.With(slog.String("component", "outbox-relay")))
+	if outboxInstruments, obErr := outboxmetrics.New(telemetry.Meter()); obErr != nil {
+		// A warning, matching how the relay itself is started. A relay that
+		// publishes correctly while reporting nothing beats one that refuses
+		// to publish because a meter would not build.
+		log.Warn("outbox metrics not bound", slog.Any("error", obErr))
+	} else {
+		relay.Instruments = outboxInstruments
+	}
 
 	wg.Add(1)
 	go func() {

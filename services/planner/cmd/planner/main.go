@@ -25,6 +25,7 @@ import (
 	"github.com/nats-io/nats.go"
 
 	"github.com/mhayk/overpass/lib/go/telemetry"
+	"github.com/mhayk/overpass/lib/go/telemetry/outboxmetrics"
 
 	"github.com/mhayk/overpass/services/planner/internal/adapter/config"
 	"github.com/mhayk/overpass/services/planner/internal/adapter/httpapi"
@@ -263,6 +264,11 @@ func startProjector(
 
 	relay := outbox.New(pool, outbox.NewNATSPublisher(js), outbox.DefaultConfig(),
 		log.With(slog.String("component", "relay")))
+	if outboxInstruments, obErr := outboxmetrics.New(telemetry.Meter(telemetryScope)); obErr != nil {
+		log.Warn("outbox metrics not bound", slog.Any("error", obErr))
+	} else {
+		relay.Instruments = outboxInstruments
+	}
 	wg.Add(1)
 	go func() {
 		defer wg.Done()

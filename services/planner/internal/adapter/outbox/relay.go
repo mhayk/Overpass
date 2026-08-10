@@ -20,6 +20,8 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
+
+	"github.com/mhayk/overpass/lib/go/telemetry/outboxmetrics"
 )
 
 // Config controls the relay loop.
@@ -103,6 +105,15 @@ type Relay struct {
 	publisher Publisher
 	cfg       Config
 	log       *slog.Logger
+
+	// Instruments exports backlog age and publish outcomes. Optional and
+	// nil-safe: a relay built without a meter publishes exactly as it
+	// otherwise would.
+	//
+	// This relay had NO metrics at all before #53 — not even the in-process
+	// Stats tasking-api's carries — so planning.outbox could fall arbitrarily
+	// far behind with nothing but log lines to say so.
+	Instruments *outboxmetrics.Instruments
 }
 
 // New builds a relay.
@@ -130,6 +141,22 @@ func (r *Relay) DrainOnce(ctx context.Context) (published, failed int, err error
 		if err != nil {
 			return err
 		}
+		if len(rows) == 0 {
+			// Zero lag, reported rather than skipped. An empty batch means
+			// nothing is waiting; without this the observable gauge would stay
+			// pinned at the last non-empty measurement and OutboxRelayLagging
+			// would keep firing after the backlog had cleared.
+			r.Instruments.RecordBatch(ctx, 0, 0, 0)
+			return nil
+		}
+
+		// The oldest row in the batch, which is the oldest unpublished row in
+		// the table: claim() orders by id and id is monotonic with insertion.
+		var lag time.Duration
+		if age := time.Since(rows[0].occurredAt); age > 0 {
+			lag = age
+		}
+
 		for _, row := range rows {
 			// The stable event_id doubles as the broker's dedup key. Ours is
 			// the outbox row; this is a second line of defence, and it expires
@@ -154,6 +181,7 @@ func (r *Relay) DrainOnce(ctx context.Context) (published, failed int, err error
 			}
 			published++
 		}
+		r.Instruments.RecordBatch(ctx, published, failed, lag)
 		return nil
 	})
 	return published, failed, txErr
