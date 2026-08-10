@@ -33,6 +33,21 @@ export interface Acquisition {
   /** RFC 7946 geometry, longitude first. Passed to the map untouched. */
   footprint: unknown;
   awardedValueCredits: number;
+  /**
+   * Attitude manoeuvre plus settling after the preceding acquisition.
+   *
+   * The number M4-02 exists to render. The timeline draws it as an OCCUPIED
+   * block rather than as idle time, because an idle-looking gap invites "why
+   * is the satellite doing nothing?" and the answer is that it is rotating,
+   * and it is expensive, and that is the constraint that makes this problem
+   * hard.
+   *
+   * Undefined for the first acquisition in a plan, which has nothing to slew
+   * from — distinct from zero, which would mean an instantaneous manoeuvre.
+   */
+  slewFromPreviousS?: number | undefined;
+  /** Idle time before this acquisition, after any slew. */
+  gapFromPreviousS?: number | undefined;
 }
 
 export interface Opportunity {
@@ -156,6 +171,8 @@ interface RawAcquisition {
   status: AcquisitionStatus;
   footprint: unknown;
   awarded_value_credits: number;
+  slew_time_from_previous_s?: number;
+  gap_from_previous_s?: number;
 }
 
 function toAcquisition(raw: RawAcquisition): Acquisition {
@@ -169,6 +186,8 @@ function toAcquisition(raw: RawAcquisition): Acquisition {
     status: raw.status,
     footprint: raw.footprint,
     awardedValueCredits: raw.awarded_value_credits,
+    slewFromPreviousS: raw.slew_time_from_previous_s,
+    gapFromPreviousS: raw.gap_from_previous_s,
   };
 }
 

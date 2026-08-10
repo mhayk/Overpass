@@ -29,6 +29,10 @@ const PlanningMap = dynamic(() => import('@/components/PlanningMap'), {
   loading: () => <p className="p-4 text-sm text-slate-400">Loading the planning map…</p>,
 });
 
+// SVG only, so it could render on the server — but it shares the view switch
+// with two WebGL siblings and mounting it the same way keeps one code path.
+const Timeline = dynamic(() => import('@/components/Timeline'), { ssr: false });
+
 const CesiumGlobe = dynamic(() => import('@/components/CesiumGlobe'), {
   ssr: false,
   loading: () => (
@@ -90,7 +94,7 @@ export default function Workspace(): React.JSX.Element {
   const [error, setError] = useState<string | undefined>(undefined);
   const [submitting, setSubmitting] = useState(false);
   const [submitNote, setSubmitNote] = useState<string | undefined>(undefined);
-  const [view, setView] = useState<'globe' | 'map'>('globe');
+  const [view, setView] = useState<'globe' | 'map' | 'timeline'>('globe');
 
   // ONE window, computed once, shared by both views. Calling defaultWindow()
   // separately in each would give them different clocks and let them drift
@@ -332,7 +336,7 @@ export default function Workspace(): React.JSX.Element {
       */}
       <div className="grid h-full grid-rows-[auto_1fr]">
         <div className="flex gap-1 border-b border-slate-800 bg-slate-900/60 px-3 py-2">
-          {(['globe', 'map'] as const).map((option) => (
+          {(['globe', 'map', 'timeline'] as const).map((option) => (
             <button
               key={option}
               type="button"
@@ -344,7 +348,7 @@ export default function Workspace(): React.JSX.Element {
                   : 'rounded px-3 py-1 text-sm text-slate-400 hover:text-slate-200'
               }
             >
-              {option === 'globe' ? '3D globe' : '2D planning'}
+              {option === 'globe' ? '3D globe' : option === 'map' ? '2D planning' : 'Timeline'}
             </button>
           ))}
         </div>
@@ -357,8 +361,17 @@ export default function Workspace(): React.JSX.Element {
               constellation={constellation}
               opportunities={opportunities}
             />
-          ) : (
+          ) : view === 'map' ? (
             <PlanningMap window={sharedWindow} />
+          ) : (
+            <Timeline
+              acquisitions={acquisitions}
+              selectedRequestId={selectedRequestId}
+              // The same setter the globe's selection uses, so selecting a
+              // block here highlights the acquisition there. One piece of
+              // state rather than a message between views.
+              onSelectRequest={setSelectedRequestId}
+            />
           )}
         </div>
       </div>
