@@ -220,6 +220,13 @@ alerts-test: ## Unit-test the Prometheus alert rules (needs Docker)
 		--entrypoint promtool $(PROMETHEUS_IMAGE) \
 		test rules /rules/alerts_test.yml
 
+.PHONY: dashboards-check
+dashboards-check: ## Assert every Grafana panel renders against the running stack
+	@# The queries are read from the committed dashboard JSON, never restated.
+	@# A check carrying its own copy of the query proves only that the check's
+	@# query works — which is how overpass_dlq_depth survived review.
+	@$(ROOT)/scripts/dashboards-check.sh
+
 .PHONY: test-integration
 test-integration: ## Integration tests against real Postgres and real NATS (needs Docker)
 	@# Not part of `make test`. These start containers and build both service
