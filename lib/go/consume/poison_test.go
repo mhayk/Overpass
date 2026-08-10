@@ -1,6 +1,7 @@
 package consume_test
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -42,13 +43,12 @@ func TestAnUnboundedConsumerNeverTerminatesTransients(t *testing.T) {
 
 func TestMetricsAggregateHonestly(t *testing.T) {
 	var m consume.Metrics
-	m.Processed()
-	m.Processed()
-	m.Duplicate()
-	m.Redelivered()
-	m.Terminated()
-	m.AckAfter(10 * time.Millisecond)
-	m.AckAfter(30 * time.Millisecond)
+	ctx := context.Background()
+	m.Observe(ctx, "s", consume.OutcomeProcessed, 10*time.Millisecond)
+	m.Observe(ctx, "s", consume.OutcomeProcessed, 30*time.Millisecond)
+	m.Observe(ctx, "s", consume.OutcomeDuplicate, 20*time.Millisecond)
+	m.Observe(ctx, "s", consume.OutcomeTerminated, 20*time.Millisecond)
+	m.Redelivered(ctx, "s")
 
 	s := m.Snapshot()
 	if s.Processed != 2 || s.Duplicates != 1 || s.Redeliveries != 1 || s.Terminated != 1 {
