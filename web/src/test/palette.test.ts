@@ -68,7 +68,14 @@ describe('sequential ramps', () => {
     // survives every form of colour blindness AND greyscale printing.
     const luminance = ramp.map(([r, g, b]) => 0.2126 * r + 0.7152 * g + 0.0722 * b);
     for (let i = 1; i < luminance.length; i += 1) {
-      expect(luminance[i]).toBeLessThan(luminance[i - 1]);
+      const step = luminance[i];
+      const previous = luminance[i - 1];
+      // Asserted present rather than indexed blindly: tsconfig has
+      // noUncheckedIndexedAccess, and `expect(undefined).toBeLessThan(...)`
+      // would be a type error rather than a failing assertion.
+      expect(step).toBeDefined();
+      expect(previous).toBeDefined();
+      expect(step!).toBeLessThan(previous!);
     }
   });
 
