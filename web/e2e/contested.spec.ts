@@ -33,11 +33,10 @@ test('a losing request is told which constraint bound', async ({ page, request }
   });
   await waitForState(request, probeId, ['AWAITING_PLANNING', 'PLANNED', 'ACQUIRED']);
 
+  // firstOpportunityWindow polls until the rows are readable. waitForState
+  // above is not enough on its own: PLANNED is derived from acquisitions, and
+  // acquisitions can be folded before the opportunities they came from.
   const contested = await firstOpportunityWindow(request, probeId);
-  expect(
-    contested,
-    'the probe produced no opportunity; the constellation is unseeded or the horizon is empty',
-  ).toBeDefined();
   // TypeScript does not narrow through expect, and exactOptionalPropertyTypes
   // will not let an optional window through. Stated rather than asserted away
   // with `!`, so the failure names itself if the check above ever changes.
