@@ -326,6 +326,10 @@ test-e2e: ## Playwright end-to-end tests against the full stack
 
 ## Performance
 
+.PHONY: frontend-perf
+frontend-perf: ## Measure the frontend: frame time, TTI, memory over a session
+	@$(ROOT)/scripts/frontend-perf.sh $(ARGS)
+
 .PHONY: benchmark
 benchmark: ## Run the allocation policy benchmark and regenerate the report
 	cd services/planner && go run ./cmd/benchmark -out ../../docs/policy-benchmark.md
