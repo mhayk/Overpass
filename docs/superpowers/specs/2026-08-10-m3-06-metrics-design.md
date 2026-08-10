@@ -25,8 +25,10 @@ in that same file already describes and thought it had finished fixing:
 
 It looked like coverage because the DLQ rule was fixed and its neighbours were
 not. **These three names are therefore fixed points, not proposals** — the
-instruments are named to produce them, and if the exporter refuses, the rule
-changes and this document says why.
+instruments are named to produce them. Whether that is even possible was
+measured against a running collector before anything was built; see "The naming
+rule, measured" below. It is, but only one of the two obvious ways to declare
+an instrument gets there.
 
 **The domain numbers are already computed.** `planMetrics` in
 `services/planner/internal/app/plan.go` builds total plan value, requests
@@ -144,7 +146,7 @@ matters.
 feasibility worker.** One histogram:
 
 ```
-overpass.consume.duration_ms{service, subject, outcome}
+overpass.consume.duration_ms{subject, outcome}
   outcome ∈ processed | duplicate | terminated | deadlettered | failed
 ```
 
@@ -156,7 +158,7 @@ redeliver.
 Plus one counter that does not fit that shape:
 
 ```
-overpass.consume.redeliveries{service, subject}
+overpass.consume.redeliveries{subject}
 ```
 
 Redelivery is orthogonal to outcome — a redelivered message can still be
@@ -184,8 +186,8 @@ real export.
 | `overpass_opportunities_per_request` | histogram | — | feasibility pipeline, per computed request |
 | `overpass_feasibility_refusals_total` | counter | `reason` | feasibility refusal path |
 | `overpass_tle_age_hours` | gauge | `satellite_id` | feasibility sweep |
-| `overpass_outbox_pending_seconds` | gauge | `service` | relay, all three producers |
-| `overpass_outbox_published_total` | counter | `service`, `outcome ∈ published \| failed` | relay |
+| `overpass_outbox_pending_seconds` | gauge | — | relay, all three producers |
+| `overpass_outbox_published_total` | counter | `outcome ∈ published \| failed` | relay |
 
 Names are given in Prometheus form. The instruments are declared in OTel form —
 `overpass.requests.unfulfilled`, `overpass.tle.age_hours` — and the exporter
@@ -215,24 +217,48 @@ to vanish.
 element set is old. `max by (satellite_id)` still gives the aggregate.
 
 **Cardinality is bounded on purpose.** `reason_code` 7, `satellite_id` 9,
-`policy` 4, `subject` ~6, `service` 4. No `customer_id`, no `request_id`, no
+`policy` 4, `subject` ~6. No `customer_id`, no `request_id`, no
 `round_id` — those are trace attributes, and putting an unbounded identifier in
 a label is how a Prometheus instance is killed by its own instrumentation.
 
-### The naming risk
+### The naming rule, measured
 
-The OTel-to-Prometheus exporter appends unit suffixes and `_total`, by rules
-this document is not going to assert from memory — three M0 defects came from
-confident, wrong claims about tool behaviour, and CLAUDE.md's first hard-won
-rule exists because of them.
+**Bake the unit into the instrument name and leave the OTel `unit` field
+empty.** Dots become underscores, monotonic sums gain `_total`, and nothing
+else is appended.
 
-So: instrument, run the stack, `curl otel-collector:8889/metrics`, and read the
-names that actually come out. The three names in `alerts.yml` are the target. If
-the exporter cannot be made to produce `overpass_allocation_duration_ms_bucket`
-— for instance if a `ms` unit forces `_milliseconds` — then the alert rule
-changes to the real name and this section records what the exporter did.
+Measured, not reasoned about: candidate names were pushed to the running
+collector as raw OTLP/HTTP JSON — no SDK, so nothing sits between the payload
+and the exporter's translation — and `:8889/metrics` was read back.
 
-This is the one part of the design that is a hypothesis rather than a decision.
+| Instrument | `unit` | Prometheus name |
+| --- | --- | --- |
+| `overpass.allocation.duration_ms` | *(empty)* | `overpass_allocation_duration_ms_bucket` |
+| `overpass.allocation.duration` | `ms` | `overpass_allocation_duration_milliseconds_bucket` |
+| `overpass.tle.age_hours` | *(empty)* | `overpass_tle_age_hours` |
+| `overpass.outbox.pending_seconds` | *(empty)* | `overpass_outbox_pending_seconds` |
+| `overpass.requests.unfulfilled` | *(empty)* | `overpass_requests_unfulfilled_total` |
+| `http.server.request.duration` | `s` | `http_server_request_duration_seconds_bucket` |
+
+All three names `alerts.yml` already commits to are reproducible exactly, so no
+alert rule changes for naming reasons. **Declaring the unit properly — the
+thing that looks more correct — is what breaks them:** `unit: "ms"` expands to
+`_milliseconds` and silently orphans `PlannerRoundsSlow`. That is the whole
+reason this was measured rather than assumed.
+
+The semconv HTTP instrument is exempt: `otelhttp` declares `unit: "s"` and the
+expansion to `_seconds` is the name everyone else's dashboards already use.
+
+### Labels come from the resource
+
+`resource_to_telemetry_conversion` is already enabled, so every series arrives
+with `service_name`, `service_version`, `deployment_environment` and `job`
+without any instrument declaring them.
+
+So there is **no explicit `service` label** on the consumer or outbox metrics.
+An earlier draft of this table had one; it would have produced `service` and
+`service_name` side by side, disagreeing the first time one of them was set
+from a different string.
 
 ## Decision 5 — alerts, corrected and split
 
