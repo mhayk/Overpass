@@ -21,7 +21,7 @@ import json
 import os
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -66,6 +66,55 @@ def _epoch_from_line1(line1: str) -> datetime:
     year = 1900 + yy if yy >= 57 else 2000 + yy
     day_of_year = float(line1[20:32])
     return datetime(year, 1, 1, tzinfo=UTC) + timedelta(days=day_of_year - 1)
+
+
+def _checksum(line: str) -> int:
+    """The mod-10 TLE checksum over columns 1-68.
+
+    Digits count as themselves, a minus sign counts as 1, everything else
+    counts as zero. Duplicated from feasibility's tle_checksum rather than
+    imported: this script depends on the standard library only, and reaching
+    into a service package for eleven lines would give the seeder a dependency
+    on the thing it seeds.
+    """
+    return sum(int(c) if c.isdigit() else 1 if c == "-" else 0 for c in line[:68]) % 10
+
+
+def rebase_epoch(element: ElementSet, at: datetime) -> ElementSet:
+    """Return the same orbit, stamped with a current epoch.
+
+    THE FROZEN SNAPSHOT AGES, AND FEASIBILITY REFUSES STALE ELEMENT SETS.
+
+    testdata/tle/ is frozen on purpose — the golden orbital tests assert
+    against those exact element sets, and refreshing the file turns a
+    regression suite into a snapshot of whatever the code did that day. But
+    `StalenessPolicy` refuses to compute against anything 72 hours old, so a
+    snapshot that is correct as a test fixture becomes unusable as seed data
+    about three days after it is taken. Left alone, `make demo` refuses every
+    request as TLE_STALE and the integration suite times out waiting for
+    opportunities that can never arrive (#187).
+
+    Rebasing separates the two uses instead of trading one off against the
+    other. The golden tests keep reading the file directly and are untouched;
+    the DATABASE gets the same mean elements stamped with a current epoch —
+    the same orbit, observed now.
+
+    What this does and does not preserve, stated plainly: inclination, RAAN,
+    eccentricity, argument of perigee, mean anomaly and mean motion are all
+    carried over unchanged, so the orbit's SHAPE is identical. Its PHASE
+    relative to wall-clock time is not — the satellite is where it would be if
+    those elements had been observed now rather than on the snapshot date. For
+    a demo constellation that is the intent; for the golden tests it would be
+    wrong, which is exactly why they read the file and this does not touch it.
+    """
+    day_of_year = (at - datetime(at.year, 1, 1, tzinfo=UTC)).total_seconds() / 86400.0 + 1.0
+    stamped = f"{at.year % 100:02d}{day_of_year:012.8f}"
+    line1 = element.line1[:18] + stamped + element.line1[32:]
+    # Column 69 is the checksum, and it is over the columns just rewritten. A
+    # line whose checksum no longer matches is rejected by the parser on the
+    # way back in, which would turn this fix into a different failure.
+    line1 = line1[:68] + str(_checksum(line1))
+    return replace(element, line1=line1, epoch=_epoch_from_line1(line1))
 
 
 def read_snapshot(path: Path) -> list[ElementSet]:
@@ -157,6 +206,19 @@ CUSTOMERS = [
 
 def seed(dsn: str) -> int:
     element_sets = read_snapshot(SNAPSHOT)
+
+    # Stamp the frozen orbits with a current epoch unless told not to. An hour
+    # ago rather than exactly now, so the constellation reads as freshly
+    # observed rather than as a set of predictions — StalenessPolicy calls
+    # anything under 24h fresh, and a future epoch is a real thing that only
+    # confuses a demo.
+    #
+    # OVERPASS_SEED_REBASE_EPOCH=0 opts out, for anyone who wants the database
+    # to hold exactly what the file holds.
+    if os.getenv("OVERPASS_SEED_REBASE_EPOCH", "1") != "0":
+        at = datetime.now(UTC) - timedelta(hours=1)
+        element_sets = [rebase_epoch(element, at) for element in element_sets]
+        print(f"  {DIM}epochs rebased to {at.isoformat(timespec='seconds')}{RESET}")
     modes = json.dumps(SENSOR_MODES)
 
     with psycopg.connect(dsn) as connection, connection.cursor() as cursor:

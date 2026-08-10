@@ -236,41 +236,29 @@ jobs:
 
           # WAIT FOR A ROUND, do not sleep for one.
           #
-          # A fixed sleep was a race and passed by luck: the domain panels need
-          # a COMMITTED PLAN, which needs a feasibility sweep to produce
-          # candidates and the planner's quiet period to elapse with none
-          # arriving. On a loaded runner that takes longer than any sleep worth
-          # writing, and the gate then reports seven broken panels for a
-          # pipeline that is merely slow — a false failure, which trains people
-          # to re-run red builds.
+          # A fixed sleep was a race that passed by luck: the domain panels
+          # need a COMMITTED PLAN, which needs a feasibility sweep to produce
+          # candidates and the planner's quiet period to elapse. Polling the
+          # metric the panels actually read means the wait ends the moment the
+          # data exists, and a genuine stall fails saying the pipeline
+          # committed no plan rather than that the dashboards are wrong.
           #
-          # Polling the metric the panels actually read means the wait ends the
-          # moment the data exists, and a genuine stall still fails with a
-          # message that says the pipeline produced no plan rather than that
-          # the dashboards are wrong.
-          # Wait for the FEASIBILITY half of the pipeline, which is as far as a
-          # cold stack currently gets: #187 has the frozen TLE snapshot aged
-          # past its 72h refusal threshold, so every demo request is refused
-          # TLE_STALE and no round ever commits. Waiting for a plan here would
-          # be waiting for something that cannot happen, and reporting it as a
-          # dashboard failure would blame the panels for an expired fixture.
-          #
-          # Polling rather than sleeping: the wait ends when the data exists,
-          # and a genuine stall fails saying which half of the pipeline is
-          # silent rather than that the dashboards are wrong.
-          echo "waiting for the first sweep to be scraped"
-          deadline=$((SECONDS + 180))
+          # This is also the regression test for #187: a stale TLE fixture
+          # makes feasibility refuse every request, so nothing reaches the
+          # planner and this loop times out with the logs that say why.
+          echo "waiting for the pipeline to commit a plan"
+          deadline=$((SECONDS + 240))
           until curl -sf --get http://localhost:9090/api/v1/query \
-                  --data-urlencode 'query=overpass_tle_age_hours' \
+                  --data-urlencode 'query=overpass_allocation_duration_ms_count' \
                 | grep -q '"value"'; do
             if [ "$SECONDS" -ge "$deadline" ]; then
-              echo "::error::feasibility published no metrics within 180s"
+              echo "::error::no plan was committed within 240s; the dashboards have nothing to show"
               docker compose logs --tail=60 planner feasibility
               exit 1
             fi
             sleep 10
           done
-          echo "feasibility is reporting"
+          echo "a plan is committed and scraped"
 
           ./scripts/dashboards-check.sh
 

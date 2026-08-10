@@ -502,6 +502,13 @@ jobs:
       - name: Path-ownership gate self-test
         run: ./scripts/check-path-ownership.test.sh
 
+      # #187: the frozen snapshot ages, and feasibility refuses element sets
+      # over 72 hours old. The seeder rebases their epochs so what reaches the
+      # database is always fresh; this asserts that, and that the rebase is
+      # still a valid orbit-preserving TLE. No database and no network.
+      - name: The seeder writes fresh element sets
+        run: python3 scripts/seed_rebase.test.py
+
   # ---------------------------------------------------------------------------
   # Alert rules
   # ---------------------------------------------------------------------------
