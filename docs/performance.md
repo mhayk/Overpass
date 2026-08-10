@@ -325,9 +325,23 @@ make up-all && make seed
 make loadtest              # both scenarios, thresholds as gates
 ```
 
-Thresholds fail the build. `ingress.js` carries the acceptance criteria
-verbatim; `pipeline.js` carries a 60s regression threshold rather than the 5s
-SLO, with the gap recorded above and in the script.
+Thresholds fail the build — `make loadtest` exits non-zero on a breach,
+verified at exit 99. `ingress.js` carries the acceptance criteria verbatim;
+`pipeline.js` carries a 60s regression threshold rather than the 5s SLO, with
+the gap recorded above and in the script.
+
+**They are not run in CI, and that is deliberate.** The ingress scenario was
+added to the cold-start workflow and removed again after it failed on
+`dropped_iterations` and on the 100 rps rung. That was not a regression in the
+service: a GitHub runner has two cores and is already hosting Postgres, NATS,
+Tempo, Prometheus, Grafana and four application services, so k6 competes with
+all of them and reports the latency of a queue it created itself.
+
+The choice was to lower the numbers until they passed, or to admit the
+measurement does not belong there. Lowering them is how a gate stops meaning
+anything — still green, no longer evidence. It is the same confound recorded
+above for the breakpoint test, in its most extreme form, and #190 is the issue
+for fixing it by moving load generation off-host.
 
 
 
