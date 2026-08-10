@@ -94,10 +94,15 @@ func (p *Projection) projectRequestReceived(ctx context.Context, tx pgx.Tx, e po
 // not, because until the displacing plan lands the request genuinely is still
 // planned.
 //
-// The terminal states (EXPIRED, CANCELLED, INFEASIBLE, ACQUIRED) are not
-// derivable from the four events this gateway folds and are not projected yet.
-// When their events land they must win over this derivation, because they are
-// decisions rather than consequences.
+// INFEASIBLE is the exception, and the first terminal state to arrive: it wins
+// over everything below it. feasibility.failed.v1 is not a consequence to be
+// re-derived from rows that exist — it is a verdict that no rows will ever
+// exist, and before #207 it was dropped on the floor entirely, leaving refused
+// requests at RECEIVED forever.
+//
+// The remaining terminal states (EXPIRED, CANCELLED, ACQUIRED) are still not
+// derivable from the events this gateway folds and are still not projected.
+// When their events land they must win here too, for the same reason.
 //
 // last_event_at is a high-water mark. Guarding it would let an old event that
 // legitimately updates identity fields drag staleness backwards.
@@ -108,6 +113,16 @@ const reconcileSQL = `
 	        WHERE o.request_id = r.request_id
 	    ),
 	    state = CASE
+	        -- A DECISION BEATS A DERIVATION. The comment above this SQL has
+	        -- said so since the four-event version: terminal states "must win
+	        -- over this derivation, because they are decisions rather than
+	        -- consequences". This is the first one to actually land.
+	        --
+	        -- Derived from the stored fact rather than assigned when the event
+	        -- arrives, so it survives every later reconcile — which is the
+	        -- whole reason this function recomputes from rows instead of from
+	        -- the event in hand.
+	        WHEN r.infeasibility IS NOT NULL THEN 'INFEASIBLE'
 	        WHEN EXISTS (
 	            SELECT 1 FROM readmodel.acquisition_views a
 	            WHERE a.request_id = r.request_id AND a.status <> 'SUPERSEDED'
@@ -346,6 +361,28 @@ func (p *Projection) ProjectUnfulfilled(ctx context.Context, e port.RequestUnful
 			WHERE request_id = $1 AND last_event_at <= $3
 		`, e.RequestID, e.ReasonJSON, e.EventAt); err != nil {
 			return fmt.Errorf("projecting unfulfilment for %s: %w", e.RequestID, err)
+		}
+		return reconcileRequest(ctx, tx, e.RequestID, e.EventAt)
+	})
+}
+
+// ProjectFeasibilityFailed records that the system cannot answer at all.
+//
+// Unlike an unfulfilment, this DOES decide the state — but it decides it by
+// writing the fact and letting reconcileRequest derive INFEASIBLE from it,
+// rather than by assigning the state here. Assigning it directly would put a
+// terminal state one reconcile away from being overwritten by the derivation,
+// which is exactly the class of bug reconcileRequest exists to prevent.
+func (p *Projection) ProjectFeasibilityFailed(ctx context.Context, e port.FeasibilityFailed) error {
+	return pgx.BeginFunc(ctx, p.pool, func(tx pgx.Tx) error {
+		// Same guard and same reason as unfulfilment: this is a decision, and a
+		// redelivered older one must not overwrite a newer verdict.
+		if _, err := tx.Exec(ctx, `
+			UPDATE readmodel.request_views
+			SET infeasibility = $2, updated_at = now()
+			WHERE request_id = $1 AND last_event_at <= $3
+		`, e.RequestID, e.ReasonJSON, e.EventAt); err != nil {
+			return fmt.Errorf("projecting infeasibility for %s: %w", e.RequestID, err)
 		}
 		return reconcileRequest(ctx, tx, e.RequestID, e.EventAt)
 	})
