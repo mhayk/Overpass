@@ -150,7 +150,20 @@ func (s *Source) Next(ctx context.Context) ([]port.Message, error) {
 		// set", and dropping either one loses something that matters —
 		// MaxWait alone ignores shutdown, Context alone lets one fetch block
 		// on a quiet stream while the others starve.
-		fetchCtx, cancel := context.WithTimeout(ctx, s.wait)
+		// A SHORT wait while scanning, not the full FetchWait.
+		//
+		// An empty stream costs its whole timeout, and the scan visits every
+		// stream before it can return. With two of three streams drained and
+		// one holding a backlog, plan-gateway spent ten seconds waiting per
+		// batch of 32 — a measured 3 messages per second, and 67 hours to
+		// work through 920,000 pending. The projector looked alive and was
+		// effectively stopped.
+		//
+		// The long wait still exists, once, after the scan finds nothing at
+		// all: that is the case FetchWait is actually for — parking cheaply on
+		// an idle system rather than spinning. Paying it per stream turned a
+		// backlog on one into latency on all of them.
+		fetchCtx, cancel := context.WithTimeout(ctx, scanWait)
 		msgs, err := s.subs[stream].Fetch(s.batch, nats.Context(fetchCtx))
 		cancel()
 
@@ -190,6 +203,13 @@ func (s *Source) Next(ctx context.Context) ([]port.Message, error) {
 			s.deadletterUnreadable(ctx, stream, m)
 		}
 		return out, nil
+	}
+	// Every stream was empty. NOW wait properly, once, so an idle projector
+	// parks instead of spinning through short timeouts.
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-time.After(s.wait):
 	}
 	return nil, nil
 }
@@ -374,6 +394,12 @@ func flattenHeaders(header nats.Header) map[string]string {
 	}
 	return out
 }
+
+// scanWait bounds one stream's fetch while scanning for work.
+//
+// Short on purpose: the scan visits every stream, so this is paid once per
+// stream per round rather than once per round. See Next.
+const scanWait = 250 * time.Millisecond
 
 // nextStart returns the index Next should begin its scan at, and advances the
 // rotation.
