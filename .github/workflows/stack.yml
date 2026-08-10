@@ -262,6 +262,34 @@ jobs:
 
           ./scripts/dashboards-check.sh
 
+      # M3-07: thresholds as gates, not decoration. k6 exits non-zero when one
+      # is breached, so a performance regression fails the build.
+      #
+      # Only the INGRESS scenario runs in CI. The end-to-end one takes minutes
+      # by construction — the pipeline drains at about a quarter of a request
+      # per second, see docs/performance.md — and a gate that adds five minutes
+      # to every push is a gate people route around. It stays a `make
+      # loadtest-pipeline` you run deliberately.
+      #
+      # TOP_RATE is lowered for the runner, which has a fraction of the cores
+      # docs/performance.md was measured on. That WEAKENS the claim rather
+      # than preserving it — p95 < 40ms at 200 rps is a smaller statement than
+      # the same bar at 1000 — and it is the honest trade: a k6 that cannot
+      # generate the offered rate fails `dropped_iterations` and the
+      # thresholds would then describe a load that was never applied.
+      #
+      # The full-rate numbers live in docs/performance.md, measured on the
+      # hardware that document names. This gate catches regressions; that
+      # document makes the claim.
+      - name: Ingress thresholds hold
+        run: |
+          set -euo pipefail
+          docker run --rm --network host \
+            -v "$PWD/loadtest/k6:/scripts:ro" \
+            -e TASKING_API_URL=http://localhost:8080 \
+            -e TOP_RATE=200 \
+            grafana/k6:1.4.0 run /scripts/ingress.js
+
       - name: Diagnostics on failure
         if: failure()
         run: |

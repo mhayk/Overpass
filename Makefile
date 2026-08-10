@@ -29,6 +29,11 @@ ROOT        := $(shell git rev-parse --show-toplevel 2>/dev/null || pwd)
 # Read from docker-compose.yml rather than restated, so promtool and the
 # running server can never disagree about rule syntax.
 PROMETHEUS_IMAGE := $(shell grep -oE 'prom/prometheus:[^ ]+' $(ROOT)/docker-compose.yml | head -1)
+# k6 in a container: --network host so localhost reaches the compose ports, and
+# the scripts mounted read-only. No host install to keep in step with CI.
+K6 := docker run --rm --network host -v $(ROOT)/loadtest/k6:/scripts:ro \
+	-e TASKING_API_URL -e PLAN_GATEWAY_URL -e RATE -e TIME_UNIT -e DURATION \
+	grafana/k6:1.4.0
 
 # Read .env the way docker compose does, so the two cannot disagree about where
 # Postgres is listening.
@@ -242,6 +247,28 @@ alerts-test: prometheus-config ## Unit-test the Prometheus alert rules (needs Do
 		--entrypoint promtool $(PROMETHEUS_IMAGE) \
 		test rules /etc/prometheus/tests/alerts_test.yml
 
+.PHONY: loadtest
+loadtest: loadtest-ingress loadtest-pipeline ## Run every k6 scenario as a gate (needs a running stack)
+
+.PHONY: loadtest-ingress
+loadtest-ingress: ## Ingress latency curve at 10/100/1000 rps, thresholds as gates
+	@$(K6) run /scripts/ingress.js
+
+.PHONY: loadtest-pipeline
+loadtest-pipeline: ## Submit-to-visible latency end to end, thresholds as gates
+	@# RATE and TIME_UNIT default to 0.2 rps inside the script. The sustainable
+	@# rate is below one per second — docs/performance.md has the measurement
+	@# and the reason — and above capacity this measures queue depth rather
+	@# than pipeline latency.
+	@$(K6) run /scripts/pipeline.js
+
+.PHONY: loadtest-breakpoint
+loadtest-breakpoint: ## Ramp until something gives, then watch it recover (not a gate)
+	@# Deliberately NOT part of `make loadtest`. It has no thresholds — its
+	@# output is a number and a failure mode, and a threshold would turn
+	@# "find the limit" into "assert the limit has not moved".
+	@$(K6) run /scripts/breakpoint.js
+
 .PHONY: dashboards-check
 dashboards-check: ## Assert every Grafana panel renders against the running stack
 	@# The queries are read from the committed dashboard JSON, never restated.
@@ -289,10 +316,6 @@ test-e2e: ## Playwright end-to-end tests against the full stack
 benchmark: ## Run the allocation policy benchmark and regenerate the report
 	cd services/planner && go run ./cmd/benchmark -out ../../docs/policy-benchmark.md
 	@echo "wrote docs/policy-benchmark.md"
-
-.PHONY: loadtest
-loadtest: ## Run the k6 suite with thresholds as gates
-	@echo "not yet implemented — issue #52 (M3-07)"
 
 ## Operations
 
