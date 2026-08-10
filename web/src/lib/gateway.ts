@@ -66,6 +66,27 @@ export interface Opportunity {
   won: boolean;
 }
 
+/**
+ * Why a request did not get an acquisition, as STRUCTURED DATA.
+ *
+ * The contract's own note is the reason this is not a message string: strings
+ * cannot be aggregated, charted, or acted on, and a bid suggestion is only
+ * possible if the shortfall is a number.
+ *
+ * Every field here is produced by the planner and passed through untouched.
+ * Nothing is recomputed in the browser, which is what makes the explanation a
+ * customer sees the same one the planner actually made.
+ */
+export interface Unfulfilment {
+  reasonCode: string;
+  /** How much more the bid needed to be. LOST_TO_HIGHER_VALUE. */
+  shortfallCredits?: number | undefined;
+  /** BLOCKED_BY_SLEW_CONSTRAINT: the manoeuvre against the room for it. */
+  requiredSlewS?: number | undefined;
+  availableGapS?: number | undefined;
+  supersededByPlanId?: string | undefined;
+}
+
 export interface RequestView {
   requestId: string;
   customerId: string;
@@ -73,6 +94,8 @@ export interface RequestView {
   state: string;
   window: TimeRange;
   opportunityCount: number;
+  /** Absent when the request was not refused — most of them. */
+  unfulfilment?: Unfulfilment | undefined;
   staleness: Staleness;
 }
 
@@ -251,6 +274,13 @@ export async function fetchRequest(requestId: string): Promise<RequestView> {
     state: string;
     window: TimeRange;
     opportunity_count: number;
+    unfulfilment?: {
+      reason_code: string;
+      shortfall_credits?: number;
+      required_slew_s?: number;
+      available_gap_s?: number;
+      superseded_by_plan_id?: string;
+    };
     staleness?: RawStaleness;
   }>(`/v1/requests/${encodeURIComponent(requestId)}`);
 
@@ -261,6 +291,15 @@ export async function fetchRequest(requestId: string): Promise<RequestView> {
     state: body.state,
     window: body.window,
     opportunityCount: body.opportunity_count,
+    unfulfilment: body.unfulfilment
+      ? {
+          reasonCode: body.unfulfilment.reason_code,
+          shortfallCredits: body.unfulfilment.shortfall_credits,
+          requiredSlewS: body.unfulfilment.required_slew_s,
+          availableGapS: body.unfulfilment.available_gap_s,
+          supersededByPlanId: body.unfulfilment.superseded_by_plan_id,
+        }
+      : undefined,
     staleness: toStaleness(body.staleness),
   };
 }

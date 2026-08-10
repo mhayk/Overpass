@@ -28,8 +28,10 @@ import {
   pan,
   ticks,
   visibleBlocks,
+  withGhosts,
   zoom,
   type Block,
+  type Ghost,
   type Viewport,
 } from '@/lib/timeline';
 import { INK, MODE_COLOUR, MODE_FALLBACK, css } from '@/lib/palette';
@@ -41,6 +43,19 @@ const AXIS_HEIGHT = 22;
 
 export interface TimelineProps {
   acquisitions: Acquisition[];
+  /**
+   * Candidates that lost. Rendering only winners shows the RESULT of
+   * de-confliction; rendering the losers shows the DECISION.
+   */
+  ghosts?: Ghost[] | undefined;
+  /**
+   * Why a request lost, keyed by request id, for the ghost tooltip.
+   *
+   * Supplied by the parent rather than fetched here: the same explanations
+   * feed the M4-04 panel, and two components fetching them independently would
+   * be two caches disagreeing about one answer.
+   */
+  reasons?: Record<string, string> | undefined;
   // `| undefined` explicitly, not just `?`. tsconfig sets
   // exactOptionalPropertyTypes, which distinguishes "absent" from "present and
   // undefined" — and a parent holding this in useState always passes the
@@ -52,10 +67,20 @@ export interface TimelineProps {
 
 export default function Timeline({
   acquisitions,
+  ghosts,
+  reasons,
   selectedRequestId,
   onSelectRequest,
 }: TimelineProps): React.JSX.Element {
-  const rows = useMemo(() => buildRows(acquisitions), [acquisitions]);
+  // OFF BY DEFAULT. Ghosts are dense — there are several candidates per winner
+  // — and shown unasked they would bury the schedule they are supposed to
+  // explain. The toggle is what makes them a tool rather than noise.
+  const [showGhosts, setShowGhosts] = useState(false);
+
+  const rows = useMemo(() => {
+    const winners = buildRows(acquisitions);
+    return showGhosts && ghosts ? withGhosts(winners, ghosts) : winners;
+  }, [acquisitions, ghosts, showGhosts]);
 
   const bounds = useMemo(() => {
     const times = acquisitions.flatMap((a) => [
@@ -123,6 +148,18 @@ export default function Timeline({
 
   return (
     <div ref={containerRef} className="h-full w-full overflow-auto" style={{ background: '#0f172a' }}>
+      <label className="flex items-center gap-2 px-3 py-2 text-xs text-slate-300">
+        <input
+          type="checkbox"
+          checked={showGhosts}
+          onChange={() => setShowGhosts((on) => !on)}
+        />
+        Show losing candidates
+        <span className="text-slate-500">
+          — what the planner considered and turned down
+        </span>
+      </label>
+
       {rows.length === 0 ? (
         <p className="p-4 text-sm text-slate-400">
           No acquisitions in this window. Submit a request, or widen the window.
@@ -183,11 +220,12 @@ export default function Timeline({
 
                 {visibleBlocks(row, effective).map((block, blockIndex) => (
                   <BlockRect
-                    key={`${block.kind}-${block.acquisitionId ?? blockIndex}-${block.startMs}`}
+                    key={`${block.kind}-${block.acquisitionId ?? block.opportunityId ?? blockIndex}-${block.startMs}`}
                     block={block}
                     view={effective}
                     y={y + 6}
                     selected={block.requestId !== undefined && block.requestId === selectedRequestId}
+                    reason={block.requestId ? reasons?.[block.requestId] : undefined}
                     onSelect={onSelectRequest}
                   />
                 ))}
@@ -205,38 +243,49 @@ function BlockRect({
   view,
   y,
   selected,
+  reason,
   onSelect,
 }: {
   block: Block;
   view: Viewport;
   y: number;
   selected: boolean;
+  reason?: string | undefined;
   onSelect?: ((requestId: string) => void) | undefined;
 }): React.JSX.Element | null {
   const rect = blockRect(block, view);
   if (!rect) return null;
 
   const isSlew = block.kind === 'slew';
-  const fill = isSlew
-    ? 'url(#slew-hatch)'
-    : css(MODE_COLOUR[block.mode ?? ''] ?? MODE_FALLBACK, 0.85);
+  const isGhost = block.kind === 'ghost';
+  const modeColour = MODE_COLOUR[block.mode ?? ''] ?? MODE_FALLBACK;
+
+  // GHOSTS MUST NOT COMPETE WITH THE COMMITTED SCHEDULE. They keep the mode's
+  // hue so a reader can see WHICH kind of pass was declined, but they are
+  // outline-only and half-height: unfilled reads as "considered", filled reads
+  // as "happened", and the difference has to survive a glance.
+  const fill = isSlew ? 'url(#slew-hatch)' : isGhost ? 'none' : css(modeColour, 0.85);
 
   const seconds = Math.round((block.endMs - block.startMs) / 1000);
   const label = isSlew
     ? `Slewing, ${seconds}s — the satellite is rotating, not idle`
-    : `${block.mode} acquisition, ${seconds}s`;
+    : isGhost
+      ? `Candidate not scheduled — ${block.mode}, ${seconds}s` +
+        (reason ? `\nWhy it lost: ${reason}` : '\nSelect it to see why it lost')
+      : `${block.mode} acquisition, ${seconds}s`;
 
   return (
     <g>
       <rect
         x={LABEL_WIDTH + rect.x}
-        y={y}
+        y={isGhost ? y + BLOCK_HEIGHT / 4 : y}
         width={rect.width}
-        height={BLOCK_HEIGHT}
+        height={isGhost ? BLOCK_HEIGHT / 2 : BLOCK_HEIGHT}
         rx={3}
         fill={fill}
-        stroke={selected ? INK.primary : 'transparent'}
-        strokeWidth={selected ? 2 : 0}
+        stroke={selected ? INK.primary : isGhost ? css(modeColour, 0.75) : 'transparent'}
+        strokeWidth={selected ? 2 : isGhost ? 1 : 0}
+        strokeDasharray={isGhost && !selected ? '3 2' : undefined}
         style={{ cursor: block.requestId ? 'pointer' : 'default' }}
         onClick={() => {
           if (block.requestId && onSelect) onSelect(block.requestId);

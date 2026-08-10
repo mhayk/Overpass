@@ -9,6 +9,7 @@ import {
   pan,
   ticks,
   visibleBlocks,
+  withGhosts,
   zoom,
   type Viewport,
 } from '@/lib/timeline';
@@ -184,5 +185,57 @@ describe('ticks', () => {
     expect(marks.length).toBeGreaterThan(1);
     const step = marks[1]! - marks[0]!;
     expect([5, 15, 30, 60, 180, 360, 720, 1440].map((m) => m * 60_000)).toContain(step);
+  });
+});
+
+describe('ghosts', () => {
+  const ghost = {
+    opportunityId: 'o1',
+    requestId: 'r9',
+    satelliteId: 'SENTINEL-1A',
+    mode: 'SCAN',
+    startMs: Date.parse('2026-08-10T12:30:00Z'),
+    endMs: Date.parse('2026-08-10T12:30:20Z'),
+  };
+
+  it('does not count losing candidates as imaging time', () => {
+    // Duty cycle is what the satellite actually SPENT. Counting candidates it
+    // declined would report it as busier than it was — which is the number an
+    // operator would use to decide it had no capacity left.
+    const rows = buildRows([
+      acquisition({ start: '2026-08-10T12:00:00Z', end: '2026-08-10T12:00:10Z' }),
+    ]);
+    const before = rows[0]!.imagingSeconds;
+    const after = withGhosts(rows, [ghost]);
+    expect(after[0]!.imagingSeconds).toBe(before);
+  });
+
+  it('gives a satellite that won nothing a row of its own', () => {
+    // "This satellite was considered and won nothing" is a real answer, and
+    // dropping the row would make the constellation look smaller than it is.
+    const rows = withGhosts([], [{ ...ghost, satelliteId: 'ICEYE-X2' }]);
+    expect(rows.map((r) => r.satelliteId)).toEqual(['ICEYE-X2']);
+    expect(rows[0]!.blocks).toHaveLength(1);
+    expect(rows[0]!.blocks[0]!.kind).toBe('ghost');
+  });
+
+  it('leaves the winners untouched when there are no ghosts', () => {
+    const rows = buildRows([
+      acquisition({ start: '2026-08-10T12:00:00Z', end: '2026-08-10T12:00:10Z' }),
+    ]);
+    expect(withGhosts(rows, [])).toEqual(rows);
+  });
+
+  it('does not let a ghost invent a slew between passes never flown', () => {
+    // Slew is derived from consecutive COMMITTED acquisitions. Feeding losing
+    // candidates into that sequence would draw manoeuvres the satellite never
+    // made, which is why ghosts are a separate pass rather than an input to
+    // buildRows.
+    const rows = withGhosts(
+      buildRows([acquisition({ start: '2026-08-10T12:00:00Z', end: '2026-08-10T12:00:10Z' })]),
+      [ghost],
+    );
+    expect(rows[0]!.blocks.filter((b) => b.kind === 'slew')).toHaveLength(0);
+    expect(rows[0]!.slewSeconds).toBe(0);
   });
 });
