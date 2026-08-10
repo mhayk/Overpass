@@ -22,10 +22,18 @@ test('a losing request is told which constraint bound', async ({ page, request }
   const stamp = Date.now();
   const ids: string[] = [];
 
-  // Several, not two. Two requests over a nine-satellite constellation often
-  // both win — contention needs demand to exceed capacity, which is a property
-  // of the constellation rather than of the number two.
-  for (let i = 0; i < 12; i++) {
+  // FOUR, measured rather than guessed. This was twelve on the reasoning that
+  // a nine-satellite constellation needs a lot of demand before anything
+  // loses. That reasoning ignored the window: feasibility finds ONE
+  // opportunity per request in a three-hour window over a single point, so
+  // every request here wants the same slot and all but one must lose. Four
+  // submissions were measured producing four refusals.
+  //
+  // The count is not free. Feasibility is a single worker at roughly 0.25 rps
+  // (#189), so each extra request is real wall-clock in a budget that has to
+  // hold on a shared CI runner — twelve of them timed out at 150s having
+  // proved nothing. Four contends just as hard for a third of the time.
+  for (let i = 0; i < 4; i++) {
     ids.push(
       await submit(request, {
         customerId: i % 2 === 0 ? 'acme-imaging' : 'port-authority-nl',
