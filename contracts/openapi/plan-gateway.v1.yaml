@@ -987,19 +987,27 @@ components:
             - $ref: '#/components/schemas/Polygon'
         properties:
           type: object
-          required: [request_id, customer_id, priority_tier, state, submitted_at]
+          required: [request_id, customer_id, state, window]
+          description: |
+            EXACTLY what readmodel.request_views carries, and no more.
+
+            An earlier draft of this schema also declared priority_tier and
+            bid_credits. The read model holds neither — they live on the write
+            side in tasking.tasking_requests and were never projected — so the
+            fields would have been declared, generated into two languages, and
+            then served as nulls forever. Colouring a density layer by tier is
+            a reasonable thing to want and it needs a migration and a projector
+            change first, deliberately, rather than a contract that promises it.
           properties:
             request_id: { $ref: '#/components/schemas/Uuid' }
             customer_id: { type: string }
             target_name: { type: string }
-            priority_tier:
-              type: string
-              enum: [BEST_EFFORT, COMMERCIAL, CIVIL_PROTECTION, GOVERNMENT]
             state:
               type: string
               enum:
                 [RECEIVED, AWAITING_PLANNING, PLANNED, ACQUIRED, INFEASIBLE, REJECTED, EXPIRED, CANCELLED]
-            bid_credits: { type: integer, minimum: 0 }
+            window:
+              $ref: '#/components/schemas/TimeWindow'
             opportunity_count:
               type: integer
               minimum: 0
@@ -1008,7 +1016,6 @@ components:
                 non-RECEIVED state is a request feasibility could not serve, and
                 it is the difference between "nobody wanted this ground" and
                 "nobody could image it".
-            submitted_at: { type: string, format: date-time }
 
     TargetFeatureCollection:
       type: object
