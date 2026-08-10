@@ -39,6 +39,15 @@ type Projector struct {
 
 	// Metrics is exported so main can serve it and M3-06 can scrape it.
 	Metrics consume.Metrics
+
+	// Hub receives a Change after each successful fold. Optional and
+	// nil-checked: a projector without one folds exactly as it otherwise
+	// would, which is what every existing test wants.
+	//
+	// Published AFTER the projection commits, never before. A client told
+	// "this changed" refetches immediately, and announcing a write that has
+	// not landed sends it to read the old value and cache it as new.
+	Hub *Hub
 }
 
 // NewProjector wires the loop.
@@ -162,6 +171,17 @@ func (p *Projector) handle(ctx context.Context, m port.Message) {
 	span.SetAttributes(attribute.String("overpass.outcome", consume.OutcomeProcessed))
 }
 
+// announce publishes a change, if anything is listening.
+//
+// Deliberately fire-and-forget: Hub.Publish never blocks and drops clients
+// that cannot keep up, so a subscriber's problem cannot become the
+// projector's. See Hub.
+func (p *Projector) announce(change Change) {
+	if p.Hub != nil {
+		p.Hub.Publish(change)
+	}
+}
+
 // Apply routes one message to the matching fold and advances the cursor.
 //
 // Exported so the integration tests can drive a replay without a broker.
@@ -201,7 +221,11 @@ func (p *Projector) route(ctx context.Context, m port.Message) (time.Time, error
 			return time.Time{}, err
 		}
 		e.EventAt = pick(e.EventAt, m.EventAt)
-		return e.EventAt, p.projection.ProjectRequestReceived(ctx, e)
+		if err := p.projection.ProjectRequestReceived(ctx, e); err != nil {
+			return time.Time{}, err
+		}
+		p.announce(Change{Kind: "request", RequestID: e.RequestID, State: "RECEIVED"})
+		return e.EventAt, nil
 	case SubjectOpportunitiesComputed:
 		e, err := p.decode.Opportunities(m.Payload)
 		if err != nil {
@@ -215,7 +239,17 @@ func (p *Projector) route(ctx context.Context, m port.Message) (time.Time, error
 			return time.Time{}, err
 		}
 		e.EventAt = pick(e.EventAt, m.EventAt)
-		return e.EventAt, p.projection.ProjectPlanCommitted(ctx, e)
+		if err := p.projection.ProjectPlanCommitted(ctx, e); err != nil {
+			return time.Time{}, err
+		}
+		p.announce(Change{
+			Kind:        "plan",
+			PlanID:      e.PlanID,
+			SatelliteID: e.SatelliteID,
+			BucketStart: e.BucketStart,
+			PlanVersion: e.PlanVersion,
+		})
+		return e.EventAt, nil
 	case SubjectEphemerisComputed:
 		e, err := p.decode.Ephemeris(m.Payload)
 		if err != nil {
@@ -229,7 +263,15 @@ func (p *Projector) route(ctx context.Context, m port.Message) (time.Time, error
 			return time.Time{}, err
 		}
 		e.EventAt = pick(e.EventAt, m.EventAt)
-		return e.EventAt, p.projection.ProjectUnfulfilled(ctx, e)
+		if err := p.projection.ProjectUnfulfilled(ctx, e); err != nil {
+			return time.Time{}, err
+		}
+		// The state a refusal produces is AWAITING_PLANNING, not a terminal
+		// one: an unfulfilled request stays in contention for later buckets.
+		// Announcing it as final would be the UI's version of the same mistake
+		// the state machine already avoids.
+		p.announce(Change{Kind: "request", RequestID: e.RequestID, State: "AWAITING_PLANNING"})
+		return e.EventAt, nil
 	default:
 		// Not an error. A gateway that fails on a subject it was not built for
 		// would block the whole stream the day another service starts

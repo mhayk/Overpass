@@ -10,11 +10,13 @@ import {
   fetchOpportunities,
   fetchOpportunityFootprints,
   fetchRequest,
+  gatewayUrl,
   type Acquisition,
   type Opportunity,
   type Staleness,
 } from '@/lib/gateway';
 import { explainUnfulfilment } from '@/lib/explain';
+import { subscribe } from '@/lib/live';
 import type { Ghost } from '@/lib/timeline';
 import { SubmitRejected, submitRequest, type FieldError } from '@/lib/tasking';
 
@@ -104,6 +106,9 @@ export default function Workspace(): React.JSX.Element {
   const [submitNote, setSubmitNote] = useState<string | undefined>(undefined);
   const [view, setView] = useState<'globe' | 'map' | 'timeline'>('globe');
   const [ghosts, setGhosts] = useState<Ghost[]>([]);
+  // Bumped by the live stream. Refetches key off it, so one subscription
+  // refreshes every view rather than each view holding its own connection.
+  const [liveTick, setLiveTick] = useState(0);
   // requestId -> a human sentence for why it lost. Held here rather than in the
   // timeline because the M4-04 panel needs the same answers, and two
   // components fetching them independently would be two caches disagreeing.
@@ -137,6 +142,21 @@ export default function Workspace(): React.JSX.Element {
       cancelled = true;
     };
   }, [selectedRequestId, reasons]);
+
+  // THE LIVE STREAM. Submitting a request and watching a plan appear without
+  // a refresh is the demo, and this is what makes it one.
+  //
+  // A change bumps a counter rather than carrying data. The events are thin by
+  // contract — they name what changed and the client refetches the resource it
+  // already knows how to read — so the honest reaction is "something moved,
+  // reload it", not "splice this payload into state".
+  useEffect(() => {
+    const stop = subscribe({
+      gatewayUrl: gatewayUrl(),
+      onChanges: () => setLiveTick((n) => n + 1),
+    });
+    return stop;
+  }, []);
 
   // Losing candidates, for the ghost layer. Fetched with the window rather
   // than on demand: the timeline needs them all at once to lay out rows, and
@@ -196,9 +216,12 @@ export default function Workspace(): React.JSX.Element {
     }
   }, []);
 
+  // Refetch on load AND whenever the stream says something moved. The tick is
+  // in the dependency list rather than the effect body reading it, so React
+  // schedules exactly one refetch per coalesced batch.
   useEffect(() => {
     void load();
-  }, [load]);
+  }, [load, liveTick]);
 
   // The selected request's candidates, won and lost.
   //

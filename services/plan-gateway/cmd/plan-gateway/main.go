@@ -89,12 +89,16 @@ func run(ctx context.Context) error {
 	}
 	defer pool.Close()
 
+	// One hub, shared by the projector that fills it and the HTTP server that
+	// drains it. Created here because it is the only place that knows both.
+	hub := app.NewHub()
+
 	reads := postgres.NewReads(pool)
 	probe := func() error { return pool.Ping(ctx) }
 	server := &http.Server{
 		Addr: cfg.HTTPAddr,
 		Handler: httpapi.New(reads, probe, func() time.Time { return time.Now().UTC() },
-			cfg.ReadTimeout, log).Routes(),
+			cfg.ReadTimeout, log).WithHub(hub).Routes(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -103,7 +107,7 @@ func run(ctx context.Context) error {
 	// already folded, with the staleness on every response saying exactly how
 	// old that is. Refusing to start would replace stale answers with none.
 	var wg sync.WaitGroup
-	if closeProjector, projErr := startProjector(ctx, cfg, pool, log, &wg); projErr != nil {
+	if closeProjector, projErr := startProjector(ctx, cfg, pool, hub, log, &wg); projErr != nil {
 		log.Warn("projector not started; read models will not advance",
 			slog.Any("error", projErr))
 	} else {
@@ -119,6 +123,7 @@ func startProjector(
 	ctx context.Context,
 	cfg config.Config,
 	pool *pgxpool.Pool,
+	hub *app.Hub,
 	log *slog.Logger,
 	wg *sync.WaitGroup,
 ) (func(), error) {
@@ -139,6 +144,7 @@ func startProjector(
 
 	projector := app.NewProjector(source, postgres.NewProjection(pool), wire.New(),
 		log.With(slog.String("component", "projector")))
+	projector.Hub = hub
 	if bindErr := projector.Metrics.Bind(telemetry.Meter(app.TelemetryScope)); bindErr != nil {
 		// A warning, matching how the projector itself is started: one that
 		// folds correctly while reporting nothing is still better than one

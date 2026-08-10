@@ -13,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
+	"github.com/mhayk/overpass/services/plan-gateway/internal/app"
 	"github.com/mhayk/overpass/services/plan-gateway/internal/domain"
 	"github.com/mhayk/overpass/services/plan-gateway/internal/port"
 )
@@ -26,6 +27,11 @@ type Server struct {
 	health func() error
 	now    func() time.Time
 	log    *slog.Logger
+
+	// hub fans read-model changes out to SSE subscribers. Optional: a server
+	// built without one simply has no live stream, which is what every
+	// existing test wants.
+	hub *app.Hub
 
 	// readTimeout bounds how long one request may spend in the read models.
 	// See Deadline — every handler here passed an undeadlined context to the
@@ -44,6 +50,16 @@ func New(
 	return &Server{reads: reads, health: health, now: now, readTimeout: readTimeout, log: log}
 }
 
+// WithHub attaches the live stream.
+//
+// Separate from New rather than a sixth positional argument: every existing
+// caller wants a server without one, and a constructor that grows a parameter
+// per optional feature is one nobody can read.
+func (s *Server) WithHub(hub *app.Hub) *Server {
+	s.hub = hub
+	return s
+}
+
 // Routes returns the wired handler.
 //
 // otelhttp wraps the whole router rather than sitting inside chi's chain, so
@@ -54,23 +70,45 @@ func New(
 // queries instead of one.
 func (s *Server) Routes() http.Handler {
 	r := chi.NewRouter()
-	r.Use(Deadline(s.readTimeout))
+	// RouteTag on the outer router, so every route — streaming or not —
+	// reports its pattern to the metrics.
 	r.Use(RouteTag)
-	r.Get("/healthz", s.liveness)
-	r.Get("/readyz", s.readiness)
-	r.Get("/v1/plans", s.listPlans)
-	r.Get("/v1/plans/{satellite_id}/{bucket_start}", s.getPlan)
-	r.Get("/v1/acquisitions", s.listAcquisitions)
-	r.Get("/v1/requests/{request_id}", s.getRequest)
-	r.Get("/v1/requests/{request_id}/opportunities", s.listOpportunities)
 
-	// The geo renderings, per ADR-0009: CZML for Cesium, GeoJSON for deck.gl,
-	// both from the same read model so the two views cannot disagree.
-	r.Get("/v1/geo/plans/{satellite_id}/{bucket_start}/czml", s.planCZML)
-	r.Get("/v1/geo/satellites/czml", s.constellationCZML)
-	r.Get("/v1/geo/footprints", s.footprintsGeoJSON)
-	r.Get("/v1/geo/targets", s.targetsGeoJSON)
-	r.Get("/v1/geo/opportunities", s.opportunityFootprintsGeoJSON)
+	// THE STREAM IS REGISTERED OUTSIDE THE DEADLINE GROUP.
+	//
+	// Deadline (#51) exists so a stalled query cannot hold a request open
+	// forever. A stream is SUPPOSED to be held open, so inheriting it would
+	// close the connection after READ_TIMEOUT and go on doing that forever — a
+	// feature that looks broken rather than slow.
+	//
+	// chi.Group, not Mount. Mount INHERITS the parent's middleware, so a
+	// sub-router mounted after r.Use(Deadline) is still deadlined — which is
+	// how the first version of this was written, and a test caught it closing
+	// the stream 200ms in.
+	if s.hub != nil {
+		r.Get("/v1/events", s.streamEvents)
+	}
+
+	r.Group(func(gr chi.Router) {
+		gr.Use(Deadline(s.readTimeout))
+
+		gr.Get("/healthz", s.liveness)
+		gr.Get("/readyz", s.readiness)
+		gr.Get("/v1/plans", s.listPlans)
+		gr.Get("/v1/plans/{satellite_id}/{bucket_start}", s.getPlan)
+		gr.Get("/v1/acquisitions", s.listAcquisitions)
+		gr.Get("/v1/requests/{request_id}", s.getRequest)
+		gr.Get("/v1/requests/{request_id}/opportunities", s.listOpportunities)
+
+		// The geo renderings, per ADR-0009: CZML for Cesium, GeoJSON for
+		// deck.gl, both from the same read model so the two views cannot
+		// disagree.
+		gr.Get("/v1/geo/plans/{satellite_id}/{bucket_start}/czml", s.planCZML)
+		gr.Get("/v1/geo/satellites/czml", s.constellationCZML)
+		gr.Get("/v1/geo/footprints", s.footprintsGeoJSON)
+		gr.Get("/v1/geo/targets", s.targetsGeoJSON)
+		gr.Get("/v1/geo/opportunities", s.opportunityFootprintsGeoJSON)
+	})
 
 	return otelhttp.NewHandler(r, "plan-gateway",
 		// Probes excluded. A liveness check every five seconds is the

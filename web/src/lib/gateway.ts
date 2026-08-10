@@ -151,6 +151,17 @@ function baseUrl(): string {
   return process.env.NEXT_PUBLIC_GATEWAY_URL ?? DEFAULT_GATEWAY_URL;
 }
 
+/**
+ * The gateway's base URL, for callers that build their own connection.
+ *
+ * EventSource cannot go through the fetch helpers in this module, so the
+ * stream needs the same base by another route rather than a second copy of
+ * the environment lookup that could drift from this one.
+ */
+export function gatewayUrl(): string {
+  return baseUrl();
+}
+
 interface RawStaleness {
   as_of?: string;
   lag_seconds?: number;
