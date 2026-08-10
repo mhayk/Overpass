@@ -29,6 +29,18 @@ import psycopg
 
 ROOT = Path(__file__).resolve().parent.parent
 SNAPSHOT = ROOT / "testdata" / "tle" / "sar-constellation.2026-08-07.tle"
+# The second observation of the same nine spacecraft, three days later. What the
+# simulator treats as where they ACTUALLY were (#62).
+TRUTH_SNAPSHOT = ROOT / "testdata" / "tle" / "sar-constellation.2026-08-10.tle"
+
+# Where the OLDEST planning element set is placed relative to now.
+#
+# 70 hours, deliberately just inside StalenessPolicy's 72. Every other planning
+# set is newer than this one by its real margin, so the whole constellation
+# stays usable while keeping the real spread between satellites — and the demo
+# runs close enough to the threshold that TLE_DRIFT_MISS is a live possibility
+# rather than a theoretical one.
+OLDEST_PLANNING_AGE_HOURS = 70.0
 
 GREEN, YELLOW, DIM, RESET = "\033[32m", "\033[33m", "\033[90m", "\033[0m"
 
@@ -221,10 +233,49 @@ def seed(dsn: str) -> int:
     #
     # Tests that assert against frozen physics seed frozen data. The demo,
     # which asserts nothing and has to actually work, gets the rebase.
+    truth_sets = read_snapshot(TRUTH_SNAPSHOT)
+
     if os.getenv("OVERPASS_SEED_REBASE_EPOCH", "1") != "0":
-        at = datetime.now(UTC) - timedelta(hours=1)
-        element_sets = [rebase_epoch(element, at) for element in element_sets]
-        print(f"  {DIM}epochs rebased to {at.isoformat(timespec='seconds')}{RESET}")
+        # ONE SHARED SHIFT, NOT A REBASE PER ELEMENT SET.
+        #
+        # Rebasing each set independently to "now" would destroy the very thing
+        # the second snapshot exists to provide. Two element sets stamped with
+        # the same epoch have no drift between them, and rebasing them to
+        # DIFFERENT epochs is worse: the mean anomaly is carried over unchanged,
+        # so shifting an epoch moves the satellite along its orbit by the shift.
+        # Measured before this was built — a six-hour independent shift on a
+        # 95-minute orbit separated the two propagations by 700 to 13,000 km,
+        # which is a different point on the orbit rather than a drifted one. The
+        # rebase_epoch docstring says the same thing about phase; this is what
+        # it costs when two sets have to be compared.
+        #
+        # Sliding both files by one delta preserves every real relationship:
+        # each satellite's age relative to the others, and the 90-to-146-hour
+        # separation between the planning observation and the truth one. The
+        # drift the simulator sees is then the drift Celestrak actually
+        # recorded.
+        oldest = min(element.epoch for element in element_sets)
+        shift = (datetime.now(UTC) - timedelta(hours=OLDEST_PLANNING_AGE_HOURS)) - oldest
+        element_sets = [rebase_epoch(element, element.epoch + shift) for element in element_sets]
+        truth_sets = [rebase_epoch(element, element.epoch + shift) for element in truth_sets]
+
+        newest = max(element.epoch for element in element_sets)
+        print(
+            f"  {DIM}planning epochs shifted by {shift.total_seconds() / 3600:+.1f}h "
+            f"(ages {OLDEST_PLANNING_AGE_HOURS:.0f}h to "
+            f"{(datetime.now(UTC) - newest).total_seconds() / 3600:.0f}h){RESET}"
+        )
+        # The truth epochs land in the FUTURE, and that is what makes them
+        # invisible to planning. newest_element_sets selects
+        # `WHERE epoch <= at ORDER BY epoch DESC`, so feasibility keeps using the
+        # planning observation while the simulator, asking after the fact, gets
+        # the one that superseded it. No change to feasibility is needed for
+        # this, which is the point of doing it here.
+        print(
+            f"  {DIM}truth epochs {(min(e.epoch for e in truth_sets) - datetime.now(UTC)).total_seconds() / 3600:+.0f}h "
+            f"to {(max(e.epoch for e in truth_sets) - datetime.now(UTC)).total_seconds() / 3600:+.0f}h "
+            f"— future, so planning cannot see them{RESET}"
+        )
     modes = json.dumps(SENSOR_MODES)
 
     with psycopg.connect(dsn) as connection, connection.cursor() as cursor:
@@ -241,6 +292,27 @@ def seed(dsn: str) -> int:
                 (customer_id, display_name),
             )
             print(f"  {GREEN}ok{RESET}   customer {customer_id} {DIM}({tier}){RESET}")
+
+        # THE SNAPSHOT ROWS ARE REPLACED, NOT ACCUMULATED.
+        #
+        # seed.py calls itself idempotent by construction, and for element sets
+        # that was only true before rebasing existed. The upsert is keyed on
+        # (satellite_id, epoch), and every run stamps a different epoch — so
+        # each re-seed left the previous run's rows behind. Harmless-looking,
+        # and not harmless: newest_element_sets picks the newest row at or
+        # before now, so yesterday's leftovers silently shadowed today's
+        # planning sets. Measured after adding the truth snapshot — three sets
+        # per satellite, and the one feasibility selected was 5 hours old
+        # instead of the intended 70.
+        #
+        # Only rows this script wrote are removed. Anything fetched live keeps
+        # its history, which is what the source column is for.
+        cursor.execute(
+            """
+            DELETE FROM reference.tle_sets
+            WHERE source->>'kind' = 'frozen-snapshot'
+            """
+        )
 
         for element in element_sets:
             cursor.execute(
@@ -264,7 +336,9 @@ def seed(dsn: str) -> int:
             )
             # Keyed on (satellite_id, epoch), so re-seeding the same snapshot
             # updates one row while a genuinely newer element set adds one. The
-            # history is what makes "which TLE produced this window" answerable.
+            # history is what makes "which TLE produced this window" answerable
+            # — and what lets the truth snapshot sit alongside the planning one
+            # rather than replacing it.
             cursor.execute(
                 """
                 INSERT INTO reference.tle_sets
@@ -298,6 +372,41 @@ def seed(dsn: str) -> int:
                 f"  {GREEN}ok{RESET}   satellite {element.satellite_id} "
                 f"{DIM}(NORAD {element.norad_id}, epoch {element.epoch:%Y-%m-%d %H:%M}Z){RESET}"
             )
+
+        # The truth observation, stored beside the planning one rather than
+        # instead of it. No reference.satellites row is written from here: the
+        # spacecraft are the same spacecraft, and writing them twice would let
+        # the two files disagree about a duty-cycle budget.
+        for element in truth_sets:
+            cursor.execute(
+                """
+                INSERT INTO reference.tle_sets
+                    (satellite_id, norad_id, line1, line2, epoch, source, fetched_at)
+                VALUES (%s, %s, %s, %s, %s, %s::jsonb, %s)
+                ON CONFLICT (satellite_id, epoch) DO UPDATE SET
+                    line1 = EXCLUDED.line1,
+                    line2 = EXCLUDED.line2
+                """,
+                (
+                    element.satellite_id,
+                    element.norad_id,
+                    element.line1,
+                    element.line2,
+                    element.epoch,
+                    json.dumps(
+                        {
+                            "kind": "frozen-snapshot",
+                            "file": TRUTH_SNAPSHOT.name,
+                            "reason": "post-pass orbit determination — the truth set for #62",
+                        }
+                    ),
+                    datetime.now(UTC),
+                ),
+            )
+        print(
+            f"  {GREEN}ok{RESET}   {len(truth_sets)} truth element sets "
+            f"{DIM}(from {TRUTH_SNAPSHOT.name}){RESET}"
+        )
 
     return len(element_sets)
 

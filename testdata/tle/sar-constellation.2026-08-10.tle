@@ -1,0 +1,66 @@
+# Frozen TLE snapshot, 2026-08-10 — THE "TRUTH" SET. DO NOT REGENERATE CASUALLY.
+#
+# The second half of the TLE_DRIFT_MISS model (#62). The 2026-08-07 snapshot is
+# what the planner computed against; this one is where the satellites actually
+# were when the acquisition was taken, as re-observed three days later.
+#
+# The drift between the two is REAL. Both are genuine Celestrak observations of
+# the same nine spacecraft, so the separation is what tracking actually
+# recorded — orbit determination updates, drag, and in a few cases a manoeuvre —
+# rather than a perturbation invented to make a demo interesting.
+#
+# Measured separation when both are propagated to the same instant:
+#
+#   SENTINEL-1B     0.4 km   (90h old)   inside every swath
+#   ICEYE-X4        1.5 km   (89h)       inside every swath
+#   SENTINEL-1C     2.6 km   (90h)       outside SPOTLIGHT only
+#   ICEYE-X5        5.4 km   (91h)       outside SPOTLIGHT only
+#   ICEYE-X2        6.0 km   (90h)       outside SPOTLIGHT only
+#   CAPELLA-13     29.1 km   (98h)       outside SPOTLIGHT and STRIPMAP
+#   CAPELLA-11    192.3 km  (106h)       outside all three
+#   SENTINEL-1A   223.8 km  (123h)       outside all three
+#   CAPELLA-14    829.3 km  (146h)       outside all three
+#
+# Two properties fall out of that, and both are the point:
+#
+#   Separation grows with the age of the planning element set. The sub-6 km
+#   cases are all ~90h old; every case past 98h is tens to hundreds of km.
+#
+#   Narrow swaths miss first. SPOTLIGHT's half-swath is 2.5 km, STRIPMAP's 15,
+#   SCAN's 50 — so a stale element set costs you the high-resolution modes
+#   before it costs you anything else. That is the physical consequence of
+#   setting a staleness threshold too loosely, which is the whole reason
+#   tle_epoch is tracked.
+#
+# An earlier attempt derived the "truth" set by rewriting this fixture's epoch
+# field instead. That is not drift: shifting the epoch of an unchanged element
+# set moves the satellite along its orbit by the epoch delta, and a 6-hour shift
+# on a 95-minute orbit put it 700-13,000 km away — a different point on the
+# orbit, not a drifted one. Measured before anything was built on it.
+SENTINEL-1A
+1 39634U 14016A   26222.53818546  .00000274  00000+0  67445-4 0  9993
+2 39634  98.1588 229.2382 0001403  82.9102 277.2257 14.59380679657949
+SENTINEL-1B
+1 41456U 16025A   26222.51920120  .00001591  00000+0  13524-3 0  9991
+2 41456  98.0881 285.3579 0012443 314.7055  45.3153 14.99360763551925
+SENTINEL-1C
+1 62261U 24235A   26222.50975317  .00000054  00000+0  21103-4 0  9993
+2 62261  98.1827 229.0491 0001385  89.3042 270.8317 14.59196942 89335
+ICEYE-X2
+1 43800U 18099AU  26222.52314528  .00003959  00000+0  19594-3 0  9992
+2 43800  97.4330 275.4158 0011945 110.9387 249.3126 15.18312769421067
+ICEYE-X5
+1 44389U 19038C   26222.48978475  .00031035  00000+0  38183-3 0  9992
+2 44389  97.8653 282.8280 0005235  76.4744 283.7095 15.60191267391415
+ICEYE-X4
+1 44390U 19038D   26222.55112619  .00006422  00000+0  22060-3 0  9991
+2 44390  97.8739 258.6978 0014697 112.4030 247.8768 15.30406571390116
+CAPELLA-11 (ACADIA-1)
+1 57693U 23126A   26222.49006375  .00001985  00000+0  24866-3 0  9993
+2 57693  53.0098 308.8670 0000855 173.2440 186.8551 14.86450850160190
+CAPELLA-14 (ACADIA-4)
+1 59444U 24066C   26222.35778448  .00003940  00000+0  28396-3 0  9990
+2 59444  45.6031 331.0056 0000304 132.2261 227.8648 15.05830756120661
+CAPELLA-13 (ACADIA-3)
+1 60419U 24142A   26222.18136777  .00001030  00000+0  13783-3 0  9995
+2 60419  53.0047 181.8822 0001406  91.5515 268.5626 14.87644297108442
