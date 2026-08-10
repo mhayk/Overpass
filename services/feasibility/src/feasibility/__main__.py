@@ -31,7 +31,7 @@ import os
 import signal
 import sys
 
-from feasibility import telemetry
+from feasibility import metrics, telemetry
 from feasibility.handler import sweep_handler
 from feasibility.messaging import RelayConfig, WorkerConfig, run, run_relay
 from feasibility.orbit.ephemeris import SamplingPolicy
@@ -150,11 +150,18 @@ def main() -> int:
     # reliably the interesting half second, because it is the one around
     # whatever made the process stop.
     provider = telemetry.setup()
+    # Metrics alongside tracing, and flushed on the way out for the same
+    # reason: the periodic reader exports every ten seconds, so a process that
+    # exits without flushing loses up to ten seconds of counters — reliably the
+    # ten seconds around whatever made it stop.
+    meter_provider = metrics.setup()
     try:
         return asyncio.run(_run())
     finally:
         if provider is not None:
             provider.shutdown()
+        if meter_provider is not None:
+            meter_provider.shutdown()
 
 
 if __name__ == "__main__":

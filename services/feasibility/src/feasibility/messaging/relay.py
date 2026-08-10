@@ -32,7 +32,13 @@ from typing import TYPE_CHECKING, Any
 import psycopg
 from nats.aio.client import Client as NatsClient
 
-from feasibility.messaging.outbox import claim_unpublished, mark_published, record_failure
+from feasibility import metrics
+from feasibility.messaging.outbox import (
+    claim_unpublished,
+    mark_published,
+    oldest_unpublished_age_s,
+    record_failure,
+)
 
 if TYPE_CHECKING:
     from nats.js import JetStreamContext
@@ -89,6 +95,18 @@ async def drain_once(
                 continue
             mark_published(cursor, outbox_id)
             published += 1
+
+    # Reported on EVERY drain, including one that claimed nothing. An empty
+    # batch means nothing is waiting, which IS zero lag; skipping it would
+    # leave the gauge pinned at the last non-empty measurement, so
+    # OutboxRelayLagging would fire once during a backlog and never stop after
+    # it cleared. An alert that cannot turn off is one operators learn to
+    # ignore — the same class of failure as one that cannot turn on.
+    metrics.instruments().record_outbox_batch(
+        published=published,
+        failed=failed,
+        pending_seconds=oldest_unpublished_age_s(connection) or 0.0,
+    )
 
     return RelayStats(published=published, failed=failed)
 

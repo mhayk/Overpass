@@ -33,7 +33,7 @@ from typing import Any
 import psycopg
 from opentelemetry import trace
 
-from feasibility import telemetry
+from feasibility import metrics, telemetry
 from feasibility.ephemeris import build_event, derive_event_id
 from feasibility.messaging.outbox import already_enqueued, enqueue_once
 from feasibility.orbit.ephemeris import SamplingPolicy, bucket_starts, sample_track
@@ -91,6 +91,15 @@ def sweep_once(
     staleness = staleness or StalenessPolicy()
 
     entries = newest_element_sets(connection, now)
+
+    # Report every element set's age on every sweep, whether or not anything
+    # gets published for it. Per satellite rather than as a distribution: with
+    # nine satellites the labelled gauges ARE the distribution, and they answer
+    # the question a histogram cannot — WHICH element set is old, which is the
+    # first thing an operator needs before ordering a refresh.
+    for entry in entries:
+        metrics.instruments().set_tle_age(entry.satellite_id, entry.element_set.age_hours(now))
+
     starts = bucket_starts(now, policy)
     if not entries:
         log.warning("ephemeris sweep found no element sets; is the constellation seeded?")

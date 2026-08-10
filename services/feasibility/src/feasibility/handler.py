@@ -29,7 +29,7 @@ import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from feasibility import failures, opportunities
+from feasibility import failures, metrics, opportunities
 from feasibility.messaging.outbox import enqueue, enqueue_once
 from feasibility.orbit import Propagator
 from feasibility.pipeline import Refusal, SweepOutcome, evaluate
@@ -109,6 +109,15 @@ def _handle(
     references = [_reference(entry, at, policy) for entry in entries]
 
     if outcome.refusal is not None:
+        # The ingress-side sibling of the planner's unfulfilled-by-reason. A
+        # request refused here never reaches a round and never becomes an
+        # unfulfilment, so without this counter the two sides do not reconcile
+        # and requests appear to vanish between the services.
+        metrics.instruments().record_refusal(outcome.refusal.reason_code)
+        # Zero IS an observation. Dropping it would leave the
+        # opportunities-per-request panel describing successful sweeps only,
+        # which is the half that never needs investigating.
+        metrics.instruments().record_opportunities(0)
         _refuse(
             cursor,
             delivery,
@@ -121,6 +130,8 @@ def _handle(
             references=references,
         )
         return
+
+    metrics.instruments().record_opportunities(len(outcome.opportunities))
 
     _persist(cursor, request, outcome, at)
     # enqueue_once, not enqueue. The event id is DERIVED from the request, so a
