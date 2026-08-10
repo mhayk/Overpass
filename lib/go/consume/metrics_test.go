@@ -33,6 +33,7 @@ func TestObserveRecordsEveryOutcome(t *testing.T) {
 		consume.OutcomeTerminated,
 		consume.OutcomeDeadlettered,
 		consume.OutcomeFailed,
+		consume.OutcomeIgnored,
 	}
 	for _, outcome := range outcomes {
 		m.Observe(context.Background(), "tasking.request.received.v1", outcome, 5*time.Millisecond)

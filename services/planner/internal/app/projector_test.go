@@ -467,6 +467,39 @@ func TestProjectionErrorIsNaked(t *testing.T) {
 	}
 }
 
+// A Naked delivery is still OBSERVED.
+//
+// This is the defect the RED histogram was built to avoid. The metric it
+// replaced, AckAfter, was called after a successful ack — the Nak and Term
+// paths return before reaching it — so a consumer failing every single
+// delivery reported no latency, no throughput and nothing wrong at all. Its
+// panels went flat, which reads as "idle" rather than "on fire".
+//
+// Snapshot's ack-latency counters are the observable half of Observe here, so
+// asserting a latency was recorded at all is what proves the failing path
+// reports itself.
+func TestANakedDeliveryIsStillObserved(t *testing.T) {
+	source := &fakeSource{batches: [][]port.Message{{
+		message("FEASIBILITY", app.SubjectOpportunities, "e2"),
+	}}}
+	projections := &fakeProjections{err: errors.New("connection refused")}
+
+	projector := app.NewProjector(source, fakeDecoder{opportunities: validCandidateEvent()},
+		projections, discard())
+	if _, err := projector.DrainOnce(context.Background()); err != nil {
+		t.Fatalf("drain: %v", err)
+	}
+
+	snapshot := projector.Metrics.Snapshot()
+	if snapshot.AckLatencyMax == 0 {
+		t.Error("the Nak left no observation; a consumer failing every delivery would look idle")
+	}
+	// And it must not be miscounted as work that succeeded.
+	if snapshot.Processed != 0 {
+		t.Errorf("Processed = %d after a failure, want 0", snapshot.Processed)
+	}
+}
+
 // A stream this projector never bound has no ledger partition, so it cannot be
 // deduplicated. Ignoring it is the only safe answer; failing would poison a
 // consumer over a topology change that does not concern it.

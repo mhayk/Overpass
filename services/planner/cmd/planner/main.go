@@ -24,6 +24,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 
+	"github.com/mhayk/overpass/lib/go/telemetry"
+
 	"github.com/mhayk/overpass/services/planner/internal/adapter/config"
 	"github.com/mhayk/overpass/services/planner/internal/adapter/httpapi"
 	"github.com/mhayk/overpass/services/planner/internal/adapter/logging"
@@ -35,6 +37,10 @@ import (
 	"github.com/mhayk/overpass/services/planner/internal/app"
 	"github.com/mhayk/overpass/services/planner/internal/domain"
 )
+
+// telemetryScope names the instrumentation scope this service's hand-written
+// spans and metrics are attributed to.
+const telemetryScope = "github.com/mhayk/overpass/services/planner"
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -52,7 +58,43 @@ func run(ctx context.Context) error {
 		return err
 	}
 
+	// Telemetry before anything else reports anything. An unreachable
+	// collector is a warning, never a startup failure: refusing to plan
+	// because a metrics backend is down would make observability an
+	// availability dependency, which is exactly backwards.
+	shutdownTelemetry, err := telemetry.Setup(ctx, telemetry.Config{
+		ServiceName:    "planner",
+		ServiceVersion: cfg.Version,
+		Environment:    cfg.Environment,
+		Endpoint:       cfg.OTLPEndpoint,
+		SampleRatio:    cfg.TraceSampleRatio,
+	})
+	if err != nil {
+		shutdownTelemetry = func(context.Context) error { return nil }
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+		defer cancel()
+		if shutdownErr := shutdownTelemetry(shutdownCtx); shutdownErr != nil {
+			slog.Warn("telemetry shutdown", slog.Any("error", shutdownErr))
+		}
+	}()
+
 	log := logging.New(os.Stdout, "planner", cfg.Version, cfg.LogLevel)
+	if err != nil {
+		log.Warn("telemetry not started; metrics and spans will be dropped",
+			slog.String("endpoint", cfg.OTLPEndpoint), slog.Any("error", err))
+	}
+
+	meter := telemetry.Meter(telemetryScope)
+	instruments, err := app.NewInstruments(meter)
+	if err != nil {
+		// A refusal, not a warning. Instrument construction fails on a
+		// duplicate or malformed name, which is a programming error the
+		// dashboards depend on — and a planner that starts having silently
+		// failed to build its own metrics is the state #53 exists to end.
+		return fmt.Errorf("building planner instruments: %w", err)
+	}
 	log.Info("starting",
 		slog.String("version", cfg.Version),
 		slog.String("env", cfg.Environment),
@@ -101,6 +143,7 @@ func run(ctx context.Context) error {
 		SweepLimit:     cfg.SweepLimit,
 		Allocator:      allocator,
 		Fairness:       cfg.Fairness,
+		Instruments:    instruments,
 	}, log.With(slog.String("component", "trigger")))
 	if err != nil {
 		// A misconfigured firing rule is a startup failure, not a warning. A
@@ -202,10 +245,13 @@ func startProjector(
 
 	projector := app.NewProjector(source, wire.New(), postgres.NewProjections(pool),
 		log.With(slog.String("component", "projector")))
-	// projector.Metrics is served to M3-06 when the metrics endpoint lands
-	// (#53); until then the snapshot keeps the field exercised without copying
-	// the mutex it guards.
-	_ = projector.Metrics.Snapshot()
+	if bindErr := projector.Metrics.Bind(telemetry.Meter(telemetryScope)); bindErr != nil {
+		// A warning rather than a refusal, unlike the domain instruments
+		// above: the projector is started warning-on-failure already, and a
+		// consumer that folds correctly while reporting nothing is strictly
+		// better than one that does not run.
+		log.Warn("consumer metrics not bound", slog.Any("error", bindErr))
+	}
 
 	wg.Add(1)
 	go func() {

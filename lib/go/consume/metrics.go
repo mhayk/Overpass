@@ -24,6 +24,11 @@ const (
 	OutcomeDeadlettered = "deadlettered"
 	// OutcomeFailed is a delivery that will be redelivered — a Nak.
 	OutcomeFailed = "failed"
+	// OutcomeIgnored is a message on a stream this consumer binds but does not
+	// fold. Distinct from processed on purpose: a subject silently ignored
+	// because a case was never added looks identical to healthy throughput,
+	// and this is the label that separates them.
+	OutcomeIgnored = "ignored"
 )
 
 // InstrumentDurationMs is the histogram every consumer's RED comes from.

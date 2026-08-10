@@ -37,6 +37,12 @@ type Trigger struct {
 	// It runs HERE, once per round, so no policy ever sees a priority tier.
 	fairness domain.Fairness
 
+	// instruments exports what a committed plan already knows about itself.
+	// Nil in every unit test, and nil-safe on purpose: a planner that refused
+	// to plan without a meter would have made telemetry a correctness
+	// dependency, which is exactly backwards.
+	instruments *Instruments
+
 	// now is injected so the firing rule can be driven to any instant in tests
 	// without sleeping. The rule is entirely about clocks; testing it by waiting
 	// would be slow and flaky in equal measure.
@@ -52,6 +58,9 @@ type TriggerConfig struct {
 	Allocator      domain.AllocationPolicy
 	Fairness       domain.Fairness
 	Now            func() time.Time
+	// Instruments is optional. Absent means the round still plans and commits;
+	// it simply reports nothing.
+	Instruments *Instruments
 }
 
 // NewTrigger wires the round trigger, refusing a configuration that cannot
@@ -88,6 +97,7 @@ func NewTrigger(rounds port.Rounds, cfg TriggerConfig, log *slog.Logger) (*Trigg
 		sweepLimit:     cfg.SweepLimit,
 		allocator:      cfg.Allocator,
 		fairness:       cfg.Fairness,
+		instruments:    cfg.Instruments,
 		now:            now,
 	}, nil
 }
@@ -214,7 +224,7 @@ func (t *Trigger) open(ctx context.Context, state domain.BucketState, decision d
 			// THE ROUND NOW ALLOCATES. Policy, plan, events — all built here,
 			// inside the locked transaction, so what commits is exactly what
 			// was decided against the state the lock saw.
-			plan, err := t.buildPlan(round, inputs, now, t.log)
+			plan, err := t.buildPlan(ctx, round, inputs, now, t.log)
 			if err != nil {
 				return port.RoundOutcome{}, err
 			}
