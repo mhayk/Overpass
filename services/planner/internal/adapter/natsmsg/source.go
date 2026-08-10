@@ -170,6 +170,7 @@ func convert(stream string, m *nats.Msg) (port.Message, error) {
 		Payload:   m.Data,
 		EventAt:   eventAt(m.Header, meta.Timestamp),
 		Delivered: meta.NumDelivered,
+		Headers:   flattenHeaders(m.Header),
 	}, nil
 }
 
@@ -312,4 +313,27 @@ func (s *Source) Drain() error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// flattenHeaders turns NATS's multi-valued header map into the single-valued
+// carrier the propagator expects.
+//
+// First value wins. W3C traceparent is single-valued by specification, and a
+// message carrying two would be malformed — taking the first is the same
+// choice net/http makes for Header.Get, and guessing between them would be
+// worse than being predictable.
+//
+// nil rather than an empty map when there are no headers, so Extract sees
+// "nothing to continue" rather than an empty carrier it has to walk.
+func flattenHeaders(header nats.Header) map[string]string {
+	if len(header) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(header))
+	for key, values := range header {
+		if len(values) > 0 {
+			out[key] = values[0]
+		}
+	}
+	return out
 }

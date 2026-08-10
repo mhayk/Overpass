@@ -39,10 +39,6 @@ import (
 	"github.com/mhayk/overpass/services/planner/internal/domain"
 )
 
-// telemetryScope names the instrumentation scope this service's hand-written
-// spans and metrics are attributed to.
-const telemetryScope = "github.com/mhayk/overpass/services/planner"
-
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -87,7 +83,7 @@ func run(ctx context.Context) error {
 			slog.String("endpoint", cfg.OTLPEndpoint), slog.Any("error", err))
 	}
 
-	meter := telemetry.Meter(telemetryScope)
+	meter := telemetry.Meter(app.TelemetryScope)
 	instruments, err := app.NewInstruments(meter)
 	if err != nil {
 		// A refusal, not a warning. Instrument construction fails on a
@@ -246,7 +242,7 @@ func startProjector(
 
 	projector := app.NewProjector(source, wire.New(), postgres.NewProjections(pool),
 		log.With(slog.String("component", "projector")))
-	if bindErr := projector.Metrics.Bind(telemetry.Meter(telemetryScope)); bindErr != nil {
+	if bindErr := projector.Metrics.Bind(telemetry.Meter(app.TelemetryScope)); bindErr != nil {
 		// A warning rather than a refusal, unlike the domain instruments
 		// above: the projector is started warning-on-failure already, and a
 		// consumer that folds correctly while reporting nothing is strictly
@@ -264,7 +260,7 @@ func startProjector(
 
 	relay := outbox.New(pool, outbox.NewNATSPublisher(js), outbox.DefaultConfig(),
 		log.With(slog.String("component", "relay")))
-	if outboxInstruments, obErr := outboxmetrics.New(telemetry.Meter(telemetryScope)); obErr != nil {
+	if outboxInstruments, obErr := outboxmetrics.New(telemetry.Meter(app.TelemetryScope)); obErr != nil {
 		log.Warn("outbox metrics not bound", slog.Any("error", obErr))
 	} else {
 		relay.Instruments = outboxInstruments

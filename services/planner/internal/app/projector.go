@@ -13,7 +13,11 @@ import (
 	"log/slog"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/mhayk/overpass/lib/go/consume"
+	"github.com/mhayk/overpass/lib/go/telemetry"
 
 	"github.com/mhayk/overpass/services/planner/internal/domain"
 	"github.com/mhayk/overpass/services/planner/internal/port"
@@ -94,6 +98,14 @@ type Stats struct {
 	Failed    int
 }
 
+// TelemetryScope names the instrumentation scope this service's hand-written
+// spans and metrics are attributed to.
+//
+// Here rather than in main, because the spans are created here and a scope
+// name that lives away from its spans drifts from them. main imports it for
+// its meter, which is the direction that does not invert the layering.
+const TelemetryScope = "github.com/mhayk/overpass/services/planner"
+
 // DrainOnce folds at most one batch. Returns what happened to it.
 func (p *Projector) DrainOnce(ctx context.Context) (Stats, error) {
 	var stats Stats
@@ -104,93 +116,127 @@ func (p *Projector) DrainOnce(ctx context.Context) (Stats, error) {
 	}
 
 	for _, m := range messages {
-		received := time.Now()
-		if m.Delivered > 1 {
-			// The early-warning line: climbing redeliveries with flat
-			// throughput is poison or a dying dependency, visible before
-			// max_deliver makes it a loss.
-			p.Metrics.Redelivered(ctx, m.Subject)
-		}
+		// One closure per message so `defer span.End()` covers every exit —
+		// and this loop has six, four of which are `continue`. Ending the span
+		// by hand at each would work until the seventh was added, and a trace
+		// missing exactly its failure paths is worse than no trace: the ones
+		// that end cleanly are the ones nobody needed to look at.
+		//
+		// A returned error aborts the batch, matching the previous
+		// `return stats, ...` behaviour exactly.
+		if err := func() error {
+			received := time.Now()
 
-		// The outcome this delivery will be reported under. Defaulting to
-		// processed would make an ignored subject look like work; ignored is
-		// its own thing — a message on a stream this projector binds but does
-		// not fold — and it is worth being able to see it.
-		observed := consume.OutcomeIgnored
-
-		outcome, err := p.fold(ctx, m)
-		switch {
-		case err != nil:
-			stats.Failed++
-			// The M2 position — Nak everything, let max_deliver bound the cost
-			// of being wrong — is replaced by the #48 decision the lib makes
-			// explicit: a PERMANENT failure (malformed payload, contract
-			// violation — anything wrapping domain.ErrInvalid) terminates on
-			// its first delivery, because rerunning a deterministic failure
-			// buys nothing but latency for the messages behind it. Everything
-			// else retries until the LAST delivery, then terminates
-			// DELIBERATELY: a lapsed max_deliver is a silent drop, a Term has
-			// this log line and a metric.
-			permanent := IsInvalid(err)
-			decision := consume.OnFailure(permanent, m.Delivered, maxDeliver)
-			p.log.Error("fold failed",
-				slog.String("stream", m.Stream),
-				slog.String("subject", m.Subject),
-				slog.String("event_id", m.EventID),
-				slog.Uint64("delivered", m.Delivered),
-				slog.Bool("permanent", permanent),
-				slog.String("decision", decision.String()),
-				slog.Any("error", err),
+			// The consumer span is a CHILD and a LINK of the publish that
+			// produced this message — see telemetry.ConsumerSpan for why both.
+			// It wraps the fold AND the settle, so an ack that fails after a
+			// successful fold is visible in the trace rather than being the
+			// invisible cause of a duplicate delivery later.
+			// msgCtx, not a shadowed ctx: the span's context belongs to this
+			// message and the loop's belongs to the batch, and conflating them
+			// is how a cancelled batch and a finished message become the same
+			// signal.
+			msgCtx, span := telemetry.ConsumerSpan(ctx, TelemetryScope,
+				m.Subject+" process", m.Headers,
+				telemetry.MessagingAttributes(m.Subject, m.EventID),
+				trace.WithAttributes(
+					attribute.String("overpass.stream", m.Stream),
+					attribute.Int64("messaging.message.delivery_count", int64(m.Delivered)),
+				),
 			)
-			if decision == consume.Terminate {
-				// Publish, then Term. If the publish fails, Nak (ADR-0017):
-				// the whole delivery retries, handling and dead-lettering
-				// both, and both are idempotent. Terminating anyway would be
-				// the drop this mechanism exists to prevent, with a metric
-				// attached to make it look handled.
-				if dlqErr := p.source.Deadletter(ctx, m, terminalReason(permanent)); dlqErr != nil {
-					p.log.Error("dead-lettering failed; naking rather than dropping the payload",
-						slog.String("event_id", m.EventID),
-						slog.Any("error", dlqErr),
-					)
-					if nakErr := p.source.Nak(ctx, m); nakErr != nil {
-						return stats, fmt.Errorf("naking %s after a failed dead letter: %w", m.EventID, nakErr)
+			defer span.End()
+
+			if m.Delivered > 1 {
+				// The early-warning line: climbing redeliveries with flat
+				// throughput is poison or a dying dependency, visible before
+				// max_deliver makes it a loss.
+				p.Metrics.Redelivered(msgCtx, m.Subject)
+			}
+
+			// The outcome this delivery will be reported under. Defaulting to
+			// processed would make an ignored subject look like work; ignored is
+			// its own thing — a message on a stream this projector binds but does
+			// not fold — and it is worth being able to see it.
+			observed := consume.OutcomeIgnored
+
+			outcome, err := p.fold(msgCtx, m)
+			switch {
+			case err != nil:
+				stats.Failed++
+				// The M2 position — Nak everything, let max_deliver bound the cost
+				// of being wrong — is replaced by the #48 decision the lib makes
+				// explicit: a PERMANENT failure (malformed payload, contract
+				// violation — anything wrapping domain.ErrInvalid) terminates on
+				// its first delivery, because rerunning a deterministic failure
+				// buys nothing but latency for the messages behind it. Everything
+				// else retries until the LAST delivery, then terminates
+				// DELIBERATELY: a lapsed max_deliver is a silent drop, a Term has
+				// this log line and a metric.
+				permanent := IsInvalid(err)
+				decision := consume.OnFailure(permanent, m.Delivered, maxDeliver)
+				p.log.Error("fold failed",
+					slog.String("stream", m.Stream),
+					slog.String("subject", m.Subject),
+					slog.String("event_id", m.EventID),
+					slog.Uint64("delivered", m.Delivered),
+					slog.Bool("permanent", permanent),
+					slog.String("decision", decision.String()),
+					slog.Any("error", err),
+				)
+				if decision == consume.Terminate {
+					// Publish, then Term. If the publish fails, Nak (ADR-0017):
+					// the whole delivery retries, handling and dead-lettering
+					// both, and both are idempotent. Terminating anyway would be
+					// the drop this mechanism exists to prevent, with a metric
+					// attached to make it look handled.
+					if dlqErr := p.source.Deadletter(msgCtx, m, terminalReason(permanent)); dlqErr != nil {
+						p.log.Error("dead-lettering failed; naking rather than dropping the payload",
+							slog.String("event_id", m.EventID),
+							slog.Any("error", dlqErr),
+						)
+						if nakErr := p.source.Nak(msgCtx, m); nakErr != nil {
+							return fmt.Errorf("naking %s after a failed dead letter: %w", m.EventID, nakErr)
+						}
+						p.Metrics.Observe(msgCtx, m.Subject, consume.OutcomeFailed, time.Since(received))
+						return nil
 					}
-					p.Metrics.Observe(ctx, m.Subject, consume.OutcomeFailed, time.Since(received))
-					continue
+					if termErr := p.source.Term(msgCtx, m); termErr != nil {
+						return fmt.Errorf("terminating %s: %w", m.EventID, termErr)
+					}
+					p.Metrics.Observe(msgCtx, m.Subject, consume.OutcomeDeadlettered, time.Since(received))
+					return nil
 				}
-				if termErr := p.source.Term(ctx, m); termErr != nil {
-					return stats, fmt.Errorf("terminating %s: %w", m.EventID, termErr)
+				if nakErr := p.source.Nak(msgCtx, m); nakErr != nil {
+					return fmt.Errorf("naking %s: %w", m.EventID, nakErr)
 				}
-				p.Metrics.Observe(ctx, m.Subject, consume.OutcomeDeadlettered, time.Since(received))
-				continue
+				p.Metrics.Observe(msgCtx, m.Subject, consume.OutcomeFailed, time.Since(received))
+				return nil
+			case outcome == outcomeApplied:
+				stats.Applied++
+				observed = consume.OutcomeProcessed
+			case outcome == outcomeDuplicate:
+				stats.Duplicate++
+				observed = consume.OutcomeDuplicate
+				p.log.Debug("already processed",
+					slog.String("consumer", p.consumerFor[m.Stream]),
+					slog.String("event_id", m.EventID),
+				)
+			default:
+				stats.Ignored++
 			}
-			if nakErr := p.source.Nak(ctx, m); nakErr != nil {
-				return stats, fmt.Errorf("naking %s: %w", m.EventID, nakErr)
-			}
-			p.Metrics.Observe(ctx, m.Subject, consume.OutcomeFailed, time.Since(received))
-			continue
-		case outcome == outcomeApplied:
-			stats.Applied++
-			observed = consume.OutcomeProcessed
-		case outcome == outcomeDuplicate:
-			stats.Duplicate++
-			observed = consume.OutcomeDuplicate
-			p.log.Debug("already processed",
-				slog.String("consumer", p.consumerFor[m.Stream]),
-				slog.String("event_id", m.EventID),
-			)
-		default:
-			stats.Ignored++
-		}
 
-		// Ack only after the transaction committed. A crash between commit and
-		// ack redelivers, and the ledger absorbs it — which is the trade the
-		// idempotent-consumer pattern exists to make.
-		if ackErr := p.source.Ack(ctx, m); ackErr != nil {
-			return stats, fmt.Errorf("acking %s: %w", m.EventID, ackErr)
+			// Ack only after the transaction committed. A crash between commit and
+			// ack redelivers, and the ledger absorbs it — which is the trade the
+			// idempotent-consumer pattern exists to make.
+			if ackErr := p.source.Ack(msgCtx, m); ackErr != nil {
+				return fmt.Errorf("acking %s: %w", m.EventID, ackErr)
+			}
+			p.Metrics.Observe(msgCtx, m.Subject, observed, time.Since(received))
+			span.SetAttributes(attribute.String("overpass.outcome", observed))
+			return nil
+		}(); err != nil {
+			return stats, err
 		}
-		p.Metrics.Observe(ctx, m.Subject, observed, time.Since(received))
 	}
 	return stats, nil
 }

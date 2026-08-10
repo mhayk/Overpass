@@ -42,6 +42,7 @@ until the M2-13 benchmark produced the numbers that completed it.
 | [0016](0016-ephemeris-sampling-and-horizon.md) | Sample the ephemeris every ten seconds, in aligned three-hour buckets, over a rolling day | accepted | M1 |
 | [0017](0017-dlq-publication-and-replay-semantics.md) | Dead letters are published by the consumer, before the Term, or not at all | accepted | M3 |
 | [0018](0018-metrics-by-otlp-push-with-units-in-names.md) | Push metrics over OTLP, and bake units into instrument names | accepted | M3 |
+| [0019](0019-head-based-sampling-at-one-for-the-demo.md) | Head-based sampling, at 1.0 for the demo and configurable everywhere | accepted | M3 |
 
 ## Planned
 

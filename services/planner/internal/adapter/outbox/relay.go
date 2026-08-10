@@ -12,6 +12,7 @@ package outbox
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"math"
@@ -21,8 +22,19 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
+
+	"github.com/mhayk/overpass/lib/go/telemetry"
 	"github.com/mhayk/overpass/lib/go/telemetry/outboxmetrics"
 )
+
+// TelemetryScope names the instrumentation scope this adapter's spans carry.
+//
+// Its own constant rather than importing internal/app's: an adapter importing
+// the application layer to read a string would invert the dependency this
+// service's layout exists to keep one-way.
+const TelemetryScope = "github.com/mhayk/overpass/services/planner"
 
 // Config controls the relay loop.
 type Config struct {
@@ -127,6 +139,11 @@ type pending struct {
 	subject    string
 	payload    []byte
 	occurredAt time.Time
+	// headers is the row's stored header map, which is where the traceparent
+	// of the round that wrote it lives. The column has existed since the
+	// schema was written; this relay simply never selected it, so every
+	// publish here started a fresh trace (#52).
+	headers map[string]string
 }
 
 // DrainOnce publishes at most one batch. Returns how many went out.
@@ -137,7 +154,7 @@ type pending struct {
 // LOST event, and a lost event is invisible.
 func (r *Relay) DrainOnce(ctx context.Context) (published, failed int, err error) {
 	txErr := pgx.BeginFunc(ctx, r.pool, func(tx pgx.Tx) error {
-		rows, err := claim(ctx, tx, r.cfg.Batch)
+		rows, err := r.claim(ctx, tx, r.cfg.Batch)
 		if err != nil {
 			return err
 		}
@@ -158,6 +175,26 @@ func (r *Relay) DrainOnce(ctx context.Context) (published, failed int, err error
 		}
 
 		for _, row := range rows {
+			// Resume the trace stored on the row and start a child.
+			//
+			// The planner writes its outbox rows inside the round's locked
+			// transaction, so the traceparent on the row belongs to the round
+			// that decided the plan. Resuming it here means the publish — which
+			// happens later, on a different goroutine, possibly after a restart
+			// — still appears under the round that caused it.
+			//
+			// Without this the planner's publishes would be roots, and the
+			// chain would end at exactly the service whose decisions the whole
+			// trace exists to explain. tasking-api's relay has done this since
+			// M1; this one did not, so plan.committed and request.unfulfilled
+			// arrived at plan-gateway with no parent.
+			publishCtx, span := telemetry.Tracer(TelemetryScope).Start(
+				telemetry.Extract(ctx, row.headers),
+				"planning.outbox publish",
+				trace.WithSpanKind(trace.SpanKindProducer),
+				telemetry.MessagingAttributes(row.subject, row.eventID),
+			)
+
 			// The stable event_id doubles as the broker's dedup key. Ours is
 			// the outbox row; this is a second line of defence, and it expires
 			// where ours does not.
@@ -165,17 +202,27 @@ func (r *Relay) DrainOnce(ctx context.Context) (published, failed int, err error
 				"Nats-Msg-Id": row.eventID,
 				"Occurred-At": row.occurredAt.UTC().Format(time.RFC3339Nano),
 			}
+			// THIS span's context, not the stored one. The consumer should hang
+			// off the publish rather than the round: the publish is what
+			// delivered the message, and a consumer parented straight to the
+			// round would render the broker hop as taking no time at all.
+			telemetry.Inject(publishCtx, headers)
+
 			if perr := r.publisher.Publish(row.subject, row.payload, headers); perr != nil {
 				r.log.Warn("publish failed",
 					slog.String("event_id", row.eventID),
 					slog.String("subject", row.subject),
 					slog.Any("error", perr))
+				span.RecordError(perr)
+				span.SetStatus(codes.Error, "publish failed")
+				span.End()
 				if merr := markFailed(ctx, tx, row.id, perr.Error()); merr != nil {
 					return merr
 				}
 				failed++
 				continue
 			}
+			span.End()
 			if merr := markPublished(ctx, tx, row.id); merr != nil {
 				return merr
 			}
@@ -233,9 +280,9 @@ func (r *Relay) backoff(attempt int) time.Duration {
 	return min(wait, r.cfg.BackoffMax)
 }
 
-func claim(ctx context.Context, tx pgx.Tx, limit int) ([]pending, error) {
+func (r *Relay) claim(ctx context.Context, tx pgx.Tx, limit int) ([]pending, error) {
 	rows, err := tx.Query(ctx, `
-		SELECT id, event_id::text, subject, payload::text, occurred_at
+		SELECT id, event_id::text, subject, payload::text, occurred_at, headers::text
 		FROM planning.outbox
 		WHERE published_at IS NULL
 		ORDER BY id
@@ -252,11 +299,23 @@ func claim(ctx context.Context, tx pgx.Tx, limit int) ([]pending, error) {
 		var (
 			row     pending
 			payload string
+			headers string
 		)
-		if err := rows.Scan(&row.id, &row.eventID, &row.subject, &payload, &row.occurredAt); err != nil {
+		if err := rows.Scan(&row.id, &row.eventID, &row.subject, &payload,
+			&row.occurredAt, &headers); err != nil {
 			return nil, fmt.Errorf("scanning outbox row: %w", err)
 		}
 		row.payload = []byte(payload)
+		// A row whose headers will not decode is published WITHOUT them rather
+		// than held back. The headers carry the trace context and nothing the
+		// consumer needs to be correct, so refusing to publish would trade a
+		// real event for a cosmetic one — the same trade ADR-0017 refuses when
+		// it tolerates a missing traceparent on a dead letter.
+		if err := json.Unmarshal([]byte(headers), &row.headers); err != nil {
+			r.log.Warn("outbox row has undecodable headers; publishing without trace context",
+				slog.String("event_id", row.eventID), slog.Any("error", err))
+			row.headers = nil
+		}
 		out = append(out, row)
 	}
 	if err := rows.Err(); err != nil {

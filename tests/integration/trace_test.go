@@ -59,6 +59,11 @@ type observedSpan struct {
 	spanID   string
 	parentID string
 	links    int
+	// attributes carries the span's own keys, which is where the domain
+	// detail lives. M3-05 asks for domain-meaningful attributes rather than
+	// HTTP metadata, so a test that cannot read them cannot check the
+	// criterion — only that a span exists.
+	attributes map[string]string
 }
 
 // startFeasibilityWorker runs the Python consumer as a real process.
@@ -321,13 +326,18 @@ func fetchTrace(t *testing.T, traceID string) []observedSpan {
 		}
 		for _, scope := range batch.ScopeSpans {
 			for _, span := range scope.Spans {
+				attributes := make(map[string]string, len(span.Attributes))
+				for _, attribute := range span.Attributes {
+					attributes[attribute.Key] = attribute.Value.StringValue
+				}
 				out = append(out, observedSpan{
-					service:  service,
-					name:     span.Name,
-					kind:     span.Kind,
-					spanID:   span.SpanID,
-					parentID: span.ParentSpanID,
-					links:    len(span.Links),
+					service:    service,
+					name:       span.Name,
+					kind:       span.Kind,
+					spanID:     span.SpanID,
+					parentID:   span.ParentSpanID,
+					links:      len(span.Links),
+					attributes: attributes,
 				})
 			}
 		}

@@ -30,10 +30,6 @@ import (
 	"github.com/mhayk/overpass/services/plan-gateway/internal/app"
 )
 
-// telemetryScope names the instrumentation scope this service's hand-written
-// spans and metrics are attributed to.
-const telemetryScope = "github.com/mhayk/overpass/services/plan-gateway"
-
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -143,7 +139,7 @@ func startProjector(
 
 	projector := app.NewProjector(source, postgres.NewProjection(pool), wire.New(),
 		log.With(slog.String("component", "projector")))
-	if bindErr := projector.Metrics.Bind(telemetry.Meter(telemetryScope)); bindErr != nil {
+	if bindErr := projector.Metrics.Bind(telemetry.Meter(app.TelemetryScope)); bindErr != nil {
 		// A warning, matching how the projector itself is started: one that
 		// folds correctly while reporting nothing is still better than one
 		// that does not run.
