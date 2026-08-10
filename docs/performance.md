@@ -333,11 +333,23 @@ the gap recorded above and in the script.
 **They are not run in CI, and that is deliberate.** The ingress scenario was
 added to the cold-start workflow and removed again after it failed on
 `dropped_iterations` and on the 100 rps rung. That was not a regression in the
-service: the runner is already hosting Postgres, NATS, Tempo, Prometheus,
-Grafana and four application services, so k6 competes with all of them and
-reports the latency of a queue it created itself. `dropped_iterations` is the
-evidence, and it holds whatever the core count — k6 could not offer the load,
-so the thresholds described a load that was never applied.
+service. Measured on the runner itself, after the stack is up and before any
+load is offered:
+
+```
+cores:  4
+memory: 15 GiB
+load:   4.94 7.17 3.63
+```
+
+**A load average of 4.94 on four cores is full saturation, reached by the stack
+alone.** Postgres, NATS, Tempo, Prometheus, Grafana and four application
+services already want more than the machine has; k6 then competes with all of
+them and reports the latency of a queue it created itself.
+
+`dropped_iterations` is the direct evidence and does not depend on that
+reading: k6 could not offer the requested load, so the thresholds described a
+load that was never applied.
 
 The choice was to lower the numbers until they passed, or to admit the
 measurement does not belong there. Lowering them is how a gate stops meaning
