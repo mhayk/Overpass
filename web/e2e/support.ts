@@ -195,13 +195,50 @@ export async function waitForDecision(
 export async function firstOpportunityWindow(
   request: APIRequestContext,
   requestId: string,
+  timeout = 120_000,
 ): Promise<{ start: string; end: string } | undefined> {
-  const response = await request.get(`${GATEWAY}/v1/requests/${requestId}/opportunities`);
-  if (!response.ok()) return undefined;
-  const body = (await response.json()) as {
-    items?: { access_window?: { start: string; end: string } }[];
-  };
-  return body.items?.[0]?.access_window;
+  let window: { start: string; end: string } | undefined;
+  let lastStatus = 0;
+
+  // POLLED, BECAUSE A STATE IS NOT A PROMISE THAT THE ROWS ARE THERE.
+  //
+  // This used to read once, after waitForState reported AWAITING_PLANNING or
+  // PLANNED. Both of those are derived from rows the gateway has folded — but
+  // FEASIBILITY and PLANNING are separate streams and the broker gives no
+  // ordering between them, which the projector says out loud. So a plan can be
+  // folded before the opportunities that produced it: the request reads
+  // PLANNED while opportunity_views is still empty, and a single read comes
+  // back with nothing. It passed locally for exactly as long as the gateway
+  // stayed ahead of the test, and failed the first time CI was slow enough for
+  // feasibility to take seven seconds.
+  await expect
+    .poll(
+      async () => {
+        const response = await request.get(`${GATEWAY}/v1/requests/${requestId}/opportunities`);
+        lastStatus = response.status();
+        if (!response.ok()) {
+          // Reported, not swallowed. Returning undefined here made a 503 look
+          // identical to an unseeded constellation, and the failure message
+          // then blamed the wrong thing.
+          return false;
+        }
+        const body = (await response.json()) as {
+          items?: { access_window?: { start: string; end: string } }[];
+        };
+        window = body.items?.[0]?.access_window;
+        return window !== undefined;
+      },
+      {
+        timeout,
+        message:
+          `no opportunity for ${requestId} became readable ` +
+          `(last status ${lastStatus}); the constellation is unseeded, ` +
+          'the horizon is empty, or the gateway never folded them',
+      },
+    )
+    .toBe(true);
+
+  return window;
 }
 
 /** Reload and wait for the workspace to have painted its data. */
