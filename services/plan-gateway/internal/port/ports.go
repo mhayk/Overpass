@@ -37,6 +37,9 @@ type Projection interface {
 	ProjectOpportunities(ctx context.Context, e OpportunitiesComputed) error
 	ProjectPlanCommitted(ctx context.Context, e PlanCommitted) error
 	ProjectUnfulfilled(ctx context.Context, e RequestUnfulfilled) error
+	// ProjectFeasibilityFailed records a DEFINITIVE refusal. Only ever called
+	// with a non-retryable failure; the projector filters the rest.
+	ProjectFeasibilityFailed(ctx context.Context, e FeasibilityFailed) error
 	ProjectEphemeris(ctx context.Context, e EphemerisComputed) error
 
 	// Cursor and Advance track how far each stream has been folded.
@@ -156,6 +159,22 @@ type RequestUnfulfilled struct {
 	ReasonJSON []byte
 }
 
+// FeasibilityFailed mirrors feasibility.failed.v1.
+//
+// Retryable is kept out of ReasonJSON's shadow deliberately: the projector has
+// to branch on it, and reaching into a []byte to make a control-flow decision
+// is how a check ends up being made in two places that disagree.
+type FeasibilityFailed struct {
+	EventAt   time.Time
+	RequestID string
+	// Retryable says the failure is about OUR ability to answer rather than
+	// about the physics. Those go back to the stream with backoff and must
+	// NEVER reach a customer as a verdict — TLE_UNAVAILABLE is our problem,
+	// and recording it as their answer makes a transient outage permanent.
+	Retryable  bool
+	ReasonJSON []byte
+}
+
 // Decoder turns a wire payload into the projector's own event types.
 //
 // A port, so the application layer never learns the wire format. The first
@@ -172,6 +191,7 @@ type Decoder interface {
 	PlanCommitted(payload []byte) (PlanCommitted, error)
 	Unfulfilled(payload []byte) (RequestUnfulfilled, error)
 	Ephemeris(payload []byte) (EphemerisComputed, error)
+	FeasibilityFailed(payload []byte) (FeasibilityFailed, error)
 }
 
 // Message is one delivery from the broker, already unwrapped from transport.
@@ -400,7 +420,12 @@ type RequestView struct {
 	WindowEnd        time.Time
 	OpportunityCount int
 	UnfulfilmentJSON []byte
-	LastEventAt      time.Time
+	// InfeasibilityJSON is set only for a DEFINITIVE refusal — no pass at a
+	// valid geometry, or constraints that eliminated every one. Distinct from
+	// UnfulfilmentJSON, which means the request competed and lost and will
+	// compete again.
+	InfeasibilityJSON []byte
+	LastEventAt       time.Time
 }
 
 // OpportunityView is a projected candidate.

@@ -244,14 +244,15 @@ func scanAcquisitions(rows pgx.Rows) ([]port.AcquisitionView, error) {
 // Request reads one request's projected view.
 func (r *Reads) Request(ctx context.Context, requestID string) (port.RequestView, error) {
 	var v port.RequestView
-	var unfulfilment *string
+	var unfulfilment, infeasibility *string
 	err := r.pool.QueryRow(ctx, `
 		SELECT request_id::text, customer_id, target_name, state,
 		       lower(request_window), upper(request_window), opportunity_count,
-		       unfulfilment::text, last_event_at
+		       unfulfilment::text, infeasibility::text, last_event_at
 		FROM readmodel.request_views WHERE request_id = $1
 	`, requestID).Scan(&v.RequestID, &v.CustomerID, &v.TargetName, &v.State,
-		&v.WindowStart, &v.WindowEnd, &v.OpportunityCount, &unfulfilment, &v.LastEventAt)
+		&v.WindowStart, &v.WindowEnd, &v.OpportunityCount, &unfulfilment,
+		&infeasibility, &v.LastEventAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return port.RequestView{}, port.ErrNotFound
 	}
@@ -260,6 +261,9 @@ func (r *Reads) Request(ctx context.Context, requestID string) (port.RequestView
 	}
 	if unfulfilment != nil {
 		v.UnfulfilmentJSON = []byte(*unfulfilment)
+	}
+	if infeasibility != nil {
+		v.InfeasibilityJSON = []byte(*infeasibility)
 	}
 	return v, nil
 }

@@ -272,6 +272,37 @@ func (p *Projector) route(ctx context.Context, m port.Message) (time.Time, error
 		// the state machine already avoids.
 		p.announce(Change{Kind: "request", RequestID: e.RequestID, State: "AWAITING_PLANNING"})
 		return e.EventAt, nil
+	case SubjectFeasibilityFailed:
+		e, err := p.decode.FeasibilityFailed(m.Payload)
+		if err != nil {
+			return time.Time{}, err
+		}
+		e.EventAt = pick(e.EventAt, m.EventAt)
+
+		// A RETRYABLE FAILURE IS NOT AN ANSWER.
+		//
+		// It says something about our ability to compute, not about the
+		// physics: a TLE we could not fetch, a propagation that errored. The
+		// message goes back to the stream with backoff and will be answered
+		// properly on a later attempt. Recording it would publish our
+		// transient problem to the customer as their permanent verdict, and
+		// INFEASIBLE is terminal — there is no event that walks it back.
+		//
+		// The cursor still advances. This message is genuinely handled here;
+		// its retry is the consumer's business, not the projection's.
+		if e.Retryable {
+			p.log.Debug("ignoring retryable feasibility failure",
+				slog.String("request_id", e.RequestID))
+			return e.EventAt, nil
+		}
+
+		if err := p.projection.ProjectFeasibilityFailed(ctx, e); err != nil {
+			return time.Time{}, err
+		}
+		// Announced as INFEASIBLE, which IS final — the opposite of the
+		// unfulfilled case above, where announcing finality would be wrong.
+		p.announce(Change{Kind: "request", RequestID: e.RequestID, State: "INFEASIBLE"})
+		return e.EventAt, nil
 	default:
 		// Not an error. A gateway that fails on a subject it was not built for
 		// would block the whole stream the day another service starts
@@ -302,4 +333,5 @@ const (
 	SubjectEphemerisComputed     = "feasibility.ephemeris.computed.v1"
 	SubjectPlanCommitted         = "planning.plan.committed.v1"
 	SubjectRequestUnfulfilled    = "planning.request.unfulfilled.v1"
+	SubjectFeasibilityFailed     = "feasibility.failed.v1"
 )

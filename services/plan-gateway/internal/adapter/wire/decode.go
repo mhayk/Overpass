@@ -218,6 +218,24 @@ func (Decoder) Unfulfilled(payload []byte) (port.RequestUnfulfilled, error) {
 	}, nil
 }
 
+// FeasibilityFailed decodes feasibility.failed.v1.
+func (Decoder) FeasibilityFailed(payload []byte) (port.FeasibilityFailed, error) {
+	var e events.FeasibilityFailed
+	if err := unmarshal(payload, &e, "feasibility.failed.v1"); err != nil {
+		return port.FeasibilityFailed{}, err
+	}
+	reason, err := json.Marshal(e.Data)
+	if err != nil {
+		return port.FeasibilityFailed{}, fmt.Errorf("re-encoding failure reason: %w", err)
+	}
+	return port.FeasibilityFailed{
+		EventAt:    time.Time(e.OccurredAt).UTC(),
+		RequestID:  string(e.Data.RequestId),
+		Retryable:  e.Data.Retryable,
+		ReasonJSON: reason,
+	}, nil
+}
+
 // unmarshal rejects unknown fields.
 //
 // DisallowUnknownFields, deliberately. The failure this package exists to fix

@@ -301,6 +301,13 @@ func (s *Server) getRequest(w http.ResponseWriter, r *http.Request) {
 		"opportunity_count": view.OpportunityCount,
 		"staleness":         s.staleness(port.Cursor{LastEventAt: view.LastEventAt}),
 	}
+	if len(view.InfeasibilityJSON) > 0 {
+		// Served alongside unfulfilment, never instead of it. A request can
+		// have lost a round and later been found infeasible, and flattening
+		// the two into one "why" field would make a client guess which
+		// question it had been answered.
+		body["infeasibility"] = json.RawMessage(view.InfeasibilityJSON)
+	}
 	if len(view.UnfulfilmentJSON) > 0 {
 		body["unfulfilment"] = json.RawMessage(view.UnfulfilmentJSON)
 	}

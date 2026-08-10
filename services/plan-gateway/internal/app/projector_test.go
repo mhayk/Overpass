@@ -146,6 +146,14 @@ func envelopeFor(t *testing.T, subject string, at time.Time) string {
 			"decided_at":         when,
 			"eligible_for_retry": true,
 		}
+	case app.SubjectFeasibilityFailed:
+		base["producer"] = "feasibility-service"
+		base["data"] = map[string]any{
+			"request_id":  sampleRequestID,
+			"reason_code": "NO_ACCESS_IN_HORIZON",
+			"retryable":   false,
+			"failed_at":   when,
+		}
 	default:
 		t.Fatalf("no envelope builder for %s", subject)
 	}
@@ -214,6 +222,10 @@ func (p *recordingProjection) ProjectUnfulfilled(_ context.Context, _ port.Reque
 
 func (p *recordingProjection) ProjectEphemeris(_ context.Context, _ port.EphemerisComputed) error {
 	return p.note("ephemeris")
+}
+
+func (p *recordingProjection) ProjectFeasibilityFailed(_ context.Context, _ port.FeasibilityFailed) error {
+	return p.note("feasibility-failed")
 }
 
 func (p *recordingProjection) Cursor(_ context.Context, stream string) (port.Cursor, error) {
@@ -333,6 +345,14 @@ func TestEachSubjectReachesItsFold(t *testing.T) {
 		{app.SubjectPlanCommitted, "plan"},
 		{app.SubjectRequestUnfulfilled, "unfulfilled"},
 		{app.SubjectEphemerisComputed, "ephemeris"},
+		// THE ONE THAT WAS MISSING. This table is exactly the check that would
+		// have caught #207 — and it passed for months, because a routing table
+		// test can only cover the rows someone thought to write. The projector
+		// consumed FEASIBILITY, received feasibility.failed.v1, matched no case,
+		// and fell through to the default that ignores unknown subjects and
+		// advances the cursor. No error, no dead letter, no metric: requests the
+		// system had definitively refused sat at RECEIVED forever.
+		{app.SubjectFeasibilityFailed, "feasibility-failed"},
 	} {
 		t.Run(tc.subject, func(t *testing.T) {
 			projection := newRecording()
