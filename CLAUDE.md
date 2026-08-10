@@ -54,6 +54,7 @@ These exist because of specific generator behaviour — see contracts/README.md.
     services/feasibility  Py  SGP4, access windows, SAR geometry
     services/planner      Go  allocation, de-confliction, plan commit
     services/plan-gateway Go  read models, CZML/GeoJSON, SSE
+    services/simulator    Py  acquisition execution, TLE drift, failure injection
     web                   TS  Next.js, Cesium, deck.gl
     contracts             --  JSON Schema events + OpenAPI (source of truth)
     gen                   --  generated types, committed, drift-gated
