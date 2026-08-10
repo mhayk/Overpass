@@ -867,6 +867,18 @@ components:
         Which constraint bound, as structured data rather than a message.
         Strings cannot be aggregated, charted, or acted on, and "requests
         unfulfilled by reason" is a domain metric.
+
+        THE SHAPE IS THE EVENT'S. This is `planning.request.unfulfilled.v1`'s
+        `data` object, passed through from the read model verbatim — including
+        the nested `explanation`. An earlier version of this schema flattened
+        the explanation's fields to the top level, which the service has never
+        done: the projector stores the event body and the gateway serves the
+        column. Nothing caught it because no client had read those fields.
+
+        Passing the event through unflattened is the right way round. The
+        explanation a customer sees is then literally the one the planner
+        emitted, with no reshaping step to disagree about, which is the
+        property that makes it trustworthy.
       properties:
         reason_code:
           type: string
@@ -878,12 +890,75 @@ components:
             - NO_OPPORTUNITY_IN_BUCKET
             - SUPERSEDED
             - CANCELLED_BY_CUSTOMER
-        shortfall_credits:
+        request_id: { $ref: '#/components/schemas/Uuid' }
+        customer_id: { type: string }
+        round_id:
+          # nullable, not a oneOf with type: 'null'. This document is OpenAPI
+          # 3.0.3, where the null type does not exist and oapi-codegen refuses
+          # it outright: "unhandled Schema type: &[null]". The event schema is
+          # JSON Schema 2020-12 and spells the same thing as a oneOf — the two
+          # dialects express it differently and only one is available here.
+          type: string
+          format: uuid
+          nullable: true
+          description: Null when the request never reached a round.
+        satellite_ids_considered:
+          type: array
+          items: { $ref: '#/components/schemas/SatelliteId' }
+        age_rounds:
           type: integer
-          description: How much more the bid needed to be. Present for LOST_TO_HIGHER_VALUE, and the reason the shortfall is a number rather than prose — a bid suggestion is only possible if it is.
-        required_slew_s: { type: number, minimum: 0 }
-        available_gap_s: { type: number, minimum: 0 }
-        superseded_by_plan_id: { $ref: '#/components/schemas/Uuid' }
+          minimum: 0
+          description: |
+            How many rounds this request has now lost. Input to the fairness
+            ageing factor, carried here so the behaviour is observable from
+            outside the planner rather than being an invisible internal bias.
+        eligible_for_retry:
+          type: boolean
+          description: |
+            Whether it stays in contention. False for DEADLINE_PASSED and
+            CANCELLED_BY_CUSTOMER, true for the competitive losses — which are
+            exactly the ones ageing exists to eventually resolve.
+        decided_at: { type: string, format: date-time }
+        explanation:
+          type: object
+          description: |
+            Reason-specific numbers. Which fields are populated depends on
+            `reason_code`; all are optional so one object shape serves every
+            case rather than forcing a discriminated union through the
+            generators.
+          properties:
+            own_effective_value_credits:
+              type: integer
+              description: This request's value after tier multiplier and ageing.
+            winning_request_id: { $ref: '#/components/schemas/Uuid' }
+            winning_effective_value_credits: { type: integer }
+            shortfall_credits:
+              type: integer
+              description: |
+                How much more effective value would have been needed to win.
+                The single most useful number a losing customer can receive,
+                and only expressible because the reason is structured data.
+            blocking_acquisition_id: { $ref: '#/components/schemas/Uuid' }
+            required_slew_s:
+              type: number
+              minimum: 0
+              description: Manoeuvre plus settling needed to reach this opportunity.
+            available_gap_s:
+              type: number
+              minimum: 0
+              description: |
+                Idle time actually available. required_slew_s > available_gap_s
+                IS the BLOCKED_BY_SLEW_CONSTRAINT condition, stated as two
+                numbers a customer can see.
+            duty_cycle_remaining_s: { type: number, minimum: 0 }
+            duty_cycle_required_s: { type: number, minimum: 0 }
+            deadline: { type: string, format: date-time }
+            superseded_by_plan_id: { $ref: '#/components/schemas/Uuid' }
+            # A sibling of $ref is ignored in 3.0.3, so the note lives here:
+            # best_rejected_opportunity_id is the strongest candidate this
+            # request had, rendered as a ghost on the timeline so the
+            # de-confliction decision is visible rather than only its result.
+            best_rejected_opportunity_id: { $ref: '#/components/schemas/Uuid' }
 
     Position:
       type: array
