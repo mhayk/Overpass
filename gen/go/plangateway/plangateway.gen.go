@@ -60,6 +60,21 @@ const (
 	STRIPMAP  ImagingMode = "STRIPMAP"
 )
 
+// Defines values for OpportunityFeatureType.
+const (
+	OpportunityFeatureTypeFeature OpportunityFeatureType = "Feature"
+)
+
+// Defines values for OpportunityFeatureCollectionType.
+const (
+	OpportunityFeatureCollectionTypeFeatureCollection OpportunityFeatureCollectionType = "FeatureCollection"
+)
+
+// Defines values for PointType.
+const (
+	PointTypePoint PointType = "Point"
+)
+
 // Defines values for PolygonType.
 const (
 	PolygonTypePolygon PolygonType = "Polygon"
@@ -67,14 +82,44 @@ const (
 
 // Defines values for RequestViewState.
 const (
-	ACQUIRED         RequestViewState = "ACQUIRED"
-	AWAITINGPLANNING RequestViewState = "AWAITING_PLANNING"
-	CANCELLED        RequestViewState = "CANCELLED"
-	EXPIRED          RequestViewState = "EXPIRED"
-	INFEASIBLE       RequestViewState = "INFEASIBLE"
-	PLANNED          RequestViewState = "PLANNED"
-	RECEIVED         RequestViewState = "RECEIVED"
-	REJECTED         RequestViewState = "REJECTED"
+	RequestViewStateACQUIRED         RequestViewState = "ACQUIRED"
+	RequestViewStateAWAITINGPLANNING RequestViewState = "AWAITING_PLANNING"
+	RequestViewStateCANCELLED        RequestViewState = "CANCELLED"
+	RequestViewStateEXPIRED          RequestViewState = "EXPIRED"
+	RequestViewStateINFEASIBLE       RequestViewState = "INFEASIBLE"
+	RequestViewStatePLANNED          RequestViewState = "PLANNED"
+	RequestViewStateRECEIVED         RequestViewState = "RECEIVED"
+	RequestViewStateREJECTED         RequestViewState = "REJECTED"
+)
+
+// Defines values for TargetFeaturePropertiesPriorityTier.
+const (
+	BESTEFFORT      TargetFeaturePropertiesPriorityTier = "BEST_EFFORT"
+	CIVILPROTECTION TargetFeaturePropertiesPriorityTier = "CIVIL_PROTECTION"
+	COMMERCIAL      TargetFeaturePropertiesPriorityTier = "COMMERCIAL"
+	GOVERNMENT      TargetFeaturePropertiesPriorityTier = "GOVERNMENT"
+)
+
+// Defines values for TargetFeaturePropertiesState.
+const (
+	TargetFeaturePropertiesStateACQUIRED         TargetFeaturePropertiesState = "ACQUIRED"
+	TargetFeaturePropertiesStateAWAITINGPLANNING TargetFeaturePropertiesState = "AWAITING_PLANNING"
+	TargetFeaturePropertiesStateCANCELLED        TargetFeaturePropertiesState = "CANCELLED"
+	TargetFeaturePropertiesStateEXPIRED          TargetFeaturePropertiesState = "EXPIRED"
+	TargetFeaturePropertiesStateINFEASIBLE       TargetFeaturePropertiesState = "INFEASIBLE"
+	TargetFeaturePropertiesStatePLANNED          TargetFeaturePropertiesState = "PLANNED"
+	TargetFeaturePropertiesStateRECEIVED         TargetFeaturePropertiesState = "RECEIVED"
+	TargetFeaturePropertiesStateREJECTED         TargetFeaturePropertiesState = "REJECTED"
+)
+
+// Defines values for TargetFeatureType.
+const (
+	TargetFeatureTypeFeature TargetFeatureType = "Feature"
+)
+
+// Defines values for TargetFeatureCollectionType.
+const (
+	TargetFeatureCollectionTypeFeatureCollection TargetFeatureCollectionType = "FeatureCollection"
 )
 
 // Defines values for UnfulfilmentReasonCode.
@@ -86,6 +131,18 @@ const (
 	UnfulfilmentReasonCodeLOSTTOHIGHERVALUE       UnfulfilmentReasonCode = "LOST_TO_HIGHER_VALUE"
 	UnfulfilmentReasonCodeNOOPPORTUNITYINBUCKET   UnfulfilmentReasonCode = "NO_OPPORTUNITY_IN_BUCKET"
 	UnfulfilmentReasonCodeSUPERSEDED              UnfulfilmentReasonCode = "SUPERSEDED"
+)
+
+// Defines values for GetTargetsParamsState.
+const (
+	ACQUIRED         GetTargetsParamsState = "ACQUIRED"
+	AWAITINGPLANNING GetTargetsParamsState = "AWAITING_PLANNING"
+	CANCELLED        GetTargetsParamsState = "CANCELLED"
+	EXPIRED          GetTargetsParamsState = "EXPIRED"
+	INFEASIBLE       GetTargetsParamsState = "INFEASIBLE"
+	PLANNED          GetTargetsParamsState = "PLANNED"
+	RECEIVED         GetTargetsParamsState = "RECEIVED"
+	REJECTED         GetTargetsParamsState = "REJECTED"
 )
 
 // Acquisition defines model for Acquisition.
@@ -205,6 +262,58 @@ type Opportunity struct {
 	Won *bool `json:"won,omitempty"`
 }
 
+// OpportunityFeature One candidate opportunity's footprint, WON OR LOST.
+//
+// `awarded` is the field this endpoint exists for. Losing candidates are
+// retained deliberately (ADR-0012), and they are the raw material for the
+// conflict-cluster layer: a cell dense with unawarded footprints is a
+// region where the constellation is fighting itself.
+type OpportunityFeature struct {
+	Geometry   Polygon `json:"geometry"`
+	Properties struct {
+		// Awarded Whether this opportunity became an acquisition in the live plan.
+		//
+		// False means it competed and lost. It does NOT mean the request
+		// went unserved — the same request may have won on a different
+		// pass — so a count of unawarded footprints measures contention
+		// for ground, not customer disappointment. The two are different
+		// questions and only the first one is answerable from geometry.
+		Awarded       bool        `json:"awarded"`
+		Mode          ImagingMode `json:"mode"`
+		OpportunityId Uuid        `json:"opportunity_id"`
+
+		// QualityScore The score the allocator ranked this candidate by.
+		QualityScore *float32    `json:"quality_score,omitempty"`
+		RequestId    Uuid        `json:"request_id"`
+		SatelliteId  SatelliteId `json:"satellite_id"`
+		WindowEnd    time.Time   `json:"window_end"`
+		WindowStart  time.Time   `json:"window_start"`
+	} `json:"properties"`
+	Type OpportunityFeatureType `json:"type"`
+}
+
+// OpportunityFeatureType defines model for OpportunityFeature.Type.
+type OpportunityFeatureType string
+
+// OpportunityFeatureCollection Candidate footprints over a window, including the ones that lost.
+// Powers the conflict-cluster layer in M4-01 and the ghost rendering in
+// M4-05.
+type OpportunityFeatureCollection struct {
+	Features []OpportunityFeature `json:"features"`
+
+	// Staleness How current this answer is. Present on every projection response,
+	// because a read model that cannot say how far behind it is forces the UI
+	// to guess and the UI guesses optimistically.
+	Staleness *Staleness `json:"staleness,omitempty"`
+
+	// Truncated Whether `limit` cut the result short. See FeatureCollection.
+	Truncated bool                             `json:"truncated"`
+	Type      OpportunityFeatureCollectionType `json:"type"`
+}
+
+// OpportunityFeatureCollectionType defines model for OpportunityFeatureCollection.Type.
+type OpportunityFeatureCollectionType string
+
 // OpportunityPage defines model for OpportunityPage.
 type OpportunityPage struct {
 	Items      []Opportunity `json:"items"`
@@ -251,6 +360,20 @@ type PlanPage struct {
 	// to guess and the UI guesses optimistically.
 	Staleness Staleness `json:"staleness"`
 }
+
+// Point A single WGS84 position. Used by target geometry, which is a point for
+// most requests and a polygon for area tasking — see TargetFeature.
+type Point struct {
+	// Coordinates [longitude, latitude], WGS84. Longitude FIRST, per RFC 7946. Note that
+	// 3.0.3 cannot express positional item types, so this constrains only the
+	// length — the ordering is enforced at the service boundary, which is the
+	// same limitation recorded in contracts/README.md for the event schemas.
+	Coordinates Position  `json:"coordinates"`
+	Type        PointType `json:"type"`
+}
+
+// PointType defines model for Point.Type.
+type PointType string
 
 // Polygon defines model for Polygon.
 type Polygon struct {
@@ -317,6 +440,69 @@ type Staleness struct {
 	// LagSeconds Seconds between `as_of` and now, at the moment of the read.
 	LagSeconds float32 `json:"lag_seconds"`
 }
+
+// TargetFeature One request's target, with enough about the request to colour and filter
+// it without a second call.
+//
+// Geometry is a Point OR a Polygon: most requests name a point and area
+// tasking names a polygon, and the read model stores both in one
+// `geometry(Geometry,4326)` column. A density layer that silently dropped
+// the polygons would under-report exactly the largest requests.
+type TargetFeature struct {
+	Geometry   TargetFeature_Geometry `json:"geometry"`
+	Properties struct {
+		BidCredits *int   `json:"bid_credits,omitempty"`
+		CustomerId string `json:"customer_id"`
+
+		// OpportunityCount How many opportunities this request has. Zero against a
+		// non-RECEIVED state is a request feasibility could not serve, and
+		// it is the difference between "nobody wanted this ground" and
+		// "nobody could image it".
+		OpportunityCount *int                                `json:"opportunity_count,omitempty"`
+		PriorityTier     TargetFeaturePropertiesPriorityTier `json:"priority_tier"`
+		RequestId        Uuid                                `json:"request_id"`
+		State            TargetFeaturePropertiesState        `json:"state"`
+		SubmittedAt      time.Time                           `json:"submitted_at"`
+		TargetName       *string                             `json:"target_name,omitempty"`
+	} `json:"properties"`
+	Type TargetFeatureType `json:"type"`
+}
+
+// TargetFeature_Geometry defines model for TargetFeature.Geometry.
+type TargetFeature_Geometry struct {
+	union json.RawMessage
+}
+
+// TargetFeaturePropertiesPriorityTier defines model for TargetFeature.Properties.PriorityTier.
+type TargetFeaturePropertiesPriorityTier string
+
+// TargetFeaturePropertiesState defines model for TargetFeature.Properties.State.
+type TargetFeaturePropertiesState string
+
+// TargetFeatureType defines model for TargetFeature.Type.
+type TargetFeatureType string
+
+// TargetFeatureCollection Request targets over a window. Powers the density layer in M4-01.
+//
+// Typed properties rather than `additionalProperties: true`, unlike the
+// older footprints collection: a client colouring by tier and filtering by
+// state should not have to guess at key names, and the generator can only
+// help if the shape is declared.
+type TargetFeatureCollection struct {
+	Features []TargetFeature `json:"features"`
+
+	// Staleness How current this answer is. Present on every projection response,
+	// because a read model that cannot say how far behind it is forces the UI
+	// to guess and the UI guesses optimistically.
+	Staleness *Staleness `json:"staleness,omitempty"`
+
+	// Truncated Whether `limit` cut the result short. See FeatureCollection.
+	Truncated bool                        `json:"truncated"`
+	Type      TargetFeatureCollectionType `json:"type"`
+}
+
+// TargetFeatureCollectionType defines model for TargetFeatureCollection.Type.
+type TargetFeatureCollectionType string
 
 // TimeWindow defines model for TimeWindow.
 type TimeWindow struct {
@@ -411,6 +597,29 @@ type GetFootprintsParams struct {
 	IfNoneMatch *IfNoneMatch `json:"If-None-Match,omitempty"`
 }
 
+// GetOpportunityFootprintsParams defines parameters for GetOpportunityFootprints.
+type GetOpportunityFootprintsParams struct {
+	SatelliteId *SatelliteId `form:"satellite_id,omitempty" json:"satellite_id,omitempty"`
+	WindowStart time.Time    `form:"window_start" json:"window_start"`
+	WindowEnd   time.Time    `form:"window_end" json:"window_end"`
+
+	// Awarded Restrict to winners or to losers. Absent means both, which is what
+	// the conflict view needs: the ratio is the interesting quantity and
+	// it cannot be computed from one half.
+	Awarded *bool  `form:"awarded,omitempty" json:"awarded,omitempty"`
+	Limit   *Limit `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// IfNoneMatch The `ETag` of a previously fetched rendering. If it still matches, the
+	// server answers `304` with no body.
+	//
+	// This is the payload budget's main lever, and it exists because of how
+	// the globe is actually used: a client polls the same horizon every few
+	// seconds and the answer changes only when a plan is committed. Re-sending
+	// an unchanged CZML document each time is the difference between a live
+	// view and a view that is merely expensive.
+	IfNoneMatch *IfNoneMatch `json:"If-None-Match,omitempty"`
+}
+
 // GetPlanCZMLParams defines parameters for GetPlanCZML.
 type GetPlanCZMLParams struct {
 	PlanVersion *int `form:"plan_version,omitempty" json:"plan_version,omitempty"`
@@ -442,6 +651,31 @@ type GetConstellationCZMLParams struct {
 	// view and a view that is merely expensive.
 	IfNoneMatch *IfNoneMatch `json:"If-None-Match,omitempty"`
 }
+
+// GetTargetsParams defines parameters for GetTargets.
+type GetTargetsParams struct {
+	WindowStart time.Time `form:"window_start" json:"window_start"`
+	WindowEnd   time.Time `form:"window_end" json:"window_end"`
+
+	// State Restrict to one request state. Absent means every state, which is
+	// what a density view wants — an INFEASIBLE request is still demand,
+	// and hiding it would make the map describe supply.
+	State *GetTargetsParamsState `form:"state,omitempty" json:"state,omitempty"`
+	Limit *Limit                 `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// IfNoneMatch The `ETag` of a previously fetched rendering. If it still matches, the
+	// server answers `304` with no body.
+	//
+	// This is the payload budget's main lever, and it exists because of how
+	// the globe is actually used: a client polls the same horizon every few
+	// seconds and the answer changes only when a plan is committed. Re-sending
+	// an unchanged CZML document each time is the difference between a live
+	// view and a view that is merely expensive.
+	IfNoneMatch *IfNoneMatch `json:"If-None-Match,omitempty"`
+}
+
+// GetTargetsParamsState defines parameters for GetTargets.
+type GetTargetsParamsState string
 
 // ListPlansParams defines parameters for ListPlans.
 type ListPlansParams struct {
@@ -483,6 +717,68 @@ type ListRequestOpportunitiesParams struct {
 	Limit  *Limit  `form:"limit,omitempty" json:"limit,omitempty"`
 }
 
+// AsPoint returns the union data inside the TargetFeature_Geometry as a Point
+func (t TargetFeature_Geometry) AsPoint() (Point, error) {
+	var body Point
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromPoint overwrites any union data inside the TargetFeature_Geometry as the provided Point
+func (t *TargetFeature_Geometry) FromPoint(v Point) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergePoint performs a merge with any union data inside the TargetFeature_Geometry, using the provided Point
+func (t *TargetFeature_Geometry) MergePoint(v Point) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsPolygon returns the union data inside the TargetFeature_Geometry as a Polygon
+func (t TargetFeature_Geometry) AsPolygon() (Polygon, error) {
+	var body Polygon
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromPolygon overwrites any union data inside the TargetFeature_Geometry as the provided Polygon
+func (t *TargetFeature_Geometry) FromPolygon(v Polygon) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergePolygon performs a merge with any union data inside the TargetFeature_Geometry, using the provided Polygon
+func (t *TargetFeature_Geometry) MergePolygon(v Polygon) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+func (t TargetFeature_Geometry) MarshalJSON() ([]byte, error) {
+	b, err := t.union.MarshalJSON()
+	return b, err
+}
+
+func (t *TargetFeature_Geometry) UnmarshalJSON(b []byte) error {
+	err := t.union.UnmarshalJSON(b)
+	return err
+}
+
 // ServerInterface represents all server handlers.
 type ServerInterface interface {
 	// Liveness probe
@@ -497,12 +793,18 @@ type ServerInterface interface {
 	// GeoJSON footprints over a window
 	// (GET /v1/geo/footprints)
 	GetFootprints(w http.ResponseWriter, r *http.Request, params GetFootprintsParams)
+	// GeoJSON candidate footprints over a window, won and lost
+	// (GET /v1/geo/opportunities)
+	GetOpportunityFootprints(w http.ResponseWriter, r *http.Request, params GetOpportunityFootprintsParams)
 	// CZML rendering of one plan
 	// (GET /v1/geo/plans/{satellite_id}/{bucket_start}/czml)
 	GetPlanCZML(w http.ResponseWriter, r *http.Request, satelliteId SatelliteIdPath, bucketStart time.Time, params GetPlanCZMLParams)
 	// CZML rendering of the constellation's orbit tracks
 	// (GET /v1/geo/satellites/czml)
 	GetConstellationCZML(w http.ResponseWriter, r *http.Request, params GetConstellationCZMLParams)
+	// GeoJSON request targets over a window
+	// (GET /v1/geo/targets)
+	GetTargets(w http.ResponseWriter, r *http.Request, params GetTargetsParams)
 	// List committed plans
 	// (GET /v1/plans)
 	ListPlans(w http.ResponseWriter, r *http.Request, params ListPlansParams)
@@ -545,6 +847,12 @@ func (_ Unimplemented) GetFootprints(w http.ResponseWriter, r *http.Request, par
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
+// GeoJSON candidate footprints over a window, won and lost
+// (GET /v1/geo/opportunities)
+func (_ Unimplemented) GetOpportunityFootprints(w http.ResponseWriter, r *http.Request, params GetOpportunityFootprintsParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
 // CZML rendering of one plan
 // (GET /v1/geo/plans/{satellite_id}/{bucket_start}/czml)
 func (_ Unimplemented) GetPlanCZML(w http.ResponseWriter, r *http.Request, satelliteId SatelliteIdPath, bucketStart time.Time, params GetPlanCZMLParams) {
@@ -554,6 +862,12 @@ func (_ Unimplemented) GetPlanCZML(w http.ResponseWriter, r *http.Request, satel
 // CZML rendering of the constellation's orbit tracks
 // (GET /v1/geo/satellites/czml)
 func (_ Unimplemented) GetConstellationCZML(w http.ResponseWriter, r *http.Request, params GetConstellationCZMLParams) {
+	w.WriteHeader(http.StatusNotImplemented)
+}
+
+// GeoJSON request targets over a window
+// (GET /v1/geo/targets)
+func (_ Unimplemented) GetTargets(w http.ResponseWriter, r *http.Request, params GetTargetsParams) {
 	w.WriteHeader(http.StatusNotImplemented)
 }
 
@@ -793,6 +1107,100 @@ func (siw *ServerInterfaceWrapper) GetFootprints(w http.ResponseWriter, r *http.
 	handler.ServeHTTP(w, r)
 }
 
+// GetOpportunityFootprints operation middleware
+func (siw *ServerInterfaceWrapper) GetOpportunityFootprints(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params GetOpportunityFootprintsParams
+
+	// ------------- Optional query parameter "satellite_id" -------------
+
+	err = runtime.BindQueryParameter("form", true, false, "satellite_id", r.URL.Query(), &params.SatelliteId)
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "satellite_id", Err: err})
+		return
+	}
+
+	// ------------- Required query parameter "window_start" -------------
+
+	if paramValue := r.URL.Query().Get("window_start"); paramValue != "" {
+
+	} else {
+		siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "window_start"})
+		return
+	}
+
+	err = runtime.BindQueryParameter("form", true, true, "window_start", r.URL.Query(), &params.WindowStart)
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "window_start", Err: err})
+		return
+	}
+
+	// ------------- Required query parameter "window_end" -------------
+
+	if paramValue := r.URL.Query().Get("window_end"); paramValue != "" {
+
+	} else {
+		siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "window_end"})
+		return
+	}
+
+	err = runtime.BindQueryParameter("form", true, true, "window_end", r.URL.Query(), &params.WindowEnd)
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "window_end", Err: err})
+		return
+	}
+
+	// ------------- Optional query parameter "awarded" -------------
+
+	err = runtime.BindQueryParameter("form", true, false, "awarded", r.URL.Query(), &params.Awarded)
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "awarded", Err: err})
+		return
+	}
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameter("form", true, false, "limit", r.URL.Query(), &params.Limit)
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		return
+	}
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "If-None-Match" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("If-None-Match")]; found {
+		var IfNoneMatch IfNoneMatch
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "If-None-Match", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "If-None-Match", valueList[0], &IfNoneMatch, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "If-None-Match", Err: err})
+			return
+		}
+
+		params.IfNoneMatch = &IfNoneMatch
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetOpportunityFootprints(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
 // GetPlanCZML operation middleware
 func (siw *ServerInterfaceWrapper) GetPlanCZML(w http.ResponseWriter, r *http.Request) {
 
@@ -928,6 +1336,92 @@ func (siw *ServerInterfaceWrapper) GetConstellationCZML(w http.ResponseWriter, r
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetConstellationCZML(w, r, params)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetTargets operation middleware
+func (siw *ServerInterfaceWrapper) GetTargets(w http.ResponseWriter, r *http.Request) {
+
+	var err error
+
+	// Parameter object where we will unmarshal all parameters from the context
+	var params GetTargetsParams
+
+	// ------------- Required query parameter "window_start" -------------
+
+	if paramValue := r.URL.Query().Get("window_start"); paramValue != "" {
+
+	} else {
+		siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "window_start"})
+		return
+	}
+
+	err = runtime.BindQueryParameter("form", true, true, "window_start", r.URL.Query(), &params.WindowStart)
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "window_start", Err: err})
+		return
+	}
+
+	// ------------- Required query parameter "window_end" -------------
+
+	if paramValue := r.URL.Query().Get("window_end"); paramValue != "" {
+
+	} else {
+		siw.ErrorHandlerFunc(w, r, &RequiredParamError{ParamName: "window_end"})
+		return
+	}
+
+	err = runtime.BindQueryParameter("form", true, true, "window_end", r.URL.Query(), &params.WindowEnd)
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "window_end", Err: err})
+		return
+	}
+
+	// ------------- Optional query parameter "state" -------------
+
+	err = runtime.BindQueryParameter("form", true, false, "state", r.URL.Query(), &params.State)
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "state", Err: err})
+		return
+	}
+
+	// ------------- Optional query parameter "limit" -------------
+
+	err = runtime.BindQueryParameter("form", true, false, "limit", r.URL.Query(), &params.Limit)
+	if err != nil {
+		siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "limit", Err: err})
+		return
+	}
+
+	headers := r.Header
+
+	// ------------- Optional header parameter "If-None-Match" -------------
+	if valueList, found := headers[http.CanonicalHeaderKey("If-None-Match")]; found {
+		var IfNoneMatch IfNoneMatch
+		n := len(valueList)
+		if n != 1 {
+			siw.ErrorHandlerFunc(w, r, &TooManyValuesForParamError{ParamName: "If-None-Match", Count: n})
+			return
+		}
+
+		err = runtime.BindStyledParameterWithOptions("simple", "If-None-Match", valueList[0], &IfNoneMatch, runtime.BindStyledParameterOptions{ParamLocation: runtime.ParamLocationHeader, Explode: false, Required: false})
+		if err != nil {
+			siw.ErrorHandlerFunc(w, r, &InvalidParamFormatError{ParamName: "If-None-Match", Err: err})
+			return
+		}
+
+		params.IfNoneMatch = &IfNoneMatch
+
+	}
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetTargets(w, r, params)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -1244,10 +1738,16 @@ func HandlerWithOptions(si ServerInterface, options ChiServerOptions) http.Handl
 		r.Get(options.BaseURL+"/v1/geo/footprints", wrapper.GetFootprints)
 	})
 	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v1/geo/opportunities", wrapper.GetOpportunityFootprints)
+	})
+	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/v1/geo/plans/{satellite_id}/{bucket_start}/czml", wrapper.GetPlanCZML)
 	})
 	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/v1/geo/satellites/czml", wrapper.GetConstellationCZML)
+	})
+	r.Group(func(r chi.Router) {
+		r.Get(options.BaseURL+"/v1/geo/targets", wrapper.GetTargets)
 	})
 	r.Group(func(r chi.Router) {
 		r.Get(options.BaseURL+"/v1/plans", wrapper.ListPlans)
@@ -1413,6 +1913,61 @@ func (response GetFootprints503ApplicationProblemPlusJSONResponse) VisitGetFootp
 	return json.NewEncoder(w).Encode(response)
 }
 
+type GetOpportunityFootprintsRequestObject struct {
+	Params GetOpportunityFootprintsParams
+}
+
+type GetOpportunityFootprintsResponseObject interface {
+	VisitGetOpportunityFootprintsResponse(w http.ResponseWriter) error
+}
+
+type GetOpportunityFootprints200ResponseHeaders struct {
+	ETag string
+}
+
+type GetOpportunityFootprints200ApplicationGeoPlusJSONResponse struct {
+	Body    OpportunityFeatureCollection
+	Headers GetOpportunityFootprints200ResponseHeaders
+}
+
+func (response GetOpportunityFootprints200ApplicationGeoPlusJSONResponse) VisitGetOpportunityFootprintsResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/geo+json")
+	w.Header().Set("ETag", fmt.Sprint(response.Headers.ETag))
+	w.WriteHeader(200)
+
+	return json.NewEncoder(w).Encode(response.Body)
+}
+
+type GetOpportunityFootprints304Response = NotModifiedResponse
+
+func (response GetOpportunityFootprints304Response) VisitGetOpportunityFootprintsResponse(w http.ResponseWriter) error {
+	w.Header().Set("ETag", fmt.Sprint(response.Headers.ETag))
+	w.WriteHeader(304)
+	return nil
+}
+
+type GetOpportunityFootprints400ApplicationProblemPlusJSONResponse struct {
+	BadRequestApplicationProblemPlusJSONResponse
+}
+
+func (response GetOpportunityFootprints400ApplicationProblemPlusJSONResponse) VisitGetOpportunityFootprintsResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(400)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type GetOpportunityFootprints503ApplicationProblemPlusJSONResponse struct {
+	ServiceUnavailableApplicationProblemPlusJSONResponse
+}
+
+func (response GetOpportunityFootprints503ApplicationProblemPlusJSONResponse) VisitGetOpportunityFootprintsResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(503)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
 type GetPlanCZMLRequestObject struct {
 	SatelliteId SatelliteIdPath `json:"satellite_id"`
 	BucketStart time.Time       `json:"bucket_start"`
@@ -1519,6 +2074,61 @@ type GetConstellationCZML503ApplicationProblemPlusJSONResponse struct {
 }
 
 func (response GetConstellationCZML503ApplicationProblemPlusJSONResponse) VisitGetConstellationCZMLResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(503)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type GetTargetsRequestObject struct {
+	Params GetTargetsParams
+}
+
+type GetTargetsResponseObject interface {
+	VisitGetTargetsResponse(w http.ResponseWriter) error
+}
+
+type GetTargets200ResponseHeaders struct {
+	ETag string
+}
+
+type GetTargets200ApplicationGeoPlusJSONResponse struct {
+	Body    TargetFeatureCollection
+	Headers GetTargets200ResponseHeaders
+}
+
+func (response GetTargets200ApplicationGeoPlusJSONResponse) VisitGetTargetsResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/geo+json")
+	w.Header().Set("ETag", fmt.Sprint(response.Headers.ETag))
+	w.WriteHeader(200)
+
+	return json.NewEncoder(w).Encode(response.Body)
+}
+
+type GetTargets304Response = NotModifiedResponse
+
+func (response GetTargets304Response) VisitGetTargetsResponse(w http.ResponseWriter) error {
+	w.Header().Set("ETag", fmt.Sprint(response.Headers.ETag))
+	w.WriteHeader(304)
+	return nil
+}
+
+type GetTargets400ApplicationProblemPlusJSONResponse struct {
+	BadRequestApplicationProblemPlusJSONResponse
+}
+
+func (response GetTargets400ApplicationProblemPlusJSONResponse) VisitGetTargetsResponse(w http.ResponseWriter) error {
+	w.Header().Set("Content-Type", "application/problem+json")
+	w.WriteHeader(400)
+
+	return json.NewEncoder(w).Encode(response)
+}
+
+type GetTargets503ApplicationProblemPlusJSONResponse struct {
+	ServiceUnavailableApplicationProblemPlusJSONResponse
+}
+
+func (response GetTargets503ApplicationProblemPlusJSONResponse) VisitGetTargetsResponse(w http.ResponseWriter) error {
 	w.Header().Set("Content-Type", "application/problem+json")
 	w.WriteHeader(503)
 
@@ -1698,12 +2308,18 @@ type StrictServerInterface interface {
 	// GeoJSON footprints over a window
 	// (GET /v1/geo/footprints)
 	GetFootprints(ctx context.Context, request GetFootprintsRequestObject) (GetFootprintsResponseObject, error)
+	// GeoJSON candidate footprints over a window, won and lost
+	// (GET /v1/geo/opportunities)
+	GetOpportunityFootprints(ctx context.Context, request GetOpportunityFootprintsRequestObject) (GetOpportunityFootprintsResponseObject, error)
 	// CZML rendering of one plan
 	// (GET /v1/geo/plans/{satellite_id}/{bucket_start}/czml)
 	GetPlanCZML(ctx context.Context, request GetPlanCZMLRequestObject) (GetPlanCZMLResponseObject, error)
 	// CZML rendering of the constellation's orbit tracks
 	// (GET /v1/geo/satellites/czml)
 	GetConstellationCZML(ctx context.Context, request GetConstellationCZMLRequestObject) (GetConstellationCZMLResponseObject, error)
+	// GeoJSON request targets over a window
+	// (GET /v1/geo/targets)
+	GetTargets(ctx context.Context, request GetTargetsRequestObject) (GetTargetsResponseObject, error)
 	// List committed plans
 	// (GET /v1/plans)
 	ListPlans(ctx context.Context, request ListPlansRequestObject) (ListPlansResponseObject, error)
@@ -1847,6 +2463,32 @@ func (sh *strictHandler) GetFootprints(w http.ResponseWriter, r *http.Request, p
 	}
 }
 
+// GetOpportunityFootprints operation middleware
+func (sh *strictHandler) GetOpportunityFootprints(w http.ResponseWriter, r *http.Request, params GetOpportunityFootprintsParams) {
+	var request GetOpportunityFootprintsRequestObject
+
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetOpportunityFootprints(ctx, request.(GetOpportunityFootprintsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetOpportunityFootprints")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetOpportunityFootprintsResponseObject); ok {
+		if err := validResponse.VisitGetOpportunityFootprintsResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
 // GetPlanCZML operation middleware
 func (sh *strictHandler) GetPlanCZML(w http.ResponseWriter, r *http.Request, satelliteId SatelliteIdPath, bucketStart time.Time, params GetPlanCZMLParams) {
 	var request GetPlanCZMLRequestObject
@@ -1894,6 +2536,32 @@ func (sh *strictHandler) GetConstellationCZML(w http.ResponseWriter, r *http.Req
 		sh.options.ResponseErrorHandlerFunc(w, r, err)
 	} else if validResponse, ok := response.(GetConstellationCZMLResponseObject); ok {
 		if err := validResponse.VisitGetConstellationCZMLResponse(w); err != nil {
+			sh.options.ResponseErrorHandlerFunc(w, r, err)
+		}
+	} else if response != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, fmt.Errorf("unexpected response type: %T", response))
+	}
+}
+
+// GetTargets operation middleware
+func (sh *strictHandler) GetTargets(w http.ResponseWriter, r *http.Request, params GetTargetsParams) {
+	var request GetTargetsRequestObject
+
+	request.Params = params
+
+	handler := func(ctx context.Context, w http.ResponseWriter, r *http.Request, request interface{}) (interface{}, error) {
+		return sh.ssi.GetTargets(ctx, request.(GetTargetsRequestObject))
+	}
+	for _, middleware := range sh.middlewares {
+		handler = middleware(handler, "GetTargets")
+	}
+
+	response, err := handler(r.Context(), w, r, request)
+
+	if err != nil {
+		sh.options.ResponseErrorHandlerFunc(w, r, err)
+	} else if validResponse, ok := response.(GetTargetsResponseObject); ok {
+		if err := validResponse.VisitGetTargetsResponse(w); err != nil {
 			sh.options.ResponseErrorHandlerFunc(w, r, err)
 		}
 	} else if response != nil {
@@ -2011,133 +2679,165 @@ func (sh *strictHandler) ListRequestOpportunities(w http.ResponseWriter, r *http
 // Base64 encoded, gzipped, json marshaled Swagger object
 var swaggerSpec = []string{
 
-	"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",
-	"Z5870n83JtoSfz+9//T/AwAA//+jabWbz2cAAA==",
+	"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",
 }
 
 // GetSwagger returns the content of the embedded swagger specification file

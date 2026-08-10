@@ -413,6 +413,135 @@ paths:
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
 
+  /v1/geo/targets:
+    get:
+      operationId: getTargets
+      tags: [geo]
+      summary: GeoJSON request targets over a window
+      description: |
+        A FeatureCollection of what customers asked for, as opposed to what the
+        system managed to schedule. Powers the target-density layer in M4-01.
+
+        This is the DEMAND side of the picture, and it is the half the footprint
+        endpoint cannot show: a region can be dense with requests and empty of
+        acquisitions, and that difference is the whole point of looking at the
+        two layers together.
+
+        Geometry is a Point or a Polygon — most requests name a point, area
+        tasking names a polygon — because the read model stores both in one
+        column. A density layer that dropped the polygons would under-report
+        exactly the largest requests.
+
+        The window filters on the REQUEST'S OWN window rather than on submission
+        time. "What was wanted over this period" is a question about when the
+        imagery was needed, not about when somebody typed it in.
+      parameters:
+        - name: window_start
+          in: query
+          required: true
+          schema: { type: string, format: date-time }
+        - name: window_end
+          in: query
+          required: true
+          schema: { type: string, format: date-time }
+        - name: state
+          in: query
+          description: |
+            Restrict to one request state. Absent means every state, which is
+            what a density view wants — an INFEASIBLE request is still demand,
+            and hiding it would make the map describe supply.
+          schema:
+            type: string
+            enum:
+              [RECEIVED, AWAITING_PLANNING, PLANNED, ACQUIRED, INFEASIBLE, REJECTED, EXPIRED, CANCELLED]
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/IfNoneMatch'
+      responses:
+        '200':
+          description: |
+            A GeoJSON FeatureCollection of targets.
+
+            Bounded by `limit` and reporting `truncated`, for the same reason
+            the footprints endpoint is: silently truncating would let a density
+            view show a cold region that is merely unread.
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/geo+json:
+              schema:
+                $ref: '#/components/schemas/TargetFeatureCollection'
+        '304':
+          $ref: '#/components/responses/NotModified'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /v1/geo/opportunities:
+    get:
+      operationId: getOpportunityFootprints
+      tags: [geo]
+      summary: GeoJSON candidate footprints over a window, won and lost
+      description: |
+        Every candidate the planner considered, with `awarded` saying which ones
+        won. Powers the conflict-cluster layer in M4-01 and the ghost rendering
+        in M4-05.
+
+        THIS IS THE ENDPOINT THAT MAKES CONTENTION VISIBLE. `/v1/geo/footprints`
+        serves committed acquisitions — the winners — and a map of winners
+        cannot show a region where five requests fought over one pass. Losing
+        candidates are retained deliberately (ADR-0012) precisely so this
+        question stays answerable after the fact.
+
+        `awarded: false` means the candidate lost, NOT that its request went
+        unserved: the same request may have won on a different pass. So a
+        density of unawarded footprints measures contention for GROUND, not
+        customer disappointment. Those are different questions and only the
+        first is answerable from geometry alone — the second is
+        `planning.request.unfulfilled.v1` and the M4-04 panel.
+      parameters:
+        - $ref: '#/components/parameters/SatelliteId'
+        - name: window_start
+          in: query
+          required: true
+          schema: { type: string, format: date-time }
+        - name: window_end
+          in: query
+          required: true
+          schema: { type: string, format: date-time }
+        - name: awarded
+          in: query
+          description: |
+            Restrict to winners or to losers. Absent means both, which is what
+            the conflict view needs: the ratio is the interesting quantity and
+            it cannot be computed from one half.
+          schema: { type: boolean }
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/IfNoneMatch'
+      responses:
+        '200':
+          description: |
+            A GeoJSON FeatureCollection of candidate footprints.
+
+            Expect this to be LARGE relative to the other geo endpoints — every
+            request contributes several candidates and only some become
+            acquisitions — so `limit` and `truncated` matter more here than
+            anywhere else in this API.
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/geo+json:
+              schema:
+                $ref: '#/components/schemas/OpportunityFeatureCollection'
+        '304':
+          $ref: '#/components/responses/NotModified'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
   /healthz:
     get:
       operationId: getLiveness
@@ -782,6 +911,19 @@ components:
             items:
               $ref: '#/components/schemas/Position'
 
+    Point:
+      type: object
+      required: [type, coordinates]
+      description: |
+        A single WGS84 position. Used by target geometry, which is a point for
+        most requests and a polygon for area tasking — see TargetFeature.
+      properties:
+        type:
+          type: string
+          enum: [Point]
+        coordinates:
+          $ref: '#/components/schemas/Position'
+
     Feature:
       type: object
       required: [type, geometry, properties]
@@ -821,6 +963,134 @@ components:
             gap where there is really a limit — a viewport confidently drawing
             emptiness over a fully-tasked region. A client that sees this set
             must narrow its window rather than believe what it was sent.
+        staleness:
+          $ref: '#/components/schemas/Staleness'
+
+    TargetFeature:
+      type: object
+      required: [type, geometry, properties]
+      description: |
+        One request's target, with enough about the request to colour and filter
+        it without a second call.
+
+        Geometry is a Point OR a Polygon: most requests name a point and area
+        tasking names a polygon, and the read model stores both in one
+        `geometry(Geometry,4326)` column. A density layer that silently dropped
+        the polygons would under-report exactly the largest requests.
+      properties:
+        type:
+          type: string
+          enum: [Feature]
+        geometry:
+          oneOf:
+            - $ref: '#/components/schemas/Point'
+            - $ref: '#/components/schemas/Polygon'
+        properties:
+          type: object
+          required: [request_id, customer_id, priority_tier, state, submitted_at]
+          properties:
+            request_id: { $ref: '#/components/schemas/Uuid' }
+            customer_id: { type: string }
+            target_name: { type: string }
+            priority_tier:
+              type: string
+              enum: [BEST_EFFORT, COMMERCIAL, CIVIL_PROTECTION, GOVERNMENT]
+            state:
+              type: string
+              enum:
+                [RECEIVED, AWAITING_PLANNING, PLANNED, ACQUIRED, INFEASIBLE, REJECTED, EXPIRED, CANCELLED]
+            bid_credits: { type: integer, minimum: 0 }
+            opportunity_count:
+              type: integer
+              minimum: 0
+              description: |
+                How many opportunities this request has. Zero against a
+                non-RECEIVED state is a request feasibility could not serve, and
+                it is the difference between "nobody wanted this ground" and
+                "nobody could image it".
+            submitted_at: { type: string, format: date-time }
+
+    TargetFeatureCollection:
+      type: object
+      required: [type, features, truncated]
+      description: |
+        Request targets over a window. Powers the density layer in M4-01.
+
+        Typed properties rather than `additionalProperties: true`, unlike the
+        older footprints collection: a client colouring by tier and filtering by
+        state should not have to guess at key names, and the generator can only
+        help if the shape is declared.
+      properties:
+        type:
+          type: string
+          enum: [FeatureCollection]
+        features:
+          type: array
+          items:
+            $ref: '#/components/schemas/TargetFeature'
+        truncated:
+          type: boolean
+          description: Whether `limit` cut the result short. See FeatureCollection.
+        staleness:
+          $ref: '#/components/schemas/Staleness'
+
+    OpportunityFeature:
+      type: object
+      required: [type, geometry, properties]
+      description: |
+        One candidate opportunity's footprint, WON OR LOST.
+
+        `awarded` is the field this endpoint exists for. Losing candidates are
+        retained deliberately (ADR-0012), and they are the raw material for the
+        conflict-cluster layer: a cell dense with unawarded footprints is a
+        region where the constellation is fighting itself.
+      properties:
+        type:
+          type: string
+          enum: [Feature]
+        geometry: { $ref: '#/components/schemas/Polygon' }
+        properties:
+          type: object
+          required: [opportunity_id, request_id, satellite_id, mode, window_start, window_end, awarded]
+          properties:
+            opportunity_id: { $ref: '#/components/schemas/Uuid' }
+            request_id: { $ref: '#/components/schemas/Uuid' }
+            satellite_id: { $ref: '#/components/schemas/SatelliteId' }
+            mode: { $ref: '#/components/schemas/ImagingMode' }
+            window_start: { type: string, format: date-time }
+            window_end: { type: string, format: date-time }
+            quality_score:
+              type: number
+              description: The score the allocator ranked this candidate by.
+            awarded:
+              type: boolean
+              description: |
+                Whether this opportunity became an acquisition in the live plan.
+
+                False means it competed and lost. It does NOT mean the request
+                went unserved — the same request may have won on a different
+                pass — so a count of unawarded footprints measures contention
+                for ground, not customer disappointment. The two are different
+                questions and only the first one is answerable from geometry.
+
+    OpportunityFeatureCollection:
+      type: object
+      required: [type, features, truncated]
+      description: |
+        Candidate footprints over a window, including the ones that lost.
+        Powers the conflict-cluster layer in M4-01 and the ghost rendering in
+        M4-05.
+      properties:
+        type:
+          type: string
+          enum: [FeatureCollection]
+        features:
+          type: array
+          items:
+            $ref: '#/components/schemas/OpportunityFeature'
+        truncated:
+          type: boolean
+          description: Whether `limit` cut the result short. See FeatureCollection.
         staleness:
           $ref: '#/components/schemas/Staleness'
 
