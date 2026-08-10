@@ -34,19 +34,30 @@ test('a submitted request becomes an acquisition on the page', async ({ page, re
   // period — and it is why the budget here is minutes rather than seconds.
   await waitForState(request, requestId, ['PLANNED', 'ACQUIRED']);
 
-  // And the acquisition is readable from the geo endpoint the map draws from,
+  // And the acquisition is readable from the endpoint the map draws from,
   // which is a stronger claim than "the request says PLANNED": it means the
   // footprint projected too.
+  //
+  // FILTERED SERVER-SIDE BY request_id, not fetched-then-filtered here. The
+  // list is paginated, and scanning a page for our own row passes on an empty
+  // stack and fails on a busy one — which is exactly how this first broke: 136
+  // acquisitions existed, the response capped at 50, and the one row this test
+  // cares about was not among them. A client-side filter over a truncated page
+  // is a test that quietly measures how much other data is around.
   await expect
     .poll(
       async () => {
         const response = await request.get(
           `${GATEWAY}/v1/acquisitions?window_start=${encodeURIComponent(
             new Date(Date.now() - 3600_000).toISOString(),
-          )}&window_end=${encodeURIComponent(new Date(Date.now() + 48 * 3600_000).toISOString())}`,
+          )}&window_end=${encodeURIComponent(
+            new Date(Date.now() + 48 * 3600_000).toISOString(),
+          )}&request_id=${encodeURIComponent(requestId)}`,
         );
         if (!response.ok()) return 0;
         const body = (await response.json()) as { items: { request_id: string }[] };
+        // Still checked rather than trusted: a filter the server ignores would
+        // return everything, and a bare length would call that success.
         return body.items.filter((item) => item.request_id === requestId).length;
       },
       { message: 'the acquisition never reached the read model' },

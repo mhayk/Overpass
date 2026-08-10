@@ -137,8 +137,8 @@ func run(ctx context.Context) error {
 	)
 
 	server := &http.Server{
-		Addr:              cfg.HTTPAddr,
-		Handler:           httpapi.New(health, submitter, cfg.SubmitTimeout, log).
+		Addr: cfg.HTTPAddr,
+		Handler: httpapi.New(health, submitter, cfg.SubmitTimeout, log).
 			WithCORS(cfg.CORSAllowedOrigins).Routes(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}

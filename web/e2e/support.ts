@@ -143,6 +143,14 @@ export async function waitForState(
  * The real condition is the one below: a terminal state, or an explanation.
  * Either means the planner has looked at this request and made a decision about
  * it; neither is reachable before it has.
+ *
+ * The 150s budget is not arbitrary and not a sleep — it is a ceiling derived
+ * from the pipeline's measured throughput. Feasibility is a single worker at
+ * roughly 0.25 rps (#189), so a dozen requests need about a minute of sweeping
+ * before the planner's quiet period even starts. This much headroom means a
+ * slow machine still passes; what it will not survive is a queue that was
+ * already full when the test began, which is why CI seeds and then runs this
+ * BEFORE driving the demo.
  */
 export async function waitForDecision(
   request: APIRequestContext,

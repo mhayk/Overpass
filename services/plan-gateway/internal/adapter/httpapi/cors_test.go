@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mhayk/overpass/services/plan-gateway/internal/app"
 	"github.com/mhayk/overpass/services/plan-gateway/internal/adapter/httpapi"
+	"github.com/mhayk/overpass/services/plan-gateway/internal/app"
 )
 
 // THE READ API IS CALLED FROM A BROWSER, AND THAT IS PART OF ITS CONTRACT.

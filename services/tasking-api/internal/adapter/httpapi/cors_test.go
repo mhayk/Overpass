@@ -1,6 +1,7 @@
 package httpapi_test
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"net/http"
@@ -38,7 +39,7 @@ func corsServer(t *testing.T) http.Handler {
 }
 
 func TestThePreflightForASubmissionIsAnswered(t *testing.T) {
-	r := httptest.NewRequest(http.MethodOptions, "/v1/tasking-requests", nil)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodOptions, "/v1/tasking-requests", http.NoBody)
 	r.Header.Set("Origin", "http://localhost:3000")
 	r.Header.Set("Access-Control-Request-Method", http.MethodPost)
 	r.Header.Set("Access-Control-Request-Headers", "content-type,idempotency-key")
@@ -68,7 +69,7 @@ func TestThePreflightForASubmissionIsAnswered(t *testing.T) {
 // that the server correctly de-duplicated would be shown to the user as a new
 // request, which is the exact confusion idempotency exists to prevent.
 func TestTheReplayHeaderIsExposedToThePage(t *testing.T) {
-	r := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/healthz", http.NoBody)
 	r.Header.Set("Origin", "http://localhost:3000")
 
 	recorder := httptest.NewRecorder()
@@ -81,7 +82,7 @@ func TestTheReplayHeaderIsExposedToThePage(t *testing.T) {
 }
 
 func TestWithoutAnAllowListNoOriginIsPermitted(t *testing.T) {
-	r := httptest.NewRequest(http.MethodGet, "/healthz", nil)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/healthz", http.NoBody)
 	r.Header.Set("Origin", "http://localhost:3000")
 
 	recorder := httptest.NewRecorder()

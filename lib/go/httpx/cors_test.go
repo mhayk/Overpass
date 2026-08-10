@@ -1,6 +1,7 @@
 package httpx_test
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -42,7 +43,7 @@ func served(t *testing.T, r *http.Request) *httptest.ResponseRecorder {
 // every curl worked, and the browser refused every single read — a blank page
 // with the failure visible only in a console nobody was reading.
 func TestAnAllowedOriginMayReadTheResponse(t *testing.T) {
-	r := httptest.NewRequest(http.MethodGet, "/v1/acquisitions", nil)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/acquisitions", http.NoBody)
 	r.Header.Set("Origin", "http://localhost:3000")
 
 	got := served(t, r).Header().Get("Access-Control-Allow-Origin")
@@ -53,7 +54,7 @@ func TestAnAllowedOriginMayReadTheResponse(t *testing.T) {
 
 // The origin is echoed, never "*".
 func TestTheOriginIsEchoedRatherThanWildcarded(t *testing.T) {
-	r := httptest.NewRequest(http.MethodGet, "/v1/acquisitions", nil)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/acquisitions", http.NoBody)
 	r.Header.Set("Origin", "http://localhost:3000")
 
 	if got := served(t, r).Header().Get("Access-Control-Allow-Origin"); got == "*" {
@@ -62,7 +63,7 @@ func TestTheOriginIsEchoedRatherThanWildcarded(t *testing.T) {
 }
 
 func TestAnUnlistedOriginGetsNoPermission(t *testing.T) {
-	r := httptest.NewRequest(http.MethodGet, "/v1/acquisitions", nil)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/acquisitions", http.NoBody)
 	r.Header.Set("Origin", "https://evil.example")
 
 	rec := served(t, r)
@@ -84,7 +85,7 @@ func TestAnUnlistedOriginGetsNoPermission(t *testing.T) {
 // appears only behind a proxy and never in a test that skips it.
 func TestVaryOriginIsSetForAllowedAndRefusedAlike(t *testing.T) {
 	for _, origin := range []string{"http://localhost:3000", "https://evil.example"} {
-		r := httptest.NewRequest(http.MethodGet, "/v1/acquisitions", nil)
+		r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/acquisitions", http.NoBody)
 		r.Header.Set("Origin", origin)
 
 		if vary := served(t, r).Header().Get("Vary"); vary != "Origin" {
@@ -95,7 +96,7 @@ func TestVaryOriginIsSetForAllowedAndRefusedAlike(t *testing.T) {
 
 // A REQUEST WITH NO ORIGIN IS LEFT ALONE.
 func TestARequestWithoutAnOriginIsUntouched(t *testing.T) {
-	rec := served(t, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	rec := served(t, httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/healthz", http.NoBody))
 
 	if rec.Header().Get("Access-Control-Allow-Origin") != "" {
 		t.Error("added a CORS header to a request that never asked")
@@ -106,7 +107,7 @@ func TestARequestWithoutAnOriginIsUntouched(t *testing.T) {
 }
 
 func TestAPreflightIsAnsweredWithoutReachingTheHandler(t *testing.T) {
-	r := httptest.NewRequest(http.MethodOptions, "/v1/requests", nil)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodOptions, "/v1/requests", http.NoBody)
 	r.Header.Set("Origin", "http://localhost:3000")
 	r.Header.Set("Access-Control-Request-Method", http.MethodPost)
 	r.Header.Set("Access-Control-Request-Headers", "content-type,idempotency-key")
@@ -138,7 +139,7 @@ func TestAPreflightIsAnsweredWithoutReachingTheHandler(t *testing.T) {
 // send the POST unless this list names it. Submitting a tasking request is the
 // one write the UI makes.
 func TestThePreflightPermitsTheHeadersTheUISends(t *testing.T) {
-	r := httptest.NewRequest(http.MethodOptions, "/v1/requests", nil)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodOptions, "/v1/requests", http.NoBody)
 	r.Header.Set("Origin", "http://localhost:3000")
 	r.Header.Set("Access-Control-Request-Method", http.MethodPost)
 
@@ -152,7 +153,7 @@ func TestThePreflightPermitsTheHeadersTheUISends(t *testing.T) {
 
 // A PREFLIGHT FROM AN UNLISTED ORIGIN IS REFUSED VISIBLY.
 func TestAnUnlistedPreflightIsRefusedWithAStatusSomeoneCanSee(t *testing.T) {
-	r := httptest.NewRequest(http.MethodOptions, "/v1/requests", nil)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodOptions, "/v1/requests", http.NoBody)
 	r.Header.Set("Origin", "https://evil.example")
 	r.Header.Set("Access-Control-Request-Method", http.MethodPost)
 
@@ -168,7 +169,7 @@ func TestAnUnlistedPreflightIsRefusedWithAStatusSomeoneCanSee(t *testing.T) {
 // indistinguishable from "false", so the UI would report a replayed submission
 // as a fresh one.
 func TestTheReplayHeaderIsExposedToThePage(t *testing.T) {
-	r := httptest.NewRequest(http.MethodPost, "/v1/requests", nil)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/requests", http.NoBody)
 	r.Header.Set("Origin", "http://localhost:3000")
 
 	exposed := served(t, r).Header().Get("Access-Control-Expose-Headers")
@@ -179,7 +180,7 @@ func TestTheReplayHeaderIsExposedToThePage(t *testing.T) {
 
 // CREDENTIALS ARE NOT ALLOWED, and that is a decision rather than an omission.
 func TestCredentialsAreNotAllowed(t *testing.T) {
-	r := httptest.NewRequest(http.MethodGet, "/v1/acquisitions", nil)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/acquisitions", http.NoBody)
 	r.Header.Set("Origin", "http://localhost:3000")
 
 	if got := served(t, r).Header().Get("Access-Control-Allow-Credentials"); got != "" {
@@ -189,7 +190,7 @@ func TestCredentialsAreNotAllowed(t *testing.T) {
 
 // An empty allow-list disables CORS rather than allowing everything.
 func TestAnEmptyAllowListPermitsNoOrigin(t *testing.T) {
-	r := httptest.NewRequest(http.MethodGet, "/v1/acquisitions", nil)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/acquisitions", http.NoBody)
 	r.Header.Set("Origin", "http://localhost:3000")
 
 	rec := httptest.NewRecorder()
@@ -205,7 +206,7 @@ func TestAnEmptyAllowListPermitsNoOrigin(t *testing.T) {
 // Scheme and host are case-insensitive; the allow-list must not be stricter
 // than the URL grammar.
 func TestOriginMatchingIgnoresCase(t *testing.T) {
-	r := httptest.NewRequest(http.MethodGet, "/v1/acquisitions", nil)
+	r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/acquisitions", http.NoBody)
 	r.Header.Set("Origin", "HTTP://LocalHost:3000")
 
 	if got := served(t, r).Header().Get("Access-Control-Allow-Origin"); got == "" {
@@ -221,7 +222,7 @@ func TestOriginMatchingIsExactOnSchemeAndPort(t *testing.T) {
 		"http://localhost",
 		"http://localhost:3000.evil.example",
 	} {
-		r := httptest.NewRequest(http.MethodGet, "/v1/acquisitions", nil)
+		r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/v1/acquisitions", http.NoBody)
 		r.Header.Set("Origin", origin)
 
 		if got := served(t, r).Header().Get("Access-Control-Allow-Origin"); got != "" {
@@ -293,7 +294,7 @@ func TestEveryParsedOriginIsOneTheMatcherHonours(t *testing.T) {
 		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) }))
 
 	for _, origin := range origins {
-		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r := httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/", http.NoBody)
 		r.Header.Set("Origin", origin)
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, r)

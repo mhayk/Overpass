@@ -35,14 +35,14 @@ type Config struct {
 	IngressMaxConns    int32
 	BackgroundMaxConns int32
 
-	SubmitTimeout    time.Duration
+	SubmitTimeout time.Duration
 
 	// CORSAllowedOrigins is the browser allow-list. Empty means no browser may
 	// submit, which is the right default for a service behind a same-origin
 	// proxy and the wrong one for the compose stack — where the UI is on :3000
 	// and this is on :8080. See docker-compose.yml.
 	CORSAllowedOrigins []string
-	ReadinessTimeout time.Duration
+	ReadinessTimeout   time.Duration
 
 	OTLPEndpoint     string
 	TraceSampleRatio float64
