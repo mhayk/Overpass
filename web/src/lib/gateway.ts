@@ -79,12 +79,21 @@ export interface Opportunity {
  */
 export interface Unfulfilment {
   reasonCode: string;
+  /** How many rounds this request has lost. Input to the fairness ageing. */
+  ageRounds?: number | undefined;
+  /** Whether it stays in contention for later rounds. */
+  eligibleForRetry?: boolean | undefined;
   /** How much more the bid needed to be. LOST_TO_HIGHER_VALUE. */
   shortfallCredits?: number | undefined;
   /** BLOCKED_BY_SLEW_CONSTRAINT: the manoeuvre against the room for it. */
   requiredSlewS?: number | undefined;
   availableGapS?: number | undefined;
+  /** DUTY_CYCLE_EXHAUSTED: the budget against what this pass needed. */
+  dutyCycleRemainingS?: number | undefined;
+  dutyCycleRequiredS?: number | undefined;
   supersededByPlanId?: string | undefined;
+  /** The strongest candidate this request had, for the ghost highlight. */
+  bestRejectedOpportunityId?: string | undefined;
 }
 
 export interface RequestView {
@@ -274,12 +283,24 @@ export async function fetchRequest(requestId: string): Promise<RequestView> {
     state: string;
     window: TimeRange;
     opportunity_count: number;
+    // The EVENT's shape, nested explanation and all. The gateway serves the
+    // projected event body verbatim; an earlier version of this client read a
+    // flat shape the service has never produced, which #201 corrected in the
+    // contract. Every field below was checked against a live response rather
+    // than against the schema.
     unfulfilment?: {
       reason_code: string;
-      shortfall_credits?: number;
-      required_slew_s?: number;
-      available_gap_s?: number;
-      superseded_by_plan_id?: string;
+      age_rounds?: number;
+      eligible_for_retry?: boolean;
+      explanation?: {
+        shortfall_credits?: number;
+        required_slew_s?: number;
+        available_gap_s?: number;
+        duty_cycle_remaining_s?: number;
+        duty_cycle_required_s?: number;
+        superseded_by_plan_id?: string;
+        best_rejected_opportunity_id?: string;
+      };
     };
     staleness?: RawStaleness;
   }>(`/v1/requests/${encodeURIComponent(requestId)}`);
@@ -294,10 +315,16 @@ export async function fetchRequest(requestId: string): Promise<RequestView> {
     unfulfilment: body.unfulfilment
       ? {
           reasonCode: body.unfulfilment.reason_code,
-          shortfallCredits: body.unfulfilment.shortfall_credits,
-          requiredSlewS: body.unfulfilment.required_slew_s,
-          availableGapS: body.unfulfilment.available_gap_s,
-          supersededByPlanId: body.unfulfilment.superseded_by_plan_id,
+          ageRounds: body.unfulfilment.age_rounds,
+          eligibleForRetry: body.unfulfilment.eligible_for_retry,
+          shortfallCredits: body.unfulfilment.explanation?.shortfall_credits,
+          requiredSlewS: body.unfulfilment.explanation?.required_slew_s,
+          availableGapS: body.unfulfilment.explanation?.available_gap_s,
+          dutyCycleRemainingS: body.unfulfilment.explanation?.duty_cycle_remaining_s,
+          dutyCycleRequiredS: body.unfulfilment.explanation?.duty_cycle_required_s,
+          supersededByPlanId: body.unfulfilment.explanation?.superseded_by_plan_id,
+          bestRejectedOpportunityId:
+            body.unfulfilment.explanation?.best_rejected_opportunity_id,
         }
       : undefined,
     staleness: toStaleness(body.staleness),
