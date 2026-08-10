@@ -280,33 +280,46 @@ jobs:
 
           ./scripts/dashboards-check.sh
 
-      # M3-07: thresholds as gates, not decoration. k6 exits non-zero when one
-      # is breached, so a performance regression fails the build.
+      # THE LOAD TEST DELIBERATELY DOES NOT RUN HERE.
       #
-      # Only the INGRESS scenario runs in CI. The end-to-end one takes minutes
-      # by construction — the pipeline drains at about a quarter of a request
-      # per second, see docs/performance.md — and a gate that adds five minutes
-      # to every push is a gate people route around. It stays a `make
-      # loadtest-pipeline` you run deliberately.
+      # It did, briefly, at a reduced TOP_RATE. It failed on
+      # dropped_iterations and on the 100 rps rung — which is not a regression
+      # in the service, it is the runner. Whatever a GitHub-hosted runner has,
+      # it is already hosting Postgres, NATS, Tempo, Prometheus, Grafana and
+      # four application services; k6 then competes with all of them, cannot
+      # generate the offered rate, and the latency it reports is the latency of
+      # a queue k6 itself created. The step below records the actual capacity
+      # on every run, because "the runner is small" is exactly the sort of
+      # claim that gets repeated until somebody checks it — I asserted "two
+      # cores" here first, and this repository is public, which gets a larger
+      # runner than that.
       #
-      # TOP_RATE is lowered for the runner, which has a fraction of the cores
-      # docs/performance.md was measured on. That WEAKENS the claim rather
-      # than preserving it — p95 < 40ms at 200 rps is a smaller statement than
-      # the same bar at 1000 — and it is the honest trade: a k6 that cannot
-      # generate the offered rate fails `dropped_iterations` and the
-      # thresholds would then describe a load that was never applied.
+      # dropped_iterations is the evidence and it does not depend on the core
+      # count: k6 could not offer the load, so the thresholds described a load
+      # that was never applied.
       #
-      # The full-rate numbers live in docs/performance.md, measured on the
-      # hardware that document names. This gate catches regressions; that
-      # document makes the claim.
-      - name: Ingress thresholds hold
+      # The available responses were to lower the numbers until they passed, or
+      # to admit the measurement does not belong here. Lowering them is how a
+      # gate stops meaning anything: the thresholds would still be green and
+      # would no longer be evidence of anything about this system.
+      #
+      # This is the same confound docs/performance.md already records for the
+      # breakpoint test — 267,670 dropped iterations generating load on the box
+      # under test — and #190 is the issue for fixing it properly by moving
+      # load generation off-host. Until then the suite stays a deliberate
+      # `make loadtest`, run on hardware whose numbers mean something.
+      #
+      # The thresholds are still gates. `make loadtest` exits non-zero on a
+      # breach — verified, exit 99 — it is simply not automatic.
+
+      # Recorded on every run, not only on failure. The load-test decision
+      # below turns on how much machine is actually here, and "a runner is
+      # small" is the kind of claim that gets repeated until someone checks.
+      - name: Record the runner's capacity
         run: |
-          set -euo pipefail
-          docker run --rm --network host \
-            -v "$PWD/loadtest/k6:/scripts:ro" \
-            -e TASKING_API_URL=http://localhost:8080 \
-            -e TOP_RATE=200 \
-            grafana/k6:1.4.0 run /scripts/ingress.js
+          echo "cores: $(nproc)"
+          echo "memory: $(free -g | awk '/^Mem:/{print $2}') GiB"
+          echo "load:  $(cut -d' ' -f1-3 /proc/loadavg)"
 
       - name: Diagnostics on failure
         if: failure()
