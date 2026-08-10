@@ -128,7 +128,7 @@ func TestCallerAttributesAreKept(t *testing.T) {
 
 	found := map[string]string{}
 	for _, attr := range recorder.Ended()[0].Attributes() {
-		found[string(attr.Key)] = attr.Value.Emit()
+		found[string(attr.Key)] = attr.Value.AsString()
 	}
 	if found["messaging.destination.name"] != "planning.plan.committed.v1" {
 		t.Errorf("destination = %q, want the subject", found["messaging.destination.name"])
