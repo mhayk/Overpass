@@ -944,7 +944,69 @@ components:
         opportunity_count: { type: integer, minimum: 0 }
         acquisition: { $ref: '#/components/schemas/Acquisition' }
         unfulfilment: { $ref: '#/components/schemas/Unfulfilment' }
+        infeasibility: { $ref: '#/components/schemas/Infeasibility' }
         staleness: { $ref: '#/components/schemas/Staleness' }
+
+    Infeasibility:
+      type: object
+      required: [reason_code]
+      description: |
+        Why the system cannot answer this request at all, as structured data.
+
+        Distinct from `unfulfilment`, and the distinction is the product. An
+        unfulfilment means the request COMPETED AND LOST — it ages, gains
+        fairness weight, and comes back. An infeasibility means there was
+        nothing to compete for: no satellite sees the target at a valid
+        geometry in the horizon, or the customer's own constraints eliminated
+        every pass. One says "bid more or widen your window", the other says
+        "this target is not observable on these terms". Collapsing them would
+        tell a customer to keep paying for something that will never happen.
+
+        THE SHAPE IS THE EVENT'S, for `feasibility.failed.v1`'s `data` object,
+        for the same reason Unfulfilment passes `planning.request.unfulfilled.v1`
+        through unflattened: the reason a customer reads is then literally the
+        one feasibility emitted, with no reshaping step that can disagree with
+        it.
+
+        ONLY NON-RETRYABLE FAILURES APPEAR HERE. A retryable one is a statement
+        about our ability to answer, not about the physics — the message goes
+        back to the stream with backoff and the request stays where it was.
+        Serving "TLE_UNAVAILABLE" to a customer as a verdict would turn our
+        transient problem into their permanent answer.
+      properties:
+        reason_code:
+          type: string
+          enum:
+            - NO_ACCESS_IN_HORIZON
+            - CONSTRAINTS_TOO_NARROW
+            - TLE_STALE
+            - TLE_UNAVAILABLE
+            - PROPAGATION_ERROR
+            - UNSUPPORTED_TARGET_GEOMETRY
+            - HORIZON_EXHAUSTED
+            - INTERNAL_ERROR
+          description: |
+            NO_ACCESS_IN_HORIZON: everything was propagated and nothing sees the
+            target at a valid geometry. CONSTRAINTS_TOO_NARROW: access exists,
+            but the customer's own incidence and look-side limits eliminated all
+            of it — a different and actionable answer. HORIZON_EXHAUSTED: the
+            deadline passed while the request was queued.
+        request_id: { $ref: '#/components/schemas/Uuid' }
+        retryable:
+          type: boolean
+          description: |
+            Always false on anything served here — see the note above. Carried
+            rather than dropped so the served object stays the event's object.
+        reason_detail:
+          type: string
+          description: Human-readable elaboration. Never the only thing carried.
+        satellites_evaluated:
+          type: integer
+          minimum: 0
+          description: |
+            How much of the constellation was actually considered. The number
+            that separates "nothing can see it" from "we barely looked".
+        failed_at: { type: string, format: date-time }
 
     Unfulfilment:
       type: object
