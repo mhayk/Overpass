@@ -220,6 +220,26 @@ jobs:
           docker compose logs feasibility | grep -q "feasibility worker starting" \
             || { echo "::error::the feasibility worker never started"; exit 1; }
 
+      # #53. The acceptance criterion is that the dashboards populate from
+      # `make demo` with NO manual setup, so this drives the demo and then asks
+      # Prometheus whether every committed panel can actually render.
+      #
+      # The queries come out of the committed JSON rather than being restated
+      # here. A check carrying its own copy of the query proves only that the
+      # check's query works — which is exactly how overpass_dlq_depth survived
+      # review in alerts.yml.
+      - name: Dashboards populate from the demo
+        run: |
+          set -euo pipefail
+          ./scripts/seed.sh
+          ./scripts/demo.sh
+          # The metric readers export on a ten-second interval and Prometheus
+          # scrapes on another ten, so a check run immediately after the demo
+          # is racing two independent timers rather than testing anything.
+          echo "waiting for one export and one scrape"
+          sleep 30
+          ./scripts/dashboards-check.sh
+
       - name: Diagnostics on failure
         if: failure()
         run: |

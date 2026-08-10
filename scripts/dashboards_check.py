@@ -67,6 +67,11 @@ MAY_BE_ABSENT = {
     # Needs a satellite with no duty-cycle budget configured, which the seeded
     # constellation does not have.
     "overpass_satellite_utilisation_ratio": "requires a committed plan; absent until the first round",
+    # Needs a request that finds no usable access window. The demo's four are
+    # built to CONTEND with each other, so all four succeed by design — the
+    # interesting failure there is losing an allocation, not being infeasible.
+    # The chaos and integration suites produce these.
+    "overpass_feasibility_refusals_total": "requires an infeasible request; the demo's four all succeed",
 }
 
 # Prometheus function and keyword names, so they are not mistaken for metrics.
@@ -121,8 +126,15 @@ def metric_names(expr: str) -> set[str]:
     inside selectors. A gate that misses a metric is worse than one that asks
     about an extra identifier, because the first kind fails silently.
     """
+    # Label SELECTORS first: {http_route="/v1/plans"} contributes no metric.
     stripped = re.sub(r"\{[^}]*\}", "{}", expr)
     stripped = re.sub(r'"[^"]*"', '""', stripped)
+    # Then the GROUPING clauses. `sum by (service_name, http_route) (...)`
+    # names labels, not metrics, and an earlier version of this function
+    # reported http_route as an unpublished metric — a false failure on a
+    # panel that renders perfectly. A gate that cries wolf gets switched off,
+    # so this is as much a correctness requirement as the real check.
+    stripped = re.sub(r"\b(?:by|without|on|ignoring|group_left|group_right)\s*\([^)]*\)", " ", stripped)
     names = set()
     for match in METRIC_RE.finditer(stripped):
         name = match.group(1)
