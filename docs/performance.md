@@ -144,6 +144,89 @@ Not tuning. In rough order of effect:
 None of this is done, and none of it is in M3's scope. It is written down so the
 next person does not have to rediscover it.
 
+## Breakpoint: ramping ingress until something gives
+
+`loadtest/k6/breakpoint.js`. Not a gate — it has no thresholds on purpose,
+because its output is a number and a failure mode, and a threshold would turn
+"find the limit" into "assert the limit has not moved".
+
+Ramped 500 → 10,000 rps offered over two minutes, then to zero, then a steady
+50 rps to watch it come back.
+
+| | |
+| --- | --- |
+| Peak offered | 10,000 rps |
+| Peak **achieved** | **1,872 rps** |
+| Requests | 308,829 |
+| HTTP failures | **0** |
+| 503s | **0** |
+| Latency under load | median 2.18s, p95 3.27s, **max 3.50s** |
+| Dropped iterations | 267,670 |
+
+### The prediction, and how it did
+
+Written into the script before the first run:
+
+| # | Predicted | Actual | |
+| --- | --- | --- | --- |
+| 1 | Ingress connection pool breaks first | Queueing, yes — but nothing "broke" | ~ |
+| 2 | Graceful, via `submitTimeout` returning 503s | Graceful, via **latency**. Zero 503s | ❌ |
+| 3 | Between 3,000 and 6,000 rps | **~1,872 rps** | ❌ |
+| 4 | Recovery immediate, no restart | Immediate, no restart | ✅ |
+
+**Two of four wrong.** The interesting one is #2.
+
+The failure mode is graceful degradation, as predicted — but by the wrong
+mechanism. `submitTimeout` is 5s and the worst request observed took **3.50s**,
+so the timeout never fired and not a single request was refused. Every one of
+308,829 requests got a 202. The system absorbed a 5× overload by making
+everyone wait a bit under the limit at which it would have started saying no.
+
+That is a more fragile shape than the one predicted, and worth naming: the
+safety valve was never reached, so its behaviour under real overload is still
+unobserved. Latency sat just below the cliff rather than going over it. A
+slightly larger ramp, or a slightly slower disk, and the 503s appear — which is
+the behaviour that was designed for, and it remains untested at this scale.
+
+### The confound, stated
+
+**267,670 dropped iterations.** k6 could not generate the offered rate, running
+8,000 VUs on the same 32 cores as the services it was measuring.
+
+So **1,872 rps is a lower bound on the true ceiling, not the ceiling.** Part of
+what was measured is the generator. This cannot be resolved without moving load
+generation off the box, and that is the next experiment rather than a
+correction to make on paper.
+
+### Recovery
+
+Clean, and better than expected. Thirty seconds after the ramp ended, ingress
+was back to **p95 6.06ms** — against a 4.65ms cold baseline, so the same order,
+no restart, no intervention.
+
+The detail that matters: it recovered **while 358,045 requests were still
+backlogged**. Ingress latency is genuinely independent of queue depth, which is
+the strongest form of ADR-0003's claim and the one hardest to argue without a
+test. A third of a million messages outstanding and the write path did not
+notice.
+
+### What breaks next, if ingress were fixed
+
+A hypothesis, recorded with the same willingness to be wrong:
+
+1. **The load generator, immediately.** Already the binding constraint at
+   1,872 rps. Nothing else can be measured until it moves off-host.
+2. **Then the ingress pool, this time reaching the 503 path.** Prediction #2
+   was not so much wrong as premature — it describes what happens past a load
+   this hardware could not offer.
+3. **Then Postgres WAL and `tasking.outbox` write amplification.** Every
+   accepted request is two inserts, and the outbox row is the larger of them.
+   Nothing here has yet been profiled at the database.
+
+The pipeline's bottleneck is not on this list because it is not in question:
+one feasibility worker at 0.25 rps, four thousand times slower than ingress,
+measured above.
+
 ## Planner allocation
 
 The allocation policy benchmark (`make benchmark`,

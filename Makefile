@@ -262,6 +262,13 @@ loadtest-pipeline: ## Submit-to-visible latency end to end, thresholds as gates
 	@# than pipeline latency.
 	@$(K6) run /scripts/pipeline.js
 
+.PHONY: loadtest-breakpoint
+loadtest-breakpoint: ## Ramp until something gives, then watch it recover (not a gate)
+	@# Deliberately NOT part of `make loadtest`. It has no thresholds — its
+	@# output is a number and a failure mode, and a threshold would turn
+	@# "find the limit" into "assert the limit has not moved".
+	@$(K6) run /scripts/breakpoint.js
+
 .PHONY: dashboards-check
 dashboards-check: ## Assert every Grafana panel renders against the running stack
 	@# The queries are read from the committed dashboard JSON, never restated.
