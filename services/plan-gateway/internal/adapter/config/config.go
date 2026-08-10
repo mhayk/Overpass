@@ -24,6 +24,9 @@ type Config struct {
 	DurablePrefix   string
 	LogLevel        string
 	ShutdownTimeout time.Duration
+	// ReadTimeout bounds one request's time in the read models. See
+	// httpapi.Deadline for why this service needed one at all.
+	ReadTimeout time.Duration
 
 	// OTLPEndpoint is the collector's gRPC address; empty disables export.
 	// TraceSampleRatio is head sampling for traces only — metrics are not
@@ -62,6 +65,13 @@ func Load() (Config, error) {
 	}
 
 	var err error
+	// Five seconds, matching tasking-api's SUBMIT_TIMEOUT. A read that has not
+	// answered in five is not going to become useful at ten, and the caller
+	// has already given up.
+	if cfg.ReadTimeout, err = duration("READ_TIMEOUT", 5*time.Second); err != nil {
+		problems = append(problems, err.Error())
+	}
+
 	if cfg.TraceSampleRatio, err = ratio("TRACE_SAMPLE_RATIO", 1.0); err != nil {
 		problems = append(problems, err.Error())
 	}

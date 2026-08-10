@@ -81,13 +81,19 @@ func (f *fakeReads) Constellation(
 	return f.constellation, port.Cursor{LastEventAt: lastEvent}, f.err
 }
 
+// Generous on purpose. These tests are about routing and rendering, not about
+// the deadline; a tight value here would make an unrelated slow CI runner look
+// like a read-model failure. The deadline's own behaviour is asserted in
+// deadline_test.go, where the timeout is the subject rather than the backdrop.
+const testReadTimeout = 30 * time.Second
+
 func serve(t *testing.T, reads port.Reads, health func() error) http.Handler {
 	t.Helper()
 	if health == nil {
 		health = func() error { return nil }
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return httpapi.New(reads, health, func() time.Time { return pinnedNow }, log).Routes()
+	return httpapi.New(reads, health, func() time.Time { return pinnedNow }, testReadTimeout, log).Routes()
 }
 
 func get(t *testing.T, h http.Handler, target string) *httptest.ResponseRecorder {

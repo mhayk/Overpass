@@ -36,7 +36,7 @@ from opentelemetry.sdk.metrics.view import ExplicitBucketHistogramAggregation, V
 from opentelemetry.sdk.resources import Resource
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
+    from collections.abc import Callable, Iterable
 
     from opentelemetry.metrics import CallbackOptions, Meter, Observation
 
@@ -58,6 +58,7 @@ CONSUME_DURATION_MS = "overpass.consume.duration_ms"
 CONSUME_REDELIVERIES = "overpass.consume.redeliveries"
 OUTBOX_PENDING_SECONDS = "overpass.outbox.pending_seconds"
 OUTBOX_PUBLISHED = "overpass.outbox.published"
+BREAKER_STATE = "overpass.breaker.state"
 
 # The outcome vocabulary, identical to lib/go/consume's. Two languages
 # reporting the same pipeline must agree on these strings or the consumer
@@ -122,6 +123,12 @@ class Instruments:
         self._lock = threading.Lock()
         self._tle_ages: dict[str, float] = {}
         self._outbox_pending: float | None = None
+        # name -> callable returning the current state as a number. A callable
+        # rather than a stored value, because the breaker's state is DERIVED
+        # from a failure count and a clock: storing a snapshot would report the
+        # state at the last call rather than now, and "has the cooldown expired
+        # yet" is precisely the question this gauge is asked.
+        self._breakers: dict[str, Callable[[], int]] = {}
 
         meter.create_observable_gauge(
             TLE_AGE_HOURS,
@@ -133,6 +140,11 @@ class Instruments:
             callbacks=[self._observe_outbox_pending],
             description="Age of the oldest unpublished outbox row, in seconds.",
         )
+        meter.create_observable_gauge(
+            BREAKER_STATE,
+            callbacks=[self._observe_breakers],
+            description="Circuit breaker state per dependency: 0 closed, 1 open, 2 half-open.",
+        )
 
     def _observe_tle_ages(self, _options: CallbackOptions) -> Iterable[Observation]:
         from opentelemetry.metrics import Observation as Obs
@@ -140,6 +152,13 @@ class Instruments:
         with self._lock:
             ages = dict(self._tle_ages)
         return [Obs(age, {"satellite_id": sat}) for sat, age in ages.items()]
+
+    def _observe_breakers(self, _options: CallbackOptions) -> Iterable[Observation]:
+        from opentelemetry.metrics import Observation as Obs
+
+        with self._lock:
+            breakers = dict(self._breakers)
+        return [Obs(read(), {"dependency": name}) for name, read in breakers.items()]
 
     def _observe_outbox_pending(self, _options: CallbackOptions) -> Iterable[Observation]:
         from opentelemetry.metrics import Observation as Obs
@@ -187,6 +206,18 @@ class Instruments:
         with self._lock:
             self._outbox_pending = pending_seconds
 
+    def register_breaker(self, dependency: str, read_state: Callable[[], int]) -> None:
+        """Publish one breaker's state under a dependency name.
+
+        #51 asks for breaker state as a METRIC rather than a log line, and the
+        reason is a specific question: "why did latency drop while errors
+        rose?" An open breaker is the answer, and it is only answerable if the
+        state is on the dashboard beside the latency it explains. A log line
+        cannot be overlaid on a graph.
+        """
+        with self._lock:
+            self._breakers[dependency] = read_state
+
     def set_tle_age(self, satellite_id: str, age_hours: float) -> None:
         """Record the age of the element set currently held for a satellite.
 
@@ -224,6 +255,9 @@ class _NoOpInstruments(Instruments):
         pass
 
     def record_outbox_batch(self, published: int, failed: int, pending_seconds: float) -> None:
+        pass
+
+    def register_breaker(self, dependency: str, read_state: Callable[[], int]) -> None:
         pass
 
     def set_tle_age(self, satellite_id: str, age_hours: float) -> None:

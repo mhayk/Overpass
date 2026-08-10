@@ -96,8 +96,9 @@ func run(ctx context.Context) error {
 	reads := postgres.NewReads(pool)
 	probe := func() error { return pool.Ping(ctx) }
 	server := &http.Server{
-		Addr:              cfg.HTTPAddr,
-		Handler:           httpapi.New(reads, probe, func() time.Time { return time.Now().UTC() }, log).Routes(),
+		Addr: cfg.HTTPAddr,
+		Handler: httpapi.New(reads, probe, func() time.Time { return time.Now().UTC() },
+			cfg.ReadTimeout, log).Routes(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
