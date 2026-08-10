@@ -96,9 +96,7 @@ class CelestrakClient:
         called. Registering here means the series appears the moment live TLE
         refresh gives the client a caller, and is honestly absent until then.
         """
-        metrics.instruments().register_breaker(
-            "celestrak", lambda: int(self.breaker.state.value)
-        )
+        metrics.instruments().register_breaker("celestrak", lambda: int(self.breaker.state.value))
 
     def _request(self, params: dict[str, str]) -> httpx.Response:
         """One HTTP call, with every transport failure shaped as a CelestrakError.
