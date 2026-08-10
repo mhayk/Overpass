@@ -202,10 +202,13 @@ lint-go: $(TOOLS_BIN)/golangci-lint ## Lint the Go services
 	done
 
 .PHONY: lint-python
-lint-python: ## Lint and type-check feasibility-service
-	@if [ -f services/feasibility/pyproject.toml ]; then \
-		cd services/feasibility && uv run ruff check . && uv run ruff format --check . && uv run mypy .; \
-	else echo "skip: services/feasibility not yet initialised"; fi
+lint-python: ## Lint and type-check the Python services
+	@for s in feasibility simulator; do \
+		if [ -f services/$$s/pyproject.toml ]; then \
+			echo "==> $$s"; \
+			(cd services/$$s && uv run ruff check . && uv run ruff format --check . && uv run mypy .); \
+		fi; \
+	done
 
 .PHONY: lint-web
 lint-web: ## Lint and type-check the frontend
@@ -307,9 +310,12 @@ test-go: ## Go unit tests, always with -race
 
 .PHONY: test-python
 test-python: ## Python unit tests
-	@if [ -f services/feasibility/pyproject.toml ]; then \
-		cd services/feasibility && uv run pytest --cov --cov-report=term-missing; \
-	else echo "skip: services/feasibility not yet initialised"; fi
+	@for s in feasibility simulator; do \
+		if [ -f services/$$s/pyproject.toml ]; then \
+			echo "==> $$s"; \
+			(cd services/$$s && uv run pytest --cov --cov-report=term-missing); \
+		fi; \
+	done
 
 .PHONY: test-web
 test-web: ## Frontend unit tests

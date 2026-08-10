@@ -396,6 +396,29 @@ jobs:
           set -euo pipefail
           uv run pytest -rs --cov --cov-report=term-missing --cov-report=xml             | tee /tmp/pytest.txt
 
+      # THE SIMULATOR RUNS THE SAME THREE GATES, spelled out rather than looped.
+      #
+      # This job's steps are keyed on services/feasibility existing, so a second
+      # Python service is invisible to it — and a service whose tests nobody
+      # runs is a service nobody can trust. `make lint-python` and
+      # `make test-python` iterate; this file does not, so the additions are
+      # explicit. If a third arrives, that is the point to introduce a matrix.
+      - name: ruff — simulator
+        run: |
+          cd services/simulator
+          uv run ruff check .
+          uv run ruff format --check .
+
+      - name: mypy --strict — simulator
+        run: |
+          cd services/simulator
+          uv run mypy --strict .
+
+      - name: pytest — simulator
+        run: |
+          cd services/simulator
+          uv run pytest -rs --cov --cov-report=term-missing
+
       # The check that this job did what it now claims to.
       #
       # pytest exits 0 whether a test passed or skipped, so a service container

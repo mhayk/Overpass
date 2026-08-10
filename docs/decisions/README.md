@@ -44,6 +44,7 @@ until the M2-13 benchmark produced the numbers that completed it.
 | [0018](0018-metrics-by-otlp-push-with-units-in-names.md) | Push metrics over OTLP, and bake units into instrument names | accepted | M3 |
 | [0019](0019-head-based-sampling-at-one-for-the-demo.md) | Head-based sampling, at 1.0 for the demo and configurable everywhere | accepted | M3 |
 | [0020](0020-browser-origins-are-an-explicit-allow-list.md) | Browser origins are an explicit allow-list, in the services | accepted | M4 |
+| [0021](0021-the-execution-simulator-computes-drift-rather-than-rolling-for-it.md) | The execution simulator computes drift rather than rolling for it | accepted | M4 |
 
 ## Planned
 

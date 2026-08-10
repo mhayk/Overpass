@@ -1,0 +1,47 @@
+[project]
+name = "simulator-service"
+version = "0.1.0"
+description = "Acquisition execution simulator: what actually happened to a committed plan"
+requires-python = ">=3.12"
+
+# NOTHING BEYOND THE STANDARD LIBRARY, so far.
+#
+# The execution model is arithmetic over numbers the committed plan already
+# carries, and it is deliberately kept that way: it makes the physics testable
+# without a broker, a database or a clock. The propagation, NATS and Postgres
+# dependencies arrive with the messaging layer, and this file should grow when
+# they do rather than in anticipation of them.
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3,<9",
+    "pytest-cov>=6,<7",
+    "mypy>=1.14,<2",
+    "ruff>=0.8,<0.9",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/simulator"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+# The same set feasibility runs, so two Python services cannot disagree about
+# what good looks like.
+select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src", "tests"]
