@@ -284,11 +284,19 @@ jobs:
       #
       # It did, briefly, at a reduced TOP_RATE. It failed on
       # dropped_iterations and on the 100 rps rung — which is not a regression
-      # in the service, it is the runner. A GitHub runner has two cores and is
-      # already hosting Postgres, NATS, Tempo, Prometheus, Grafana and four
-      # application services; k6 then competes with all of them for the same
-      # two cores, cannot generate the offered rate, and the latency it reports
-      # is the latency of a queue k6 itself created.
+      # in the service, it is the runner. Whatever a GitHub-hosted runner has,
+      # it is already hosting Postgres, NATS, Tempo, Prometheus, Grafana and
+      # four application services; k6 then competes with all of them, cannot
+      # generate the offered rate, and the latency it reports is the latency of
+      # a queue k6 itself created. The step below records the actual capacity
+      # on every run, because "the runner is small" is exactly the sort of
+      # claim that gets repeated until somebody checks it — I asserted "two
+      # cores" here first, and this repository is public, which gets a larger
+      # runner than that.
+      #
+      # dropped_iterations is the evidence and it does not depend on the core
+      # count: k6 could not offer the load, so the thresholds described a load
+      # that was never applied.
       #
       # The available responses were to lower the numbers until they passed, or
       # to admit the measurement does not belong here. Lowering them is how a
@@ -303,6 +311,15 @@ jobs:
       #
       # The thresholds are still gates. `make loadtest` exits non-zero on a
       # breach — verified, exit 99 — it is simply not automatic.
+
+      # Recorded on every run, not only on failure. The load-test decision
+      # below turns on how much machine is actually here, and "a runner is
+      # small" is the kind of claim that gets repeated until someone checks.
+      - name: Record the runner's capacity
+        run: |
+          echo "cores: $(nproc)"
+          echo "memory: $(free -g | awk '/^Mem:/{print $2}') GiB"
+          echo "load:  $(cut -d' ' -f1-3 /proc/loadavg)"
 
       - name: Diagnostics on failure
         if: failure()
