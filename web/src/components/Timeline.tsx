@@ -1,0 +1,275 @@
+'use client';
+
+/**
+ * Per-satellite timeline (M4-02).
+ *
+ * The view where the sequence-dependent setup cost stops being an abstraction.
+ * A satellite cannot image two targets in a row without rotating between them,
+ * and that rotation is expensive — it is the reason this scheduling problem is
+ * not simple interval scheduling.
+ *
+ * SLEW IS DRAWN AS OCCUPIED, NOT IDLE. That is the whole point of the view. An
+ * idle-looking gap invites "why is the satellite doing nothing?", and the
+ * answer is that it is rotating. A hatched block says so; whitespace does not.
+ *
+ * SVG rather than canvas or a chart library. The marks are rectangles on a
+ * linear scale — the thing SVG is for — and it keeps every block a real DOM
+ * node, which is what makes hover, focus and cross-highlighting work without
+ * hit-testing by hand. Virtualisation keeps the node count bounded, which is
+ * the reason canvas is usually reached for.
+ */
+
+import { useCallback, useMemo, useRef, useState } from 'react';
+
+import type { Acquisition } from '@/lib/gateway';
+import {
+  buildRows,
+  blockRect,
+  pan,
+  ticks,
+  visibleBlocks,
+  zoom,
+  type Block,
+  type Viewport,
+} from '@/lib/timeline';
+import { INK, MODE_COLOUR, MODE_FALLBACK, css } from '@/lib/palette';
+
+const ROW_HEIGHT = 34;
+const BLOCK_HEIGHT = 18;
+const LABEL_WIDTH = 132;
+const AXIS_HEIGHT = 22;
+
+export interface TimelineProps {
+  acquisitions: Acquisition[];
+  // `| undefined` explicitly, not just `?`. tsconfig sets
+  // exactOptionalPropertyTypes, which distinguishes "absent" from "present and
+  // undefined" — and a parent holding this in useState always passes the
+  // second.
+  selectedRequestId?: string | undefined;
+  /** Selecting a block cross-highlights it on the globe and the 2D view. */
+  onSelectRequest?: ((requestId: string) => void) | undefined;
+}
+
+export default function Timeline({
+  acquisitions,
+  selectedRequestId,
+  onSelectRequest,
+}: TimelineProps): React.JSX.Element {
+  const rows = useMemo(() => buildRows(acquisitions), [acquisitions]);
+
+  const bounds = useMemo(() => {
+    const times = acquisitions.flatMap((a) => [
+      Date.parse(a.window.start),
+      Date.parse(a.window.end),
+    ]);
+    const finite = times.filter((t) => Number.isFinite(t));
+    if (finite.length === 0) {
+      const now = Date.now();
+      return { startMs: now, endMs: now + 6 * 3600_000 };
+    }
+    const min = Math.min(...finite);
+    const max = Math.max(...finite);
+    // A little padding, so the first and last blocks are not flush against the
+    // frame and readable as "there might be more just off-screen".
+    const pad = Math.max(60_000, (max - min) * 0.05);
+    return { startMs: min - pad, endMs: max + pad };
+  }, [acquisitions]);
+
+  const [width, setWidth] = useState(900);
+  const [view, setView] = useState<Viewport | null>(null);
+  const dragRef = useRef<{ x: number } | null>(null);
+
+  // The viewport follows the data until the user touches it, then stops. A
+  // view that keeps resetting to fit is one you cannot hold still to read.
+  const effective: Viewport = view ?? { ...bounds, widthPx: width - LABEL_WIDTH };
+
+  const containerRef = useCallback((node: HTMLDivElement | null) => {
+    if (node) setWidth(node.clientWidth);
+  }, []);
+
+  const onWheel = useCallback(
+    (event: React.WheelEvent<SVGSVGElement>) => {
+      event.preventDefault();
+      const rect = event.currentTarget.getBoundingClientRect();
+      const anchor = event.clientX - rect.left - LABEL_WIDTH;
+      setView((current) =>
+        zoom(current ?? { ...bounds, widthPx: width - LABEL_WIDTH }, event.deltaY > 0 ? 1.2 : 1 / 1.2, anchor),
+      );
+    },
+    [bounds, width],
+  );
+
+  const onPointerDown = useCallback((event: React.PointerEvent<SVGSVGElement>) => {
+    dragRef.current = { x: event.clientX };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }, []);
+
+  const onPointerMove = useCallback(
+    (event: React.PointerEvent<SVGSVGElement>) => {
+      const drag = dragRef.current;
+      if (!drag) return;
+      const delta = event.clientX - drag.x;
+      dragRef.current = { x: event.clientX };
+      setView((current) => pan(current ?? { ...bounds, widthPx: width - LABEL_WIDTH }, delta));
+    },
+    [bounds, width],
+  );
+
+  const onPointerUp = useCallback(() => {
+    dragRef.current = null;
+  }, []);
+
+  const height = AXIS_HEIGHT + rows.length * ROW_HEIGHT + 8;
+
+  return (
+    <div ref={containerRef} className="h-full w-full overflow-auto" style={{ background: '#0f172a' }}>
+      {rows.length === 0 ? (
+        <p className="p-4 text-sm text-slate-400">
+          No acquisitions in this window. Submit a request, or widen the window.
+        </p>
+      ) : (
+        <svg
+          role="img"
+          aria-label="Per-satellite acquisition timeline"
+          width="100%"
+          height={height}
+          onWheel={onWheel}
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+          onPointerCancel={onPointerUp}
+          style={{ touchAction: 'none', cursor: dragRef.current ? 'grabbing' : 'grab' }}
+        >
+          <defs>
+            {/*
+              Hatching, not a flat fill. Slew has to read as a DIFFERENT KIND of
+              occupancy from imaging — the satellite is busy but producing
+              nothing — and texture says that where a fourth hue would just look
+              like a fourth mode. It also survives greyscale and colour
+              blindness, which a hue alone does not.
+            */}
+            <pattern id="slew-hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+              <rect width="6" height="6" fill="rgba(195,194,183,0.10)" />
+              <line x1="0" y1="0" x2="0" y2="6" stroke="rgba(195,194,183,0.55)" strokeWidth="2" />
+            </pattern>
+          </defs>
+
+          <Axis view={effective} height={height} />
+
+          {rows.map((row, index) => {
+            const y = AXIS_HEIGHT + index * ROW_HEIGHT;
+            const dutyPercent =
+              row.imagingSeconds + row.slewSeconds > 0
+                ? (row.imagingSeconds / (row.imagingSeconds + row.slewSeconds)) * 100
+                : 0;
+
+            return (
+              <g key={row.satelliteId}>
+                <text x={8} y={y + BLOCK_HEIGHT} fill={INK.secondary} fontSize={11}>
+                  {row.satelliteId}
+                </text>
+                <title>
+                  {`${row.satelliteId}: ${Math.round(row.imagingSeconds)}s imaging, ` +
+                    `${Math.round(row.slewSeconds)}s slewing (${dutyPercent.toFixed(0)}% productive)`}
+                </title>
+
+                <line
+                  x1={LABEL_WIDTH}
+                  y1={y + ROW_HEIGHT - 1}
+                  x2="100%"
+                  y2={y + ROW_HEIGHT - 1}
+                  stroke={INK.grid}
+                />
+
+                {visibleBlocks(row, effective).map((block, blockIndex) => (
+                  <BlockRect
+                    key={`${block.kind}-${block.acquisitionId ?? blockIndex}-${block.startMs}`}
+                    block={block}
+                    view={effective}
+                    y={y + 6}
+                    selected={block.requestId !== undefined && block.requestId === selectedRequestId}
+                    onSelect={onSelectRequest}
+                  />
+                ))}
+              </g>
+            );
+          })}
+        </svg>
+      )}
+    </div>
+  );
+}
+
+function BlockRect({
+  block,
+  view,
+  y,
+  selected,
+  onSelect,
+}: {
+  block: Block;
+  view: Viewport;
+  y: number;
+  selected: boolean;
+  onSelect?: ((requestId: string) => void) | undefined;
+}): React.JSX.Element | null {
+  const rect = blockRect(block, view);
+  if (!rect) return null;
+
+  const isSlew = block.kind === 'slew';
+  const fill = isSlew
+    ? 'url(#slew-hatch)'
+    : css(MODE_COLOUR[block.mode ?? ''] ?? MODE_FALLBACK, 0.85);
+
+  const seconds = Math.round((block.endMs - block.startMs) / 1000);
+  const label = isSlew
+    ? `Slewing, ${seconds}s — the satellite is rotating, not idle`
+    : `${block.mode} acquisition, ${seconds}s`;
+
+  return (
+    <g>
+      <rect
+        x={LABEL_WIDTH + rect.x}
+        y={y}
+        width={rect.width}
+        height={BLOCK_HEIGHT}
+        rx={3}
+        fill={fill}
+        stroke={selected ? INK.primary : 'transparent'}
+        strokeWidth={selected ? 2 : 0}
+        style={{ cursor: block.requestId ? 'pointer' : 'default' }}
+        onClick={() => {
+          if (block.requestId && onSelect) onSelect(block.requestId);
+        }}
+      />
+      <title>{label}</title>
+    </g>
+  );
+}
+
+function Axis({ view, height }: { view: Viewport; height: number }): React.JSX.Element {
+  const marks = ticks(view);
+  const span = view.endMs - view.startMs;
+  // Below a day, the date is noise repeated on every tick; above it, the time
+  // alone is ambiguous.
+  const showDate = span > 24 * 3600_000;
+
+  return (
+    <g>
+      {marks.map((mark) => {
+        const x = LABEL_WIDTH + ((mark - view.startMs) / span) * view.widthPx;
+        const at = new Date(mark);
+        return (
+          <g key={mark}>
+            <line x1={x} y1={AXIS_HEIGHT - 6} x2={x} y2={height} stroke={INK.grid} />
+            <text x={x + 3} y={12} fill={INK.muted} fontSize={10}>
+              {showDate
+                ? at.toISOString().slice(5, 16).replace('T', ' ')
+                : at.toISOString().slice(11, 16)}
+            </text>
+          </g>
+        );
+      })}
+    </g>
+  );
+}
