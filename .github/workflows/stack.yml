@@ -248,19 +248,29 @@ jobs:
           # moment the data exists, and a genuine stall still fails with a
           # message that says the pipeline produced no plan rather than that
           # the dashboards are wrong.
-          echo "waiting for the pipeline to commit a plan"
-          deadline=$((SECONDS + 240))
+          # Wait for the FEASIBILITY half of the pipeline, which is as far as a
+          # cold stack currently gets: #187 has the frozen TLE snapshot aged
+          # past its 72h refusal threshold, so every demo request is refused
+          # TLE_STALE and no round ever commits. Waiting for a plan here would
+          # be waiting for something that cannot happen, and reporting it as a
+          # dashboard failure would blame the panels for an expired fixture.
+          #
+          # Polling rather than sleeping: the wait ends when the data exists,
+          # and a genuine stall fails saying which half of the pipeline is
+          # silent rather than that the dashboards are wrong.
+          echo "waiting for the first sweep to be scraped"
+          deadline=$((SECONDS + 180))
           until curl -sf --get http://localhost:9090/api/v1/query \
-                  --data-urlencode 'query=overpass_allocation_duration_ms_count' \
+                  --data-urlencode 'query=overpass_tle_age_hours' \
                 | grep -q '"value"'; do
             if [ "$SECONDS" -ge "$deadline" ]; then
-              echo "::error::no plan was committed within 240s; the dashboards have nothing to show"
+              echo "::error::feasibility published no metrics within 180s"
               docker compose logs --tail=60 planner feasibility
               exit 1
             fi
             sleep 10
           done
-          echo "a plan is committed and scraped"
+          echo "feasibility is reporting"
 
           ./scripts/dashboards-check.sh
 
