@@ -282,6 +282,137 @@ and one `npm ci` plus a Next.js build — that the first was never about.
 The budget is a gate, not a note: `stack-up.sh` exits non-zero when it is
 exceeded.
 
+## The frontend, measured
+
+Data-intensive real-time visualisation is in scope, so it gets numbers rather
+than adjectives. M4-07. Reproduce with `./scripts/frontend-perf.sh` against a
+stack with data in it; `PERF_MINUTES` sets the session length.
+
+### The environment, and what it invalidates
+
+The harness runs headless Chromium in a container **with no GPU**, so Cesium
+rasterises through SwiftShader — on the main thread. That is stated first
+because it disqualifies two of the numbers below from being read as absolutes.
+
+| | |
+| --- | --- |
+| Browser | Chromium via `mcr.microsoft.com/playwright:v1.62.1-noble` |
+| Rendering | software WebGL (SwiftShader), no GPU |
+| Server | Next.js 15.1.3 production build, localhost |
+| Data on the page | 11 acquisitions, 9 satellites |
+
+**Frame time and long-task totals from this environment are not the product's
+cost on real hardware.** They are useful as a before/after on the same
+environment with the same interaction, and they are reported that way. The
+memory series, node, listener and document counts do not depend on the
+rasteriser and can be read directly.
+
+### Bundle: what the first paint actually costs
+
+`next build`, then gzip on the emitted chunks:
+
+| | raw | gzipped |
+| --- | --- | --- |
+| First load JS, route `/` | — | **112 kB** |
+| Cesium chunk (lazy) | 7,363 kB | 1,871 kB |
+| deck.gl chunk (lazy) | 738 kB | 209 kB |
+| Total JS shipped | 8,906 kB | — |
+
+The split is the point. About 2 MB gzipped of globe and map sit behind dynamic
+imports, and the page reaches its first acquisition row on 112 kB. A static
+import of Cesium would put all of it in front of the first paint for a view the
+user may never open.
+
+### Time to interactive
+
+Measured to the **first rendered acquisition**, not to `load`. A page that has
+painted its chrome and cannot show a row is not interactive in any sense a user
+means, and this app's first row needs the bundle, hydration, and a cross-origin
+fetch.
+
+| | |
+| --- | --- |
+| First acquisition rendered | **93 ms** |
+| `domInteractive` | 26 ms |
+| Globe attached, after that | 557 ms |
+
+Localhost against a warm server, so this is the application's own cost with the
+network removed rather than a field measurement.
+
+### Entity churn: the defect this section exists for
+
+The Cesium effect was keyed on its data, so it destroyed the `Viewer` and
+rebuilt every entity on every SSE update **and every selection**. Proven, not
+inferred: tagging the live `<canvas>` and clicking one acquisition left the
+tagged node gone. The camera reset with it, so inspecting anything cost you your
+view.
+
+Same environment, same interaction — eight selections — before and after
+rewriting the sync to mutate entities in place:
+
+| | before | after |
+| --- | --- | --- |
+| Frame time p50 | 83.3 ms | **66.7 ms** |
+| Frame time p95 | 149.9 ms | **83.4 ms** |
+| Long tasks, total | 9,858 ms | 11,814 ms |
+| WebGL context survives a click | no | **yes** |
+
+The p95 is the honest headline: the tail halved, and the tail is what a user
+feels as a stutter.
+
+**Total long-task time went UP, and that is not a regression.** The old version
+spent part of every interaction with no viewer at all, and a torn-down context
+renders nothing. Doing less work by being broken is not a performance win. This
+is exactly why the canvas-identity probe is the load-bearing evidence here and
+the timings are supporting detail.
+
+### Memory over a ten-minute session
+
+Leaks in a live-updating visualisation do not show up in a thirty-second look,
+so the session is ten minutes with a request submitted every minute to keep the
+projector folding and the SSE stream pushing. Every sample is taken **after a
+forced garbage collection** over CDP — without that, "growth" is just garbage
+nobody has collected yet, and the check would fire on a healthy page and stay
+silent on a real leak.
+
+Twenty samples, thirty seconds apart:
+
+| | first | last | growth |
+| --- | --- | --- | --- |
+| JS heap | 25.1 MB | 26.3 MB | +1.15 MB |
+| DOM nodes | 614 | 704 | +90 |
+| Event listeners | 392 | 401 | +9 |
+| Documents | 4 | 4 | **0** |
+
+**The node growth is data, not a leak.** It steps by exactly +10 every 60
+seconds, which is the submission cadence: each new acquisition is a row. Heap
+tracks it at roughly 0.1 MB per acquisition. Attributing it mattered — +90 nodes
+over ten minutes reads like a leak until you notice the period matches the
+thing you are doing to the page.
+
+The document count is the one that would have caught the old behaviour, and it
+is flat. Each rebuilt viewer took a WebGL context with it; detached documents
+accumulating is that bug's signature, and unlike heap it is not noisy. It is the
+only memory assertion the harness enforces.
+
+### What is virtualised, and what deliberately is not
+
+Timeline **blocks** are virtualised: only those intersecting the viewport are
+mounted, because a busy bucket puts hundreds on one satellite.
+
+Timeline **rows** are not, and that is a decision rather than an omission. A row
+is one SATELLITE, so the count is the constellation's size — nine — and the
+chart is about 330 px tall and never scrolls. Windowing it would add a scroll
+container, a measurement pass and index arithmetic to avoid mounting eight `<g>`
+elements. If this ever renders a row per acquisition or per customer the bound
+disappears and the answer changes; `Timeline.tsx` says so at the point someone
+would ask.
+
+Memoisation was audited rather than added. `PlanningMap` memoises its five
+derived selectors including the layers array, `Timeline` memoises its rows and
+bounds, and `Workspace` needs none because everything it passes down is state —
+which also keeps the props feeding the Cesium sync effect identity-stable.
+
 ## What was tuned, and what was left on the table
 
 **Tuned to reach these numbers:** nothing.
@@ -323,7 +454,13 @@ does not have to rediscover it.
 ```bash
 make up-all && make seed
 make loadtest              # both scenarios, thresholds as gates
+make frontend-perf         # frame time, TTI, memory over ten minutes
 ```
+
+`make frontend-perf` needs a stack WITH DATA in it — an empty read model
+measures an empty page, and it refuses rather than reporting a flattering
+number about nothing. `PERF_MINUTES` shortens the session for a smoke run;
+the published memory numbers are from the default ten.
 
 Thresholds fail the build — `make loadtest` exits non-zero on a breach,
 verified at exit 99. `ingress.js` carries the acceptance criteria verbatim;

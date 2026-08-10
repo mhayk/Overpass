@@ -17,6 +17,21 @@
  * node, which is what makes hover, focus and cross-highlighting work without
  * hit-testing by hand. Virtualisation keeps the node count bounded, which is
  * the reason canvas is usually reached for.
+ *
+ * BLOCKS ARE VIRTUALISED; ROWS ARE NOT, AND THAT IS DELIBERATE (M4-07).
+ *
+ * Blocks are unbounded — a busy bucket puts hundreds on one satellite — so
+ * visibleBlocks mounts only what intersects the viewport. Rows are one per
+ * SATELLITE, so their count is the constellation's size: nine here, and a
+ * number that grows by procurement rather than by usage. At nine rows the whole
+ * chart is about 330px tall and never scrolls, so windowing them would add a
+ * scroll container, a measurement pass and an index calculation to avoid
+ * mounting eight <g> elements.
+ *
+ * Stated rather than left implicit, because "virtualise the rows too" is a
+ * reasonable-sounding review comment and the answer should not have to be
+ * rediscovered. If this ever renders a row per ACQUISITION or per customer, the
+ * bound disappears and the answer changes.
  */
 
 import { useCallback, useMemo, useRef, useState } from 'react';
