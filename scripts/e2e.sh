@@ -42,12 +42,68 @@ for url in "$WEB_URL" "$GATEWAY_URL/readyz" "$TASKING_API_URL/readyz"; do
   fi
 done
 
+# CONTENTION HAS TO BE ARRANGED, because a healthy constellation does not
+# produce it.
+#
+# The contested spec is the one that matters: it is the only test that
+# exercises de-confliction and the explanation a customer acts on. But four
+# requests over one point do not contend on a freshly seeded stack, and it took
+# two CI failures to establish why. Feasibility returns ONE opportunity across
+# all nine satellites for a three-hour window over a single point, so every
+# request shares one pass — and that pass is ~9 minutes long, a SCAN dwell is
+# 15s, slewing between identical targets is free, and the duty budget is 600s
+# per orbit. Roughly thirteen acquisitions fit. Nobody loses.
+#
+# So the budget is narrowed for the duration of the run: 30s admits two
+# acquisitions and refuses the rest, which makes DUTY_CYCLE_EXHAUSTED a
+# property of configuration rather than of luck. The planner re-reads this per
+# round from reference.satellites — rounds.go says so explicitly, "a
+# satellite's configuration can change between rounds" — so no restart is
+# needed and no committed plan is rewritten.
+#
+# The previous values are captured and restored on EXIT rather than assuming
+# the seeded 600. A gate that leaves the constellation altered after it fails
+# is a gate that breaks the next thing to run.
+CONTENTION_BUDGET_S="${CONTENTION_BUDGET_S:-30}"
+
+psql() {
+  docker compose exec -T postgres psql -U "${POSTGRES_USER:-overpass}" -d "${POSTGRES_DB:-overpass}" "$@"
+}
+
+if [ "$CONTENTION_BUDGET_S" != "off" ]; then
+  previous="$(psql -tAc "
+    SELECT string_agg(format('(%L,%s)', satellite_id, duty_cycle_budget_s), ',')
+    FROM reference.satellites")"
+
+  if [ -z "$previous" ]; then
+    echo "error: reference.satellites is empty — run 'make seed' first." >&2
+    exit 1
+  fi
+
+  restore() {
+    psql -q -c "
+      UPDATE reference.satellites AS s
+         SET duty_cycle_budget_s = v.budget
+        FROM (VALUES ${previous}) AS v(satellite_id, budget)
+       WHERE s.satellite_id = v.satellite_id" >/dev/null
+    echo "==> duty-cycle budgets restored"
+  }
+  trap restore EXIT
+
+  psql -q -c "UPDATE reference.satellites SET duty_cycle_budget_s = ${CONTENTION_BUDGET_S}" >/dev/null
+  echo "==> duty-cycle budget narrowed to ${CONTENTION_BUDGET_S}s so the contested path contends"
+fi
+
 echo "==> playwright v${PLAYWRIGHT_VERSION} against ${WEB_URL}"
 
 # --user, so the report and any traces belong to the invoking user rather than
 # to root. A gate that leaves root-owned files in the working tree is a gate
 # people stop running.
-exec docker run --rm \
+#
+# NOT `exec`. Replacing this shell would discard the EXIT trap above, leaving
+# the constellation on a 30-second duty budget for whatever runs next — and the
+# demo would then produce a schedule full of refusals for no visible reason.
+docker run --rm \
   --network host \
   --user "$(id -u):$(id -g)" \
   -e HOME=/tmp \

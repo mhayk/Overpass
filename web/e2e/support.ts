@@ -179,6 +179,31 @@ export async function waitForDecision(
   return last;
 }
 
+/**
+ * The access window of a request's first opportunity.
+ *
+ * THE CONTESTED PATH MUST NOT INVENT A WINDOW. It used to compete inside an
+ * arbitrary "two hours from now, for three hours", which assumes a satellite
+ * passes over Rotterdam in that span. On a cold stack it did not: feasibility
+ * answered all four with NO_ACCESS_IN_HORIZON, correctly, and the test read
+ * that as a pipeline stall.
+ *
+ * Asking the system when it can actually see the target turns the window from
+ * an assumption into an observation, and pins the competitors to one pass —
+ * which is what makes them compete at all.
+ */
+export async function firstOpportunityWindow(
+  request: APIRequestContext,
+  requestId: string,
+): Promise<{ start: string; end: string } | undefined> {
+  const response = await request.get(`${GATEWAY}/v1/requests/${requestId}/opportunities`);
+  if (!response.ok()) return undefined;
+  const body = (await response.json()) as {
+    items?: { access_window?: { start: string; end: string } }[];
+  };
+  return body.items?.[0]?.access_window;
+}
+
 /** Reload and wait for the workspace to have painted its data. */
 export async function openWorkspace(page: Page): Promise<void> {
   await page.goto('/');

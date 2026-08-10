@@ -1,4 +1,12 @@
-import { expect, openWorkspace, submit, test, waitForDecision } from './support';
+import {
+  expect,
+  firstOpportunityWindow,
+  openWorkspace,
+  submit,
+  test,
+  waitForDecision,
+  waitForState,
+} from './support';
 
 /**
  * Two requests compete, one wins, and the loser is told why.
@@ -9,30 +17,54 @@ import { expect, openWorkspace, submit, test, waitForDecision } from './support'
  * to carry.
  */
 test('a losing request is told which constraint bound', async ({ page, request }) => {
-  // ONE narrow window over ONE point, so the two cannot both be satisfied on
-  // different passes. A wide window is what makes the demo's four requests all
-  // win, and a contested test that quietly stops contending would pass forever
-  // while proving nothing.
-  const start = new Date(Date.now() + 2 * 3600_000);
-  const contested = {
-    start: start.toISOString(),
-    end: new Date(start.getTime() + 3 * 3600_000).toISOString(),
-  };
+  // FIND A REAL PASS FIRST, then compete inside it.
+  //
+  // This used to invent a window — "two hours from now, for three hours" — on
+  // the assumption that some satellite passes over Rotterdam in that span. On a
+  // cold stack none did: feasibility answered all four with
+  // NO_ACCESS_IN_HORIZON, which is correct and actionable, and the test read it
+  // as a stall. Asking the system when it can actually see the target makes the
+  // window an observation instead of an assumption.
+  const probeId = await submit(request, {
+    customerId: 'nl-coastguard',
+    targetName: `e2e probe ${Date.now()}`,
+    bidCredits: 200,
+    tier: 'GOVERNMENT',
+  });
+  await waitForState(request, probeId, ['AWAITING_PLANNING', 'PLANNED', 'ACQUIRED']);
+
+  const contested = await firstOpportunityWindow(request, probeId);
+  expect(
+    contested,
+    'the probe produced no opportunity; the constellation is unseeded or the horizon is empty',
+  ).toBeDefined();
+  // TypeScript does not narrow through expect, and exactOptionalPropertyTypes
+  // will not let an optional window through. Stated rather than asserted away
+  // with `!`, so the failure names itself if the check above ever changes.
+  if (!contested) {
+    throw new Error('no opportunity window; the assertion above should have failed first');
+  }
 
   const stamp = Date.now();
   const ids: string[] = [];
 
-  // FOUR, measured rather than guessed. This was twelve on the reasoning that
-  // a nine-satellite constellation needs a lot of demand before anything
-  // loses. That reasoning ignored the window: feasibility finds ONE
-  // opportunity per request in a three-hour window over a single point, so
-  // every request here wants the same slot and all but one must lose. Four
-  // submissions were measured producing four refusals.
+  // FOUR, against a duty-cycle budget narrowed to 30s by scripts/e2e.sh.
   //
-  // The count is not free. Feasibility is a single worker at roughly 0.25 rps
-  // (#189), so each extra request is real wall-clock in a budget that has to
-  // hold on a shared CI runner — twelve of them timed out at 150s having
-  // proved nothing. Four contends just as hard for a third of the time.
+  // The count was twelve first, on the reasoning that a nine-satellite
+  // constellation needs a lot of demand before anything loses. Two CI failures
+  // established that the reasoning was wrong in both directions. Feasibility
+  // returns ONE opportunity across ALL NINE satellites for a three-hour window
+  // over a single point, so every request here does share one pass — but that
+  // pass is about nine minutes, a SCAN dwell is 15s, slewing between identical
+  // targets is free, and the per-orbit duty budget is 600s. Thirteen
+  // acquisitions fit. Nobody lost, at four or at twelve.
+  //
+  // Adding requests until something binds is the expensive answer: it takes
+  // forty to exhaust 600s, and feasibility is a single worker at roughly
+  // 0.25 rps (#189). Narrowing the budget instead makes the refusal a property
+  // of configuration — 30s admits two acquisitions and refuses the rest — so
+  // four requests are enough and the outcome does not depend on what else
+  // happens to be scheduled.
   for (let i = 0; i < 4; i++) {
     ids.push(
       await submit(request, {
@@ -86,6 +118,12 @@ test('a losing request is told which constraint bound', async ({ page, request }
   }
   if (explanation.reason_code === 'LOST_TO_HIGHER_VALUE') {
     expect(explanation.explanation?.shortfall_credits).toBeGreaterThan(0);
+  }
+  if (explanation.reason_code === 'DUTY_CYCLE_EXHAUSTED') {
+    // The reason this run is arranged to produce. "The budget ran out" is not
+    // an answer a customer can act on; "you needed 15s and 0s remained" is.
+    expect(explanation.explanation?.duty_cycle_required_s).toBeGreaterThan(0);
+    expect(explanation.explanation?.duty_cycle_remaining_s).toBeGreaterThanOrEqual(0);
   }
 
   // Now the panel. Selecting the losing request must show the explanation the
