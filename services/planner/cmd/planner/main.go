@@ -74,7 +74,7 @@ func run(ctx context.Context) error {
 		shutdownTelemetry = func(context.Context) error { return nil }
 	}
 	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cfg.ShutdownTimeout)
 		defer cancel()
 		if shutdownErr := shutdownTelemetry(shutdownCtx); shutdownErr != nil {
 			slog.Warn("telemetry shutdown", slog.Any("error", shutdownErr))

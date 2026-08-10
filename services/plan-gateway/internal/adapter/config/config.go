@@ -31,8 +31,8 @@ type Config struct {
 	// approximate one.
 	OTLPEndpoint     string
 	TraceSampleRatio float64
-	FetchBatch      int
-	FetchWait       time.Duration
+	FetchBatch       int
+	FetchWait        time.Duration
 }
 
 // Load reads and validates the environment.
@@ -46,9 +46,9 @@ func Load() (Config, error) {
 		// needing its own spelling of the collector address would be one more
 		// thing to get wrong in compose.
 		OTLPEndpoint: env("OTEL_EXPORTER_OTLP_ENDPOINT", "otel-collector:4317"),
-		HTTPAddr:    env("PLAN_GATEWAY_ADDR", ":8083"),
-		DatabaseURL: os.Getenv("DATABASE_URL"),
-		NATSURL:     env("NATS_URL", "nats://localhost:4222"),
+		HTTPAddr:     env("PLAN_GATEWAY_ADDR", ":8083"),
+		DatabaseURL:  os.Getenv("DATABASE_URL"),
+		NATSURL:      env("NATS_URL", "nats://localhost:4222"),
 		// Must match deploy/nats/init.sh, which creates
 		// gateway-projector-{tasking,feasibility,planning} as durable pull
 		// consumers. The prefix is configurable so a second gateway can be run

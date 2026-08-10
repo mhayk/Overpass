@@ -30,7 +30,7 @@ func TestRoutePatternReachesTheMetrics(t *testing.T) {
 		"/v1/plans/SENTINEL-1A/2026-08-10T00:00:00Z",
 		"/v1/plans/ICEYE-X2/2026-08-10T03:00:00Z",
 	} {
-		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, path, http.NoBody))
+		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequestWithContext(context.Background(), http.MethodGet, path, http.NoBody))
 	}
 
 	routes := routeLabels(t, reader)
@@ -51,7 +51,7 @@ func TestProbesAreExcludedFromMetrics(t *testing.T) {
 
 	handler := serve(t, &fakeReads{}, nil)
 	for _, path := range []string{"/healthz", "/readyz"} {
-		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, path, http.NoBody))
+		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequestWithContext(context.Background(), http.MethodGet, path, http.NoBody))
 	}
 
 	var rm metricdata.ResourceMetrics

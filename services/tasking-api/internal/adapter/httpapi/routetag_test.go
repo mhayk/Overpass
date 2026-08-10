@@ -26,7 +26,7 @@ func TestRoutePatternReachesTheMetrics(t *testing.T) {
 
 	handler := submitServer(t, &fakeStore{})
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/tasking-requests", strings.NewReader(validBody))
+	req := httptest.NewRequestWithContext(context.Background(), http.MethodPost, "/v1/tasking-requests", strings.NewReader(validBody))
 	req.Header.Set("Content-Type", "application/json")
 	handler.ServeHTTP(httptest.NewRecorder(), req)
 
@@ -49,7 +49,7 @@ func TestProbesAreExcludedFromMetrics(t *testing.T) {
 
 	handler := submitServer(t, &fakeStore{})
 	for _, path := range []string{"/healthz", "/readyz"} {
-		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, path, http.NoBody))
+		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequestWithContext(context.Background(), http.MethodGet, path, http.NoBody))
 	}
 
 	var rm metricdata.ResourceMetrics
@@ -76,7 +76,7 @@ func TestUnmatchedPathCarriesNoRouteLabel(t *testing.T) {
 
 	handler := submitServer(t, &fakeStore{})
 	handler.ServeHTTP(httptest.NewRecorder(),
-		httptest.NewRequest(http.MethodGet, "/no-such-path", http.NoBody))
+		httptest.NewRequestWithContext(context.Background(), http.MethodGet, "/no-such-path", http.NoBody))
 
 	if routes := routeLabels(t, reader); len(routes) != 0 {
 		t.Errorf("http.route labels = %v, want none for an unmatched path", routes)

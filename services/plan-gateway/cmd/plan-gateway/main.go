@@ -65,7 +65,11 @@ func run(ctx context.Context) error {
 		shutdownTelemetry = func(context.Context) error { return nil }
 	}
 	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+		// WithoutCancel, not Background: the shutdown must outlive the
+		// cancelled run context — that is the whole point of flushing — but it
+		// should still carry the run's values rather than starting from a
+		// context unrelated to this process.
+		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cfg.ShutdownTimeout)
 		defer cancel()
 		if shutdownErr := shutdownTelemetry(shutdownCtx); shutdownErr != nil {
 			slog.Warn("telemetry shutdown", slog.Any("error", shutdownErr))

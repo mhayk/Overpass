@@ -43,6 +43,12 @@ from feasibility.tle.store import newest_element_sets
 
 log = logging.getLogger(__name__)
 
+# How long to wait before sweeping again when the constellation is not seeded
+# yet. Short, because the only thing that resolves it is someone running the
+# seeder, and the cost of asking again is one indexed query against an empty
+# table.
+_UNSEEDED_RETRY_S = 10.0
+
 
 @dataclass(frozen=True)
 class SweeperConfig:
@@ -155,6 +161,29 @@ def sweep_once(
     )
 
 
+def retry_delay(stats: SweepStats, tick_s: float) -> float:
+    """How long to wait before sweeping again.
+
+    An UNSEEDED database is not a normal tick, and waiting the full interval
+    for it is a defect rather than a tuning choice. The worker starts before
+    `make seed` runs on a cold stack, so the first sweep finds no element sets;
+    at the default 300s tick the constellation then has no ephemeris — and
+    `overpass_tle_age_hours` no series at all — for five minutes afterwards.
+    That is the exact window in which someone is most likely to be watching a
+    fresh stack, and the TLE staleness alert is blind for the whole of it.
+
+    Found by the dashboard gate failing in CI on a genuinely cold stack. It
+    passes against a long-running local instance that has swept many times
+    already, which is precisely the difference a cold-start gate exists to
+    expose.
+
+    A separate function so the rule is testable without driving the loop: the
+    interesting behaviour is one comparison, and asserting it through mocked
+    asyncio timers would test the mocks.
+    """
+    return tick_s if stats.satellites else _UNSEEDED_RETRY_S
+
+
 async def run(
     config: SweeperConfig,
     stop: asyncio.Event | None = None,
@@ -201,6 +230,7 @@ async def run(
                     span.set_attribute("overpass.ephemeris.propagated", stats.tracks_propagated)
                     span.set_attribute("overpass.ephemeris.satellites", stats.satellites)
             except Exception:
+                stats = SweepStats()
                 # Keep ticking. A failed sweep is almost always the database
                 # reconnecting or the constellation not yet seeded, and exiting
                 # would turn a blip into a globe that never gets an orbit again.
@@ -220,7 +250,22 @@ async def run(
                     already_published=stats.already_published,
                 )
 
+            # An UNSEEDED database is not a normal tick, and waiting the full
+            # interval for it is a real defect rather than a tuning choice.
+            #
+            # The worker starts before `make seed` runs on a cold stack, so the
+            # first sweep finds nothing, and at the default 300s tick the
+            # constellation then has no ephemeris — and overpass_tle_age_hours
+            # no series at all — for five minutes after every cold start. The
+            # TLE staleness alert is blind for exactly that window, which is
+            # the window in which someone is most likely to be watching.
+            #
+            # Found by the dashboard gate failing in CI on a genuinely cold
+            # stack. It passes locally because a long-running instance has
+            # swept many times already, which is precisely the kind of
+            # difference a cold-start gate exists to expose.
+            delay = retry_delay(stats, config.tick_s)
             with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(stop.wait(), timeout=config.tick_s)
+                await asyncio.wait_for(stop.wait(), timeout=delay)
 
     return total

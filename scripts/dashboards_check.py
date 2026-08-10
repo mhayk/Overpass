@@ -72,6 +72,14 @@ MAY_BE_ABSENT = {
     # interesting failure there is losing an allocation, not being infeasible.
     # The chaos and integration suites produce these.
     "overpass_feasibility_refusals_total": "requires an infeasible request; the demo's four all succeed",
+    # Needs a round where demand actually exceeds capacity. The demo contends
+    # four customers for one target, but nine satellites over a 24h horizon can
+    # often place all four on different passes, so a COLD run may legitimately
+    # produce no loser. Discovered by this gate failing in CI while passing
+    # locally — a long-running instance has accumulated unfulfilments and
+    # Prometheus remembers the name, which is exactly the difference a
+    # cold-start gate exists to expose.
+    "overpass_requests_unfulfilled_total": "requires a round where demand exceeds capacity",
 }
 
 # Prometheus function and keyword names, so they are not mistaken for metrics.
