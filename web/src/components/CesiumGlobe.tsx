@@ -2,7 +2,17 @@
 
 import { useEffect, useRef, useState } from 'react';
 
+import type * as Cesium from 'cesium';
+
 import type { Acquisition, Opportunity } from '@/lib/gateway';
+
+// Type-only, so this costs nothing at runtime: `import type` is erased before
+// the bundle is built, and the module still arrives through the dynamic import
+// inside the boot effect. The alternative was `any` on the refs, which
+// tsconfig forbids and which would have hidden the entity API entirely.
+type CesiumModule = typeof Cesium;
+type CesiumViewer = InstanceType<CesiumModule['Viewer']>;
+type CesiumDataSource = Awaited<ReturnType<CesiumModule['CzmlDataSource']['load']>>;
 
 /**
  * The globe.
@@ -69,6 +79,21 @@ interface PolygonGeometry {
   coordinates: number[][][];
 }
 
+/**
+ * The outer ring of a footprint, or undefined if there is not one.
+ *
+ * One helper rather than the same four-line guard at each call site: an
+ * acquisition and an opportunity carry the same geometry and used to check it
+ * separately, which is two places for a hemisphere-swapping mistake to hide.
+ */
+function polygonRing(footprint: unknown): number[][] | undefined {
+  if (!isPolygon(footprint)) {
+    return undefined;
+  }
+  const ring = footprint.coordinates[0];
+  return ring && ring.length > 0 ? ring : undefined;
+}
+
 function isPolygon(value: unknown): value is PolygonGeometry {
   return (
     typeof value === 'object' &&
@@ -88,8 +113,27 @@ export default function CesiumGlobe({
   const [state, setState] = useState<LoadState>('loading');
   const [detail, setDetail] = useState<string>('');
 
+  // THE VIEWER IS BUILT ONCE AND THEN MUTATED.
+  //
+  // It used to be built inside an effect keyed on
+  // [acquisitions, selectedRequestId, constellation, opportunities], so every
+  // SSE update and EVERY CLICK destroyed the WebGL context, constructed a new
+  // Viewer, re-added every entity and re-ran zoomTo. Measured with a tagged
+  // canvas: one click on an acquisition and the tagged node was gone. The
+  // camera reset with it, which is the part a user notices — you cannot select
+  // anything without losing your view.
+  //
+  // These refs are what let the data effects below reach the live viewer
+  // without re-running boot. `cesium` is held too, because the module is
+  // dynamically imported and the sync effects need its constructors.
+  const viewerRef = useRef<CesiumViewer | null>(null);
+  const cesiumRef = useRef<CesiumModule | null>(null);
+  // Framing is a one-off, not a per-update behaviour. Re-running zoomTo on
+  // every data change is how a globe yanks the camera away mid-inspection.
+  const framedRef = useRef(false);
+  const czmlRef = useRef<CesiumDataSource | null>(null);
+
   useEffect(() => {
-    let viewer: { destroy: () => void; isDestroyed: () => boolean } | undefined;
     let cancelled = false;
 
     async function boot(): Promise<void> {
@@ -124,100 +168,16 @@ export default function CesiumGlobe({
           animation: true,
         });
         created.scene.globe.showGroundAtmosphere = true;
-        viewer = created;
 
-        for (const acquisition of acquisitions) {
-          if (!isPolygon(acquisition.footprint)) {
-            continue;
-          }
-          const ring = acquisition.footprint.coordinates[0];
-          if (!ring || ring.length === 0) {
-            continue;
-          }
-
-          const dimmed = selectedRequestId !== undefined && acquisition.requestId !== selectedRequestId;
-          const rgba = STATUS_COLOUR[acquisition.status] ?? STATUS_COLOUR.ACTIVE;
-          const [r, g, b, a] = rgba ?? [64, 196, 255, 100];
-
-          created.entities.add({
-            id: acquisition.acquisitionId,
-            name: `${acquisition.satelliteId} ${acquisition.mode}`,
-            description: `request ${acquisition.requestId}, ${acquisition.status}`,
-            // availability, so the timeline means something: the footprint
-            // exists only while the acquisition is being taken. Without it the
-            // globe draws everything at every instant and scrubbing does
-            // nothing.
-            availability: new Cesium.TimeIntervalCollection([
-              new Cesium.TimeInterval({
-                start: Cesium.JulianDate.fromIso8601(acquisition.window.start),
-                stop: Cesium.JulianDate.fromIso8601(acquisition.window.end),
-              }),
-            ]),
-            polygon: {
-              hierarchy: new Cesium.PolygonHierarchy(
-                // Longitude first, in GeoJSON and in Cesium alike. Stated
-                // because a swap renders perfectly happily in the wrong
-                // hemisphere.
-                ring.map(([lon, lat]) => Cesium.Cartesian3.fromDegrees(lon ?? 0, lat ?? 0)),
-              ),
-              material: Cesium.Color.fromBytes(r, g, b, dimmed ? Math.floor(a / 3) : a),
-              outline: true,
-              outlineColor: Cesium.Color.WHITE.withAlpha(dimmed ? 0.2 : 0.6),
-              // GEODESIC, not RHUMB. A swath edge spanning degrees of longitude
-              // is a great-circle arc, and the wrong arc type draws a visibly
-              // wrong shape at high latitude — where a sun-synchronous
-              // constellation spends most of its passes.
-              arcType: Cesium.ArcType.GEODESIC,
-            },
-          });
+        if (cancelled) {
+          created.destroy();
+          return;
         }
 
-        // The orbit tracks, straight into Cesium's own loader.
-        //
-        // Loaded BEFORE the zoom, so the camera frames the scene that will
-        // actually be there. Its clock also drives the timeline: the document
-        // carries the window the samples cover, which is what makes scrubbing
-        // move satellites rather than merely move a cursor.
-        if (constellation && constellation.length > 0) {
-          const source = await Cesium.CzmlDataSource.load(constellation);
-          if (cancelled) {
-            return;
-          }
-          await created.dataSources.add(source);
-          created.clock.shouldAnimate = false;
-        }
-
-        // Candidate footprints, as ghosts. The losers are the point: a winner
-        // shown alone explains nothing about why it won.
-        for (const opportunity of opportunities ?? []) {
-          if (!isPolygon(opportunity.footprint)) {
-            continue;
-          }
-          const ring = opportunity.footprint.coordinates[0];
-          if (!ring || ring.length === 0) {
-            continue;
-          }
-          created.entities.add({
-            id: `opportunity/${opportunity.opportunityId}`,
-            name: `${opportunity.satelliteId} ${opportunity.mode} (candidate)`,
-            description: opportunity.won ? 'scheduled' : 'not scheduled',
-            polygon: {
-              hierarchy: new Cesium.PolygonHierarchy(
-                ring.map(([lon, lat]) => Cesium.Cartesian3.fromDegrees(lon ?? 0, lat ?? 0)),
-              ),
-              // Unfilled and thin. A candidate is not a commitment, and forty
-              // filled polygons over one target is an unreadable smear.
-              material: Cesium.Color.fromBytes(255, 190, 90, opportunity.won ? 60 : 12),
-              outline: true,
-              outlineColor: Cesium.Color.fromBytes(255, 190, 90, opportunity.won ? 200 : 90),
-              arcType: Cesium.ArcType.GEODESIC,
-            },
-          });
-        }
-
-        if (acquisitions.length > 0 || (opportunities?.length ?? 0) > 0) {
-          await created.zoomTo(created.entities);
-        }
+        cesiumRef.current = Cesium;
+        viewerRef.current = created;
+        // Marks the viewer live, and re-runs the data effects below, which are
+        // gated on it. They cannot usefully run before this point.
         setState('ready');
       } catch (error) {
         // Reported, never swallowed. A globe that silently fails to load is a
@@ -232,11 +192,202 @@ export default function CesiumGlobe({
 
     return () => {
       cancelled = true;
+      const viewer = viewerRef.current;
+      viewerRef.current = null;
+      czmlRef.current = null;
       if (viewer && !viewer.isDestroyed()) {
         viewer.destroy();
       }
     };
-  }, [acquisitions, selectedRequestId, constellation, opportunities]);
+  }, []);
+
+  // The footprints, synced in place.
+  //
+  // Cesium's EntityCollection is keyed by id, and `entities.add` on an existing
+  // id throws rather than replacing — so this removes what left, adds what
+  // arrived, and updates the appearance of what stayed. suspendEvents batches
+  // the whole thing into one scene update instead of one per entity, which is
+  // the difference between a redraw and a stutter when a plan commits forty
+  // acquisitions at once.
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    const Cesium = cesiumRef.current;
+    if (!viewer || !Cesium || viewer.isDestroyed()) {
+      return;
+    }
+
+    const desired = new Map<string, () => void>();
+
+    for (const acquisition of acquisitions) {
+      const ring = polygonRing(acquisition.footprint);
+      if (!ring) continue;
+
+      const dimmed = selectedRequestId !== undefined && acquisition.requestId !== selectedRequestId;
+      const rgba = STATUS_COLOUR[acquisition.status] ?? STATUS_COLOUR.ACTIVE;
+      const [r, g, b, a] = rgba ?? [64, 196, 255, 100];
+
+      desired.set(acquisition.acquisitionId, () => {
+        const existing = viewer.entities.getById(acquisition.acquisitionId);
+        const material = Cesium.Color.fromBytes(r, g, b, dimmed ? Math.floor(a / 3) : a);
+        const outline = Cesium.Color.WHITE.withAlpha(dimmed ? 0.2 : 0.6);
+
+        if (existing?.polygon) {
+          // SELECTION IS A MATERIAL CHANGE, NOT A REBUILD. This is the whole
+          // point: clicking used to cost a new WebGL context.
+          existing.polygon.material = new Cesium.ColorMaterialProperty(material);
+          existing.polygon.outlineColor = new Cesium.ConstantProperty(outline);
+          return;
+        }
+
+        viewer.entities.add({
+          id: acquisition.acquisitionId,
+          name: `${acquisition.satelliteId} ${acquisition.mode}`,
+          description: `request ${acquisition.requestId}, ${acquisition.status}`,
+          // availability, so the timeline means something: the footprint
+          // exists only while the acquisition is being taken. Without it the
+          // globe draws everything at every instant and scrubbing does
+          // nothing.
+          availability: new Cesium.TimeIntervalCollection([
+            new Cesium.TimeInterval({
+              start: Cesium.JulianDate.fromIso8601(acquisition.window.start),
+              stop: Cesium.JulianDate.fromIso8601(acquisition.window.end),
+            }),
+          ]),
+          polygon: {
+            hierarchy: new Cesium.PolygonHierarchy(
+              // Longitude first, in GeoJSON and in Cesium alike. Stated
+              // because a swap renders perfectly happily in the wrong
+              // hemisphere.
+              ring.map(([lon, lat]) => Cesium.Cartesian3.fromDegrees(lon ?? 0, lat ?? 0)),
+            ),
+            // WRAPPED EXPLICITLY, not handed a bare Color to infer from.
+            //
+            // Cesium infers a material from a Color only when the value
+            // reaches the PolygonGraphics constructor by the path it expects;
+            // a Color held in a variable and passed through this options
+            // object threw "Unable to infer material type" and took the whole
+            // React tree down with it — a blank page, not a broken globe.
+            // Constructing the property says what is meant and cannot be
+            // inferred wrongly. Matches the update path below.
+            material: new Cesium.ColorMaterialProperty(material),
+            outline: true,
+            outlineColor: new Cesium.ConstantProperty(outline),
+            // GEODESIC, not RHUMB. A swath edge spanning degrees of longitude
+            // is a great-circle arc, and the wrong arc type draws a visibly
+            // wrong shape at high latitude — where a sun-synchronous
+            // constellation spends most of its passes.
+            arcType: Cesium.ArcType.GEODESIC,
+          },
+        });
+      });
+    }
+
+    // Candidate footprints, as ghosts. The losers are the point: a winner
+    // shown alone explains nothing about why it won.
+    for (const opportunity of opportunities ?? []) {
+      const ring = polygonRing(opportunity.footprint);
+      if (!ring) continue;
+      const id = `opportunity/${opportunity.opportunityId}`;
+
+      desired.set(id, () => {
+        if (viewer.entities.getById(id)) {
+          return;
+        }
+        viewer.entities.add({
+          id,
+          name: `${opportunity.satelliteId} ${opportunity.mode} (candidate)`,
+          description: opportunity.won ? 'scheduled' : 'not scheduled',
+          polygon: {
+            hierarchy: new Cesium.PolygonHierarchy(
+              ring.map(([lon, lat]) => Cesium.Cartesian3.fromDegrees(lon ?? 0, lat ?? 0)),
+            ),
+            // Unfilled and thin. A candidate is not a commitment, and forty
+            // filled polygons over one target is an unreadable smear.
+            material: new Cesium.ColorMaterialProperty(
+              Cesium.Color.fromBytes(255, 190, 90, opportunity.won ? 60 : 12),
+            ),
+            outline: true,
+            outlineColor: new Cesium.ConstantProperty(
+              Cesium.Color.fromBytes(255, 190, 90, opportunity.won ? 200 : 90),
+            ),
+            arcType: Cesium.ArcType.GEODESIC,
+          },
+        });
+      });
+    }
+
+    try {
+      viewer.entities.suspendEvents();
+      // Removals first, so an id that changed shape is gone before it is
+      // re-added — `add` on a live id throws.
+      for (const entity of viewer.entities.values.slice()) {
+        if (!desired.has(entity.id)) {
+          viewer.entities.remove(entity);
+        }
+      }
+      for (const apply of desired.values()) {
+        apply();
+      }
+    } catch (error) {
+      // DEGRADE THE GLOBE, DO NOT TAKE THE PAGE WITH IT.
+      //
+      // An exception thrown from this effect propagates out of React's commit
+      // phase and unmounts the whole tree — the acquisition list, the
+      // timeline, the rejection panel, all of it. That is not hypothetical:
+      // wrapping a Color as a material wrongly threw "Unable to infer material
+      // type" here and the page rendered blank, with the cause visible only as
+      // a minified class name in the console.
+      //
+      // The failure state below already says the list beside it is unaffected.
+      // This is what makes that true.
+      setDetail(error instanceof Error ? error.message : String(error));
+      setState('failed');
+    } finally {
+      viewer.entities.resumeEvents();
+    }
+
+    if (!framedRef.current && viewer.entities.values.length > 0) {
+      framedRef.current = true;
+      void viewer.zoomTo(viewer.entities);
+    }
+  }, [acquisitions, opportunities, selectedRequestId, state]);
+
+  // The orbit tracks, straight into Cesium's own loader.
+  //
+  // Its own effect keyed on the document alone, so a selection change no longer
+  // reloads several megabytes of CZML. The clock the document carries is what
+  // makes scrubbing move satellites rather than merely move a cursor.
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    const Cesium = cesiumRef.current;
+    if (!viewer || !Cesium || viewer.isDestroyed()) {
+      return;
+    }
+    if (!constellation || constellation.length === 0) {
+      return;
+    }
+
+    let cancelled = false;
+    void (async () => {
+      const source = await Cesium.CzmlDataSource.load(constellation);
+      if (cancelled || viewer.isDestroyed()) {
+        return;
+      }
+      // The previous document goes only once its replacement has loaded, so
+      // the globe never blinks empty.
+      const previous = czmlRef.current;
+      await viewer.dataSources.add(source);
+      if (previous) {
+        viewer.dataSources.remove(previous, true);
+      }
+      czmlRef.current = source;
+      viewer.clock.shouldAnimate = false;
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [constellation, state]);
 
   return (
     <div className="relative h-full w-full">
