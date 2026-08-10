@@ -37,6 +37,10 @@ const PlanningMap = dynamic(() => import('@/components/PlanningMap'), {
 // with two WebGL siblings and mounting it the same way keeps one code path.
 const Timeline = dynamic(() => import('@/components/Timeline'), { ssr: false });
 
+// Plain React, no WebGL — but imported the same way so the aside has one
+// mounting story rather than two.
+const RejectionPanel = dynamic(() => import('@/components/RejectionPanel'), { ssr: false });
+
 const CesiumGlobe = dynamic(() => import('@/components/CesiumGlobe'), {
   ssr: false,
   loading: () => (
@@ -324,6 +328,21 @@ export default function Workspace(): React.JSX.Element {
             })}
           </ul>
         </section>
+
+        {/*
+          The explanation sits directly under the selection that produced it.
+          A "why?" panel somewhere else on the page is one nobody associates
+          with the thing they just clicked.
+        */}
+        {selectedRequestId ? (
+          <section>
+            <h2 className="mb-2 text-sm font-medium">Why this outcome</h2>
+            <RejectionPanel
+              requestId={selectedRequestId}
+              onHighlight={setSelectedRequestId}
+            />
+          </section>
+        ) : null}
 
         <section>
           <h2 className="mb-2 text-sm font-medium">Submit a request</h2>

@@ -55,11 +55,20 @@ export function explain(unfulfilment: Unfulfilment | undefined): Explanation | u
       };
     }
 
-    case 'DUTY_CYCLE_EXHAUSTED':
+    case 'DUTY_CYCLE_EXHAUSTED': {
+      const remaining = unfulfilment.dutyCycleRemainingS;
+      const required = unfulfilment.dutyCycleRequiredS;
+      const numbers =
+        remaining !== undefined && required !== undefined
+          ? ` It needed ${required.toFixed(0)}s and ${remaining.toFixed(0)}s were left.`
+          : '';
       return {
-        summary: "The satellite's imaging budget for that orbit was already spent.",
+        summary: `The satellite's imaging budget for that orbit was already spent.${numbers}`,
+        // Not "bid more" either: the knapsack dimension bound, not the
+        // interval one, and no amount of money adds seconds to an orbit.
         suggestion: 'Widen the window so the request can fall in a less busy orbit.',
       };
+    }
 
     case 'NO_OPPORTUNITY_IN_BUCKET':
       return {
