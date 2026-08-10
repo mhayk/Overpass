@@ -218,3 +218,27 @@ def record_failure(cursor: psycopg.Cursor[object], outbox_id: int, error: str) -
         """,
         (error[:2000], outbox_id),
     )
+
+
+def oldest_unpublished_age_s(connection: psycopg.Connection[Any]) -> float | None:
+    """Age of the oldest unpublished outbox row, in seconds, or None if empty.
+
+    None rather than 0.0 for an empty outbox is the caller's decision to make,
+    not this function's: "nothing is waiting" and "nothing has ever been
+    measured" are different facts and the relay reports them differently.
+
+    Ordered on the same column and predicate as `claim_unpublished`, so what
+    this measures is the age of the row that relay will take next.
+    """
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT EXTRACT(EPOCH FROM (now() - min(occurred_at)))
+            FROM feasibility.outbox
+            WHERE published_at IS NULL
+            """
+        )
+        row = cursor.fetchone()
+    if row is None or row[0] is None:
+        return None
+    return max(0.0, float(row[0]))

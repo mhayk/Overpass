@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -22,6 +23,7 @@ import (
 // the same regardless of which policy ran. The benchmark swaps the policy; the
 // plumbing stays identical.
 func (t *Trigger) buildPlan(
+	ctx context.Context,
 	round port.Round,
 	inputs port.RoundInputs,
 	now time.Time,
@@ -107,6 +109,16 @@ func (t *Trigger) buildPlan(
 	}
 
 	metrics := planMetrics(plan, inputs, allocationMs)
+
+	// Export the same numbers the contract puts on the event. They were
+	// already computed and already required; until #53 the only consumer was
+	// the event payload, so an operator could not see plan value, allocation
+	// latency or utilisation without reading a message off the wire.
+	t.instruments.RecordPlan(ctx, t.allocator.Name(), round.Key.SatelliteID, metrics)
+	for _, u := range plan.Unfulfilled {
+		t.instruments.RecordUnfulfilled(ctx, u.ReasonCode)
+	}
+
 	metricsJSON, err := json.Marshal(metrics)
 	if err != nil {
 		return nil, fmt.Errorf("encoding plan metrics: %w", err)

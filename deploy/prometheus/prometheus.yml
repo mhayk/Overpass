@@ -43,15 +43,20 @@ scrape_configs:
         labels:
           tier: infrastructure
 
-  # Application services, added as they are built (M1+). Prometheus tolerates
-  # targets that do not resolve yet — they report as down, which is accurate.
-  - job_name: overpass-services
-    metrics_path: /metrics
-    static_configs:
-      - targets:
-          - "tasking-api:8080"
-          - "plan-gateway:8081"
-          - "planner:8082"
-          - "feasibility:8000"
-        labels:
-          tier: application
+  # THERE IS NO PER-SERVICE SCRAPE JOB, and its absence is deliberate.
+  #
+  # One stood here until #53, scraping /metrics on tasking-api, plan-gateway,
+  # planner and feasibility. No service ever served that path, and feasibility
+  # has no HTTP listener at all — docker-compose.yml refuses to invent one for
+  # a readiness probe, and the reason is not weaker for metrics. So the job
+  # reported four targets permanently down, which is not a partial signal but
+  # a false one: the first person to open Prometheus reads it as an outage.
+  # It was also polluting the RED metrics, since every scrape of a path that
+  # does not exist is a 404 on the HTTP histogram it is supposed to observe.
+  #
+  # Application metrics arrive through the otel-collector job above, pushed
+  # over OTLP by both languages. ADR-0018 has the argument and states the
+  # cost: there is no per-service `up{}` series. A dead service stops sending,
+  # its gauges go stale after five minutes, and its counters stop advancing.
+  # Liveness stays where it already was — compose healthchecks on the three
+  # HTTP services, restart counts and logs on the worker.

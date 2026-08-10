@@ -383,7 +383,12 @@ async def run(
                             span.set_status(Status(StatusCode.ERROR, "retryable failure"))
                         await _settle(js, msg, delivery, outcome, metrics)
                     settled += 1
-                    metrics.record(outcome, delivery.delivered_count, time.monotonic() - received)
+                    metrics.record(
+                        outcome,
+                        delivery.delivered_count,
+                        time.monotonic() - received,
+                        subject=msg.subject,
+                    )
     finally:
         await client.drain()
 

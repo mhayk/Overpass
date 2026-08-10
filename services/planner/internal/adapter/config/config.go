@@ -29,6 +29,13 @@ type Config struct {
 	FetchWait       time.Duration
 	IdleWait        time.Duration
 
+	// OTLPEndpoint is the collector's gRPC address; empty disables export.
+	// TraceSampleRatio is head sampling for traces only — metrics are not
+	// sampled, because a sampled counter is a wrong number rather than an
+	// approximate one.
+	OTLPEndpoint     string
+	TraceSampleRatio float64
+
 	// The ADR-0014 firing rule. Values, not constants in an ADR: naming
 	// specific numbers before M3 has measured anything would be the
 	// prediction-dressed-as-decision that ADR-0007 avoids. The RELATION between
@@ -74,6 +81,10 @@ func Load() (Config, error) {
 		DatabaseURL: os.Getenv("DATABASE_URL"),
 		NATSURL:     env("NATS_URL", "nats://localhost:4222"),
 		LogLevel:    env("LOG_LEVEL", "info"),
+		// Same default and same variable as tasking-api. A service that needed
+		// its own spelling of the collector address would be one more thing to
+		// get wrong in compose.
+		OTLPEndpoint: env("OTEL_EXPORTER_OTLP_ENDPOINT", "otel-collector:4317"),
 		// The default ADR-0007 names on benchmark evidence: worst class 98.0%
 		// of optimal against the baseline's 85.7%, 54 ms at the contract's
 		// 5 000-candidate cap. docs/policy-benchmark.md carries the numbers.
@@ -134,6 +145,11 @@ func Load() (Config, error) {
 		problems = append(problems, fmt.Sprintf(
 			"ALLOCATION_POLICY %q is not one of GREEDY_BY_BID, GREEDY_BY_VALUE_DENSITY, VICKREY_SEALED_BID, EXACT_DP",
 			cfg.AllocationPolicy))
+	}
+
+	var ratioErr error
+	if cfg.TraceSampleRatio, ratioErr = ratio("TRACE_SAMPLE_RATIO", 1.0); ratioErr != nil {
+		problems = append(problems, ratioErr.Error())
 	}
 
 	switch cfg.LogLevel {
@@ -233,4 +249,23 @@ func duration(key string, fallback time.Duration) (time.Duration, error) {
 		return 0, fmt.Errorf("%s must be positive, got %q", key, raw)
 	}
 	return d, nil
+}
+
+// ratio parses a 0..1 knob, refusing anything outside the range rather than
+// clamping. A value of 2 means whoever set it believes something about this
+// knob that is not true, and silently treating it as 1.0 leaves that belief in
+// place.
+func ratio(key string, fallback float64) (float64, error) {
+	raw, ok := os.LookupEnv(key)
+	if !ok || raw == "" {
+		return fallback, nil
+	}
+	v, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s is not a number: %q", key, raw)
+	}
+	if v < 0 || v > 1 {
+		return 0, fmt.Errorf("%s must be between 0 and 1, got %q", key, raw)
+	}
+	return v, nil
 }

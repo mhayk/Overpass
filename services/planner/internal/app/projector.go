@@ -109,8 +109,14 @@ func (p *Projector) DrainOnce(ctx context.Context) (Stats, error) {
 			// The early-warning line: climbing redeliveries with flat
 			// throughput is poison or a dying dependency, visible before
 			// max_deliver makes it a loss.
-			p.Metrics.Redelivered()
+			p.Metrics.Redelivered(ctx, m.Subject)
 		}
+
+		// The outcome this delivery will be reported under. Defaulting to
+		// processed would make an ignored subject look like work; ignored is
+		// its own thing — a message on a stream this projector binds but does
+		// not fold — and it is worth being able to see it.
+		observed := consume.OutcomeIgnored
 
 		outcome, err := p.fold(ctx, m)
 		switch {
@@ -150,25 +156,26 @@ func (p *Projector) DrainOnce(ctx context.Context) (Stats, error) {
 					if nakErr := p.source.Nak(ctx, m); nakErr != nil {
 						return stats, fmt.Errorf("naking %s after a failed dead letter: %w", m.EventID, nakErr)
 					}
+					p.Metrics.Observe(ctx, m.Subject, consume.OutcomeFailed, time.Since(received))
 					continue
 				}
-				p.Metrics.Deadlettered()
-				p.Metrics.Terminated()
 				if termErr := p.source.Term(ctx, m); termErr != nil {
 					return stats, fmt.Errorf("terminating %s: %w", m.EventID, termErr)
 				}
+				p.Metrics.Observe(ctx, m.Subject, consume.OutcomeDeadlettered, time.Since(received))
 				continue
 			}
 			if nakErr := p.source.Nak(ctx, m); nakErr != nil {
 				return stats, fmt.Errorf("naking %s: %w", m.EventID, nakErr)
 			}
+			p.Metrics.Observe(ctx, m.Subject, consume.OutcomeFailed, time.Since(received))
 			continue
 		case outcome == outcomeApplied:
 			stats.Applied++
-			p.Metrics.Processed()
+			observed = consume.OutcomeProcessed
 		case outcome == outcomeDuplicate:
 			stats.Duplicate++
-			p.Metrics.Duplicate()
+			observed = consume.OutcomeDuplicate
 			p.log.Debug("already processed",
 				slog.String("consumer", p.consumerFor[m.Stream]),
 				slog.String("event_id", m.EventID),
@@ -183,7 +190,7 @@ func (p *Projector) DrainOnce(ctx context.Context) (Stats, error) {
 		if ackErr := p.source.Ack(ctx, m); ackErr != nil {
 			return stats, fmt.Errorf("acking %s: %w", m.EventID, ackErr)
 		}
-		p.Metrics.AckAfter(time.Since(received))
+		p.Metrics.Observe(ctx, m.Subject, observed, time.Since(received))
 	}
 	return stats, nil
 }

@@ -503,6 +503,28 @@ jobs:
         run: ./scripts/check-path-ownership.test.sh
 
   # ---------------------------------------------------------------------------
+  # Alert rules
+  # ---------------------------------------------------------------------------
+  # Three of the four rules in deploy/prometheus/rules/alerts.yml named metrics
+  # nothing published until #53, so they could not fire — the same failure the
+  # DeadLetterQueueNotEmpty comment in that file describes and thought it had
+  # finished fixing. An alert nobody has watched fail is not known to work.
+  #
+  # promtool only needs the two YAML files, so this is seconds and needs no
+  # stack, no database and no broker.
+  alerts:
+    name: alerts — every rule fires, and stays quiet
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      # The pinned image, read from docker-compose.yml by the Makefile so
+      # promtool and the running server cannot disagree about rule syntax.
+      - name: Alert rule unit tests
+        run: make alerts-test
+
+  # ---------------------------------------------------------------------------
   # Path ownership
   # ---------------------------------------------------------------------------
   # ADR-0013 keeps parallel agent tracks safe with a rule about which paths a

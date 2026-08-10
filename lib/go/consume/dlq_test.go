@@ -213,8 +213,8 @@ func TestAFailedPublishIsReportedSoTheCallerCanNak(t *testing.T) {
 
 func TestMetricsCountDeadLetters(t *testing.T) {
 	var m consume.Metrics
-	m.Deadlettered()
-	m.Deadlettered()
+	m.Observe(context.Background(), "s", consume.OutcomeDeadlettered, time.Millisecond)
+	m.Observe(context.Background(), "s", consume.OutcomeDeadlettered, time.Millisecond)
 
 	if got := m.Snapshot().Deadlettered; got != 2 {
 		t.Errorf("deadlettered = %d, want 2", got)

@@ -24,7 +24,23 @@ from typing import Protocol
 
 import psycopg
 
+from feasibility import metrics
 from feasibility.messaging.idempotency import Outcome
+
+# The contract between this service's Outcome enum and the shared outcome
+# vocabulary lib/go/consume publishes. Two languages reporting the same
+# pipeline must agree on these strings, or every consumer panel needs one query
+# per language.
+#
+# FAILED_TERMINAL maps to "processed", not to a failure: the refusal WAS
+# published and the message WAS acked, so it is completed work. The failures
+# this service reports as such are the ones that get naked or dead-lettered.
+_OUTCOME_LABELS = {
+    Outcome.PROCESSED: metrics.OUTCOME_PROCESSED,
+    Outcome.DUPLICATE: metrics.OUTCOME_DUPLICATE,
+    Outcome.FAILED_RETRYABLE: metrics.OUTCOME_FAILED,
+    Outcome.FAILED_TERMINAL: metrics.OUTCOME_PROCESSED,
+}
 
 
 class Decision(Enum):
@@ -79,14 +95,22 @@ class Metrics:
     ack_count: int = 0
     ack_latency_max_s: float = 0.0
 
-    def record(self, outcome: Outcome, delivered: int, seconds: float) -> None:
+    def record(self, outcome: Outcome, delivered: int, seconds: float, subject: str = "") -> None:
         """One call per settled delivery, from the worker's loop.
 
         Retries and terminations carry no ack latency; the worker advances
         ``terminated`` itself, because only it knows ``max_deliver``.
+
+        This is also where the OTel histogram is fed, because it is the one
+        place every settled delivery already passes through. Feeding it from
+        here rather than from the worker's branches is what stops the two
+        counts drifting apart.
         """
         if delivered > 1:
             self.redeliveries += 1
+            metrics.instruments().record_redelivery(subject)
+
+        exported = _OUTCOME_LABELS[outcome]
         if outcome is Outcome.DUPLICATE:
             self.duplicates += 1
             self.ack_after(seconds)
@@ -94,6 +118,13 @@ class Metrics:
             # A published refusal is work completed and acked, same as success.
             self.processed += 1
             self.ack_after(seconds)
+
+        # Recorded for EVERY outcome, including FAILED_RETRYABLE — the one the
+        # in-process counters above deliberately ignore because it carries no
+        # ack latency. A consumer naking every delivery would otherwise report
+        # no throughput and no errors at all: its panels would go flat, which
+        # reads as idle rather than as on fire.
+        metrics.instruments().record_consume(subject, exported, seconds * 1000.0)
 
     def ack_after(self, seconds: float) -> None:
         self.ack_latency_total_s += seconds

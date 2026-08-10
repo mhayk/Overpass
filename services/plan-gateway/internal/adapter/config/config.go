@@ -24,8 +24,15 @@ type Config struct {
 	DurablePrefix   string
 	LogLevel        string
 	ShutdownTimeout time.Duration
-	FetchBatch      int
-	FetchWait       time.Duration
+
+	// OTLPEndpoint is the collector's gRPC address; empty disables export.
+	// TraceSampleRatio is head sampling for traces only — metrics are not
+	// sampled, because a sampled counter is a wrong number rather than an
+	// approximate one.
+	OTLPEndpoint     string
+	TraceSampleRatio float64
+	FetchBatch       int
+	FetchWait        time.Duration
 }
 
 // Load reads and validates the environment.
@@ -35,9 +42,13 @@ func Load() (Config, error) {
 	cfg := Config{
 		Environment: env("OVERPASS_ENV", "development"),
 		Version:     env("OVERPASS_VERSION", "dev"),
-		HTTPAddr:    env("PLAN_GATEWAY_ADDR", ":8083"),
-		DatabaseURL: os.Getenv("DATABASE_URL"),
-		NATSURL:     env("NATS_URL", "nats://localhost:4222"),
+		// Same default and same variable as the other services. A service
+		// needing its own spelling of the collector address would be one more
+		// thing to get wrong in compose.
+		OTLPEndpoint: env("OTEL_EXPORTER_OTLP_ENDPOINT", "otel-collector:4317"),
+		HTTPAddr:     env("PLAN_GATEWAY_ADDR", ":8083"),
+		DatabaseURL:  os.Getenv("DATABASE_URL"),
+		NATSURL:      env("NATS_URL", "nats://localhost:4222"),
 		// Must match deploy/nats/init.sh, which creates
 		// gateway-projector-{tasking,feasibility,planning} as durable pull
 		// consumers. The prefix is configurable so a second gateway can be run
@@ -51,6 +62,10 @@ func Load() (Config, error) {
 	}
 
 	var err error
+	if cfg.TraceSampleRatio, err = ratio("TRACE_SAMPLE_RATIO", 1.0); err != nil {
+		problems = append(problems, err.Error())
+	}
+
 	if cfg.ShutdownTimeout, err = duration("SHUTDOWN_TIMEOUT", 15*time.Second); err != nil {
 		problems = append(problems, err.Error())
 	}
@@ -116,4 +131,23 @@ func duration(key string, fallback time.Duration) (time.Duration, error) {
 		return 0, fmt.Errorf("%s must be positive, got %q", key, raw)
 	}
 	return d, nil
+}
+
+// ratio parses a 0..1 knob, refusing anything outside the range rather than
+// clamping. A value of 2 means whoever set it believes something about this
+// knob that is not true, and silently treating it as 1.0 leaves that belief in
+// place.
+func ratio(key string, fallback float64) (float64, error) {
+	raw, ok := os.LookupEnv(key)
+	if !ok || raw == "" {
+		return fallback, nil
+	}
+	v, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s is not a number: %q", key, raw)
+	}
+	if v < 0 || v > 1 {
+		return 0, fmt.Errorf("%s must be between 0 and 1, got %q", key, raw)
+	}
+	return v, nil
 }

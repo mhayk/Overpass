@@ -1,0 +1,223 @@
+# Unit tests for the alert rules, run by promtool.
+#
+# Every rule gets TWO cases: firing on the series it exists to catch, and
+# SILENT on the series it must not. The negative case is the load-bearing one.
+# Without it, `> 0` and `> 72` both pass a positive-only suite, and a threshold
+# that fires on everything is indistinguishable from one that works.
+#
+# This file exists because three of these four rules could not fire at all
+# until #53 — they named metrics nothing published — which is precisely the
+# failure the DeadLetterQueueNotEmpty comment in alerts.yml describes and
+# thought it had finished fixing. A rule nobody has watched fail is not known
+# to work, and CONTRIBUTING.md asks for observed failures rather than reasoned
+# ones.
+#
+# Run with `make alerts-test`.
+
+# ../rules, not this directory, and that path is the whole reason this file
+# lives here rather than beside the rules it tests.
+#
+# prometheus.yml loads `rule_files: /etc/prometheus/rules/*.yml`. A test file
+# in that directory is matched by the glob, is not a rule file, and Prometheus
+# REFUSES TO START on it:
+#
+#   field rule_files not found in type rulefmt.RuleGroups
+#
+# The container went unhealthy and every dependent service failed to start
+# behind it. Caught by the cold-start gate, which is exactly what that gate is
+# for — the file was valid, promtool was happy with it, and it still took the
+# stack down.
+rule_files:
+  - ../rules/alerts.yml
+
+evaluation_interval: 30s
+
+tests:
+  # ---------------------------------------------------------------------------
+  # DeadLetterQueueNotEmpty
+  # ---------------------------------------------------------------------------
+  # The metric name is the exporter's, not ours: prometheus-nats-exporter
+  # publishes jetstream_stream_total_messages per stream_name. The rule this
+  # replaced read `overpass_dlq_depth`, a name nothing has ever published.
+  - interval: 30s
+    name: a dead letter waiting is reported, per stream
+    input_series:
+      - series: 'jetstream_stream_total_messages{stream_name="DLQ_FEASIBILITY"}'
+        values: "1+0x10"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: DeadLetterQueueNotEmpty
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              stream_name: DLQ_FEASIBILITY
+            exp_annotations:
+              summary: "Dead letters are waiting in DLQ_FEASIBILITY"
+              description: >-
+                A consumer gave up on a message and kept the payload. This is almost always a code bug or a bad deployment, not a bad message. Inspect with `make dlq-inspect STREAM=DLQ_FEASIBILITY`, read the preserved traceparent in Grafana, fix the cause, then `make dlq-replay` — replay is safe because consumers are idempotent. Runbook: docs/runbooks/dlq-replay.md
+
+  - interval: 30s
+    name: an empty DLQ is silent, and a busy ordinary stream does not match
+    input_series:
+      - series: 'jetstream_stream_total_messages{stream_name="DLQ_FEASIBILITY"}'
+        values: "0+0x10"
+      # The regex must not catch working streams. Without this series the rule
+      # could be written without its DLQ_ prefix and still pass.
+      - series: 'jetstream_stream_total_messages{stream_name="FEASIBILITY"}'
+        values: "5000+0x10"
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: DeadLetterQueueNotEmpty
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # OutboxRelayLagging
+  # ---------------------------------------------------------------------------
+  - interval: 30s
+    name: an outbox falling behind is reported
+    input_series:
+      - series: "overpass_outbox_pending_seconds"
+        values: "45+0x10"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: OutboxRelayLagging
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "Outbox relay is falling behind"
+              description: >-
+                Events are persisted but unpublished for over 30s. Ingress is unaffected by design — that is the point of the outbox — but the rest of the pipeline is starved.
+
+  - interval: 30s
+    name: a healthy outbox is silent, and a brief spike does not page
+    input_series:
+      # Over the threshold for one minute, then recovered. `for: 2m` exists so
+      # a single slow batch is not an alert; this proves it does that.
+      - series: "overpass_outbox_pending_seconds"
+        values: "40 40 0 0 0 0 0 0 0 0 0"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: OutboxRelayLagging
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # TleAgeing — 48h, warning, nothing failing yet
+  # ---------------------------------------------------------------------------
+  - interval: 30s
+    name: an ageing element set warns, naming the satellite
+    input_series:
+      - series: 'overpass_tle_age_hours{satellite_id="SENTINEL-1A"}'
+        values: "50+0x20"
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: TleAgeing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              satellite_id: SENTINEL-1A
+            exp_annotations:
+              summary: "SENTINEL-1A's element set is ageing"
+              description: >-
+                Past 48h and heading for the 72h refusal threshold. Nothing is failing yet, and a refresh now avoids a customer-visible TLE_STALE.
+
+  - interval: 30s
+    name: a fresh element set is silent
+    input_series:
+      - series: 'overpass_tle_age_hours{satellite_id="SENTINEL-1A"}'
+        values: "12+0x20"
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: TleAgeing
+        exp_alerts: []
+
+  # ---------------------------------------------------------------------------
+  # TleStale — 72h, critical, requests are being refused
+  # ---------------------------------------------------------------------------
+  - interval: 30s
+    name: a stale element set is critical, and only the stale satellite is named
+    input_series:
+      - series: 'overpass_tle_age_hours{satellite_id="ICEYE-X2"}'
+        values: "80+0x20"
+      # A second satellite, ageing but not yet refusing. Proves the rule is per
+      # satellite rather than a max over the constellation — with a bare max()
+      # this series would be invisible and the alert would name the wrong one.
+      - series: 'overpass_tle_age_hours{satellite_id="SENTINEL-1A"}'
+        values: "50+0x20"
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: TleStale
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              satellite_id: ICEYE-X2
+            exp_annotations:
+              summary: "ICEYE-X2 is refusing requests as TLE_STALE"
+              description: >-
+                feasibility-service now refuses to compute against this element set rather than publishing a drifted access window. Requests naming this satellite fail with TLE_STALE until a refresh.
+
+  - interval: 30s
+    name: an element set between the two thresholds warns but is not critical
+    input_series:
+      - series: 'overpass_tle_age_hours{satellite_id="SENTINEL-1A"}'
+        values: "60+0x20"
+    alert_rule_test:
+      # The whole point of the split. At 60h a refresh is due and nothing is
+      # failing; a single rule cannot say both.
+      - eval_time: 6m
+        alertname: TleStale
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: TleAgeing
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              satellite_id: SENTINEL-1A
+            exp_annotations:
+              summary: "SENTINEL-1A's element set is ageing"
+              description: >-
+                Past 48h and heading for the 72h refusal threshold. Nothing is failing yet, and a refresh now avoids a customer-visible TLE_STALE.
+
+  # ---------------------------------------------------------------------------
+  # PlannerRoundsSlow — p95 over the 800ms SLO
+  # ---------------------------------------------------------------------------
+  # Histogram buckets, so this also proves the rule's histogram_quantile is
+  # reading the instrument the planner actually publishes. The bucket layout
+  # matches instruments.go's boundaries.
+  - interval: 30s
+    name: allocation p95 above the SLO is reported
+    input_series:
+      - series: 'overpass_allocation_duration_ms_bucket{le="500"}'
+        values: "0+0x20"
+      - series: 'overpass_allocation_duration_ms_bucket{le="800"}'
+        values: "0+0x20"
+      - series: 'overpass_allocation_duration_ms_bucket{le="1500"}'
+        values: "0+10x20"
+      - series: 'overpass_allocation_duration_ms_bucket{le="+Inf"}'
+        values: "0+10x20"
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: PlannerRoundsSlow
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "Planner p95 above the 800ms budget"
+              description: >-
+                Allocation is exceeding its stated SLO. The planner holds an advisory lock for the duration of a round, so a slow round blocks everything else for that satellite and bucket.
+
+  - interval: 30s
+    name: allocation comfortably inside the SLO is silent
+    input_series:
+      - series: 'overpass_allocation_duration_ms_bucket{le="500"}'
+        values: "0+10x20"
+      - series: 'overpass_allocation_duration_ms_bucket{le="800"}'
+        values: "0+10x20"
+      - series: 'overpass_allocation_duration_ms_bucket{le="1500"}'
+        values: "0+10x20"
+      - series: 'overpass_allocation_duration_ms_bucket{le="+Inf"}'
+        values: "0+10x20"
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: PlannerRoundsSlow
+        exp_alerts: []
