@@ -43,6 +43,24 @@ gates.
 | 1000 rps errors | zero | **0 / 33,302** | ✅ |
 | 100 rps p95 | < 15ms | **4.65ms** | ✅ |
 
+```
+ingress latency vs offered rate          ── p50   ┄┄ p95
+ ms
+ 10 ┤                                                        ┄┄┄┄ 9.79
+    ┤                                                   ┄┄┄┄┄
+  8 ┤                                              ┄┄┄┄┄
+    ┤                                         ┄┄┄┄┄
+  6 ┤ 5.79┄┄┄                            ┄┄┄┄┄
+    ┤        ┄┄┄┄┄┄┄┄                ┄┄┄┄
+  4 ┤              ┄┄┄┄ 4.65 ┄┄┄┄┄┄┄┄
+    ┤
+  2 ┤ ──── 2.14 ──────── 1.90 ──────────────────── 2.25
+    ┤
+  0 ┼───────────────┬─────────────────────────────┬──────────────
+      10 rps        100 rps                       1000 rps
+                         (log scale, 100× range)
+```
+
 **The curve is flat, and that is the interesting part.** M3-07 predicted it
 would show "the synchronous ingress path degrading while the async path stays
 flat". The median does not degrade at all between 10 and 1000 rps — 2.14ms,
@@ -69,6 +87,8 @@ Measured on a **cold stack with an empty queue** at 0.1 rps:
 | --- | --- |
 | Requests | 6, all resolved |
 | Median | 30.3s |
+| Min | 25.2s |
+| Max | 45.3s |
 | p95 | 42.8s |
 | p99 | **44.8s** |
 
@@ -243,6 +263,60 @@ against generated problems:
 
 5000 is the contract's candidate cap, so this is the worst case the schema
 permits rather than a convenient number.
+
+## Cold start against the five-minute budget
+
+`scripts/stack-up.sh` enforces two budgets and prints the elapsed time. From
+the most recent green run on `main` (GitHub `ubuntu-latest`, two cores — slower
+than the machine every other number here came from):
+
+| Phase | Budget | Measured | |
+| --- | --- | --- | --- |
+| Infrastructure — Postgres, NATS, Tempo, collector, Prometheus, Grafana | 300s | **112s** | ✅ |
+| Application services, from a cold image build | 900s | **190s** | ✅ |
+
+The two budgets are separate on purpose. The 300s claim is about
+infrastructure; the second pays for four image builds — three multi-stage Go
+and one `npm ci` plus a Next.js build — that the first was never about.
+
+The budget is a gate, not a note: `stack-up.sh` exits non-zero when it is
+exceeded.
+
+## What was tuned, and what was left on the table
+
+**Tuned to reach these numbers:** nothing.
+
+That is the honest answer and it is worth stating plainly, because a
+performance document usually implies a tuning campaign. There was none. No pool
+size was changed, no index added, no GOMAXPROCS set, no batch size adjusted.
+Every number above is the system as it was already configured, and the ingress
+figures cleared their targets by four to six times on the first run.
+
+The one change made during this work was to the MEASUREMENT, not the system:
+`pipeline.js` needed a configurable rate, because the sustainable rate is below
+one request per second and k6 cannot express that without a `timeUnit`.
+
+**Left on the table**, in the order that would matter:
+
+1. **Feasibility runs one worker.** The single largest number in this document
+   — 0.25 rps against ingress's 1000 — and the work is embarrassingly parallel.
+   The service is already an idempotent consumer on a durable queue, which is
+   the precondition for scaling out; nothing has been done with that.
+2. **SGP4 cost per request is unprofiled.** 3.9s across nine satellites is
+   accepted here as a measurement, not explained. ADR-0016 settled the sampling
+   policy; nobody has looked at the propagation itself.
+3. **`FETCH_WAIT` is 5s on three streams.** Up to 15s of pure waiting in the
+   end-to-end path. The cheapest available improvement and deliberately not
+   taken, because shortening it before fixing the queue would move a number
+   without changing the experience.
+4. **Load generation shares the box.** It bounded the breakpoint result at
+   1,872 rps and is the first thing to fix before any further capacity claim.
+5. **The 503 path is unobserved under load.** The overload test never reached
+   `submitTimeout`, so the refusal behaviour the bulkhead exists to provide has
+   been tested in unit tests and never in anger.
+
+Nothing in this list is scoped to M3. It is written down so the next person
+does not have to rediscover it.
 
 ## Reproducing
 
