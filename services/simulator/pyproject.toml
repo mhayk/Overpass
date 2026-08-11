@@ -27,6 +27,13 @@ dependencies = [
 [dependency-groups]
 dev = [
     "pytest>=8.3,<9",
+    # The emitted event is validated against the COMMITTED schema, not against
+    # this service's idea of it. rfc3339-validator is what turns `format:
+    # date-time` from an annotation into an assertion, matching how
+    # scripts/contracts_validate.py runs.
+    "jsonschema>=4.23,<5",
+    "referencing>=0.35,<1",
+    "rfc3339-validator>=0.1,<1",
     "pytest-cov>=6,<7",
     "mypy>=1.14,<2",
     "ruff>=0.8,<0.9",
