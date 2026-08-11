@@ -4,14 +4,25 @@ version = "0.1.0"
 description = "Acquisition execution simulator: what actually happened to a committed plan"
 requires-python = ">=3.12"
 
-# NOTHING BEYOND THE STANDARD LIBRARY, so far.
+# skyfield, and it is the second declaration of it in this repository.
 #
-# The execution model is arithmetic over numbers the committed plan already
-# carries, and it is deliberately kept that way: it makes the physics testable
-# without a broker, a database or a clock. The propagation, NATS and Postgres
-# dependencies arrive with the messaging layer, and this file should grow when
-# they do rather than in anticipation of them.
-dependencies = []
+# What it buys: SGP4 propagation of the truth element set, which is the whole
+# basis of TLE_DRIFT_MISS being computed rather than rolled (ADR-0021).
+#
+# What it costs: feasibility already depends on it, so there are now two code
+# paths in this system that call SGP4. The alternative was extracting a
+# lib/python package and touching feasibility to build this service; keeping the
+# two independently deployable was judged worth one duplicated dependency. The
+# surface here is deliberately tiny — a propagator and one scalar — and the
+# golden test pins it against both frozen fixtures so the two paths cannot
+# silently disagree.
+#
+# NATS and Postgres arrive with the messaging layer, and this file should grow
+# when they do rather than in anticipation of them.
+dependencies = [
+    "skyfield>=1.49,<2",
+    "sgp4>=2.23,<3",
+]
 
 [dependency-groups]
 dev = [
@@ -45,3 +56,10 @@ select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
 python_version = "3.12"
 strict = true
 files = ["src", "tests"]
+
+# skyfield and sgp4 ship no type information, and the same override exists in
+# services/feasibility for the same two packages. Narrow on purpose: it silences
+# the import, not this module's own types.
+[[tool.mypy.overrides]]
+module = ["skyfield.*", "sgp4.*"]
+ignore_missing_imports = true
