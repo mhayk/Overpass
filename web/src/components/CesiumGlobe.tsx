@@ -141,6 +141,32 @@ export default function CesiumGlobe({
         const Cesium = await import('cesium');
         await import('cesium/Build/Cesium/Widgets/widgets.css');
 
+        // The CSS import resolves when the stylesheet is inserted, not when
+        // its rules apply. A Viewer constructed in that gap measures unstyled
+        // sub-widgets: the fullscreen button spans the full width as a bare
+        // block, Viewer.resize sets the timeline's right offset from it, and
+        // the timeline collapses to zero width. The per-frame resize never
+        // revisits any of it, because its guard only acts when the CONTAINER
+        // changes size — so the broken layout is permanent until a remount.
+        // Probe one widgets.css rule and wait until it measurably applies.
+        await new Promise<void>((resolve) => {
+          const probe = document.createElement('div');
+          probe.className = 'cesium-viewer-fullscreenContainer';
+          probe.style.visibility = 'hidden';
+          document.body.appendChild(probe);
+          const deadline = performance.now() + 2000;
+          const check = (): void => {
+            const applied = getComputedStyle(probe).position === 'absolute';
+            if (applied || cancelled || performance.now() > deadline) {
+              probe.remove();
+              resolve();
+            } else {
+              requestAnimationFrame(check);
+            }
+          };
+          check();
+        });
+
         if (cancelled || !container.current) {
           return;
         }
