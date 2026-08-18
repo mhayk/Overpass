@@ -152,11 +152,17 @@ export default function CesiumGlobe({
           process.env.NEXT_PUBLIC_CESIUM_BASE_URL ?? '/cesium';
 
         const created = new Cesium.Viewer(container.current, {
-          // No Ion token and no imagery provider: the default Ion basemap needs
-          // an access token, and a demo that asks a reviewer for one is a demo
-          // they do not run. An ellipsoid with a grid is enough to see where a
-          // footprint falls, and it loads instantly.
-          baseLayer: false,
+          // No Ion token: the default Ion basemap needs an access token, and a
+          // demo that asks a reviewer for one is a demo they do not run. The
+          // basemap is instead Natural Earth II, the low-resolution tileset
+          // Cesium ships in its own assets — copy-cesium-assets.mjs already
+          // serves it under CESIUM_BASE_URL, so this stays fully offline.
+          baseLayer: Cesium.ImageryLayer.fromProviderAsync(
+            Cesium.TileMapServiceImageryProvider.fromUrl(
+              Cesium.buildModuleUrl('Assets/Textures/NaturalEarthII'),
+            ),
+            {},
+          ),
           baseLayerPicker: false,
           geocoder: false,
           homeButton: false,
@@ -348,7 +354,16 @@ export default function CesiumGlobe({
 
     if (!framedRef.current && viewer.entities.values.length > 0) {
       framedRef.current = true;
-      void viewer.zoomTo(viewer.entities);
+      // An explicit offset, because the default frames the bounding sphere of
+      // the footprints — kilometre-scale polygons — and parks the camera a few
+      // kilometres up, where the offline Natural Earth II basemap is a blur.
+      // Straight down (-90°) over the footprints keeps their region facing the
+      // camera; 15 000 km back shows the whole planet centred in the viewport,
+      // which is the framing a tasking view opens on. Zooming in is one scroll.
+      void viewer.zoomTo(
+        viewer.entities,
+        new Cesium.HeadingPitchRange(0, Cesium.Math.toRadians(-90), 15_000_000),
+      );
     }
   }, [acquisitions, opportunities, selectedRequestId, state]);
 
