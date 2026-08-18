@@ -470,6 +470,8 @@ services:
     build:
       context: .
       dockerfile: web/Dockerfile
+      args:
+        NEXT_PUBLIC_TASKING_API_URL: "http://localhost:${TASKING_API_PORT:-8080}"
     container_name: overpass-web
     profiles: ["app"]
     restart: unless-stopped
