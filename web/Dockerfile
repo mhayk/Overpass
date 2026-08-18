@@ -10,6 +10,10 @@
 # the host. Pointing the frontend elsewhere means rebuilding the image, which
 # is a Next.js property, not a choice made here.
 FROM node:22-alpine AS build
+# Overridable at build time for hosts where 8080 is already taken; the
+# default matches DEFAULT_TASKING_URL in src/lib/tasking.ts.
+ARG NEXT_PUBLIC_TASKING_API_URL=http://localhost:8080
+ENV NEXT_PUBLIC_TASKING_API_URL=${NEXT_PUBLIC_TASKING_API_URL}
 WORKDIR /app
 COPY web/package.json web/package-lock.json ./
 COPY web/scripts ./scripts
